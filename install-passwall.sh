@@ -11,7 +11,7 @@ hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
 check_url() { curl -sL -o /dev/null -w "%{http_code}" "$1" --max-time 8 2>/dev/null; }
 
 #==============================================
-# 0. 管道模式检测 + 代理配置
+# 0. 管道模式检测
 #==============================================
 if [ ! -t 0 ] && [ -z "$0" -o "$0" = "sh" -o "$0" = "-sh" ]; then
   echo "检测到管道模式执行，正在保存脚本..."
@@ -23,7 +23,20 @@ if [ ! -t 0 ] && [ -z "$0" -o "$0" = "sh" -o "$0" = "-sh" ]; then
   exit 0
 fi
 
-MY_PROXY="http://mp:mpproxy@cc.828789.xyz:20206"
+echo ""
+echo "============================================"
+echo " PO-installer - PassWall 一键安装"
+echo "============================================"
+echo ""
+if [ -z "$HTTP_PROXY" ]; then
+  echo -n "需要代理？输入地址 (http://user:pass@host:port) 或直接回车跳过: "
+  read -r PROXY_INPUT
+  if [ -n "$PROXY_INPUT" ]; then
+    export HTTP_PROXY="$PROXY_INPUT"
+    echo "  ✓ 已设置代理"
+  fi
+fi
+echo ""
 
 hdr "系统检测"
 
@@ -339,8 +352,7 @@ if [ "$PKG_MGR" = "opkg" ]; then
       curl -fsSL -o /tmp/luci-app-openclash.ipk "$OC_IPK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
       curl -fsSL -o /tmp/luci-app-openclash.ipk -x "$HTTP_PROXY" "$OC_IPK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
       curl -fsSL -o /tmp/luci-app-openclash.ipk "https://gh-proxy.com/$OC_IPK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
-      curl -fsSL -o /tmp/luci-app-openclash.ipk "https://ghfast.top/$OC_IPK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
-      curl -fsSL -o /tmp/luci-app-openclash.ipk -x "$MY_PROXY" "$OC_IPK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
+      curl -fsSL -o /tmp/luci-app-openclash.ipk "https://ghfast.top/$OC_IPK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
 
       if [ "$OC_DOWNLOAD_OK" = "1" ]; then
         opkg install /tmp/luci-app-openclash.ipk --force-overwrite 2>/dev/null && ok "OpenClash 安装成功" || err "OpenClash IPK 安装失败"
@@ -393,8 +405,7 @@ else
       curl -fsSL -o /tmp/luci-app-openclash.apk "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
       curl -fsSL -o /tmp/luci-app-openclash.apk -x "$HTTP_PROXY" "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
       curl -fsSL -o /tmp/luci-app-openclash.apk "https://gh-proxy.com/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
-      curl -fsSL -o /tmp/luci-app-openclash.apk "https://ghfast.top/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
-      curl -fsSL -o /tmp/luci-app-openclash.apk -x "$MY_PROXY" "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
+      curl -fsSL -o /tmp/luci-app-openclash.apk "https://ghfast.top/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
       
       if [ "$OC_DOWNLOAD_OK" = "1" ]; then
         apk add /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 安装成功" || err "OpenClash APK 安装失败"
