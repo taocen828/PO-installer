@@ -238,7 +238,7 @@ else
 fi
 
 #==============================================
-# 4. 配置源
+# 4. 配置源（始终添加 PassWall 源，系统源不可用时加回退源）
 #==============================================
 hdr "软件源配置"
 
@@ -253,51 +253,64 @@ fi
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
 else
-  err "系统源不可用，配置替代源..."
+  err "系统源不可用，配置回退源..."
+fi
 
-  if [ "$PKG_MGR" = "opkg" ]; then
-    cp /etc/opkg/customfeeds.conf /etc/opkg/customfeeds.conf.bak 2>/dev/null
-    cp /etc/opkg/distfeeds.conf /etc/opkg/distfeeds.conf.bak 2>/dev/null
+if [ "$PKG_MGR" = "opkg" ]; then
+  # 系统源不可用时注释原源，加回退源
+  if [ "$SYS_SOURCE_OK" != "1" ]; then
     sed -i 's/^[^#]/#&/' /etc/opkg/distfeeds.conf 2>/dev/null
-
-    if [ "$SF_OK" = "1" ]; then
-      wget -q --no-check-certificate -O /tmp/ipk.pub \
-        https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
-      opkg-key add /tmp/ipk.pub 2>/dev/null || true
-      echo "src/gz passwall_luci $SF_BASE/passwall_luci" >> /etc/opkg/customfeeds.conf
-      echo "src/gz passwall_packages $SF_BASE/passwall_packages" >> /etc/opkg/customfeeds.conf
-      echo "src/gz passwall2 $SF_BASE/passwall2" >> /etc/opkg/customfeeds.conf
-    fi
     if [ "$OW_OK" = "1" ]; then
       for feed in base packages luci; do
         echo "src/gz openwrt_$feed $OW_USE/$feed" >> /etc/opkg/customfeeds.conf
       done
     fi
-    opkg update || { err "opkg update 失败"; exit 1; }
-  else
-    cp /etc/apk/repositories.d/customfeeds.list /etc/apk/repositories.d/customfeeds.list.bak 2>/dev/null
-    rm -f /etc/apk/repositories.d/customfeeds.list
-
-    if [ "$SF_OK" = "1" ]; then
-          for feed in passwall_luci passwall_packages passwall2; do
-            curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
-              "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
-            if [ -s "/tmp/$feed.adb" ]; then
-              echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
-            else
-              echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-            fi
-          done
-        fi
-    if [ "$OW_OK" = "1" ]; then
-      for feed in base packages luci; do
-        echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-      done
-    fi
-    apk update || { err "apk update 失败"; exit 1; }
   fi
-  ok "替代源配置完成"
+
+  # 始终添加 PassWall 源
+  if [ "$SF_OK" = "1" ]; then
+    wget -q --no-check-certificate -O /tmp/ipk.pub \
+      https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
+    opkg-key add /tmp/ipk.pub 2>/dev/null || true
+    echo "src/gz passwall_luci $SF_BASE/passwall_luci" >> /etc/opkg/customfeeds.conf
+    echo "src/gz passwall_packages $SF_BASE/passwall_packages" >> /etc/opkg/customfeeds.conf
+    echo "src/gz passwall2 $SF_BASE/passwall2" >> /etc/opkg/customfeeds.conf
+    ok "已添加 PassWall 源"
+  fi
+
+  opkg update || { err "opkg update 失败"; exit 1; }
+
+else
+  # APK 模式
+  cp /etc/apk/repositories.d/customfeeds.list /etc/apk/repositories.d/customfeeds.list.bak 2>/dev/null
+  rm -f /etc/apk/repositories.d/customfeeds.list
+
+  # 系统源不可用时加回退源
+  if [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ]; then
+    for feed in base packages luci; do
+      echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+    done
+  fi
+
+  # 始终添加 PassWall 源（curl 下载到本地，避免 SourceForge 301 重定向）
+  if [ "$SF_OK" = "1" ]; then
+    for feed in passwall_luci passwall_packages passwall2; do
+      curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
+        "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
+      if [ -s "/tmp/$feed.adb" ]; then
+        echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
+        ok "$feed 源已加载 ($(wc -c < /tmp/$feed.adb) 字节)"
+      else
+        echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+        err "$feed 源回退到远程"
+      fi
+    done
+  fi
+
+  apk update || { err "apk update 失败"; exit 1; }
 fi
+
+ok "源配置完成"
 
 #==============================================
 # 5. 安装主程序 + 依赖（含 Xray 内核）
