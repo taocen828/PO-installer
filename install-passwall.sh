@@ -313,8 +313,8 @@ else
       done
     fi
 
-  apk update || { err "apk update 失败"; exit 1; }
-fi
+  apk update 2>/dev/null || err "apk update 部分源不可用，继续安装..."
+  fi
 
 ok "源配置完成"
 
