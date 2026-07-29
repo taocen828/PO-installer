@@ -293,19 +293,25 @@ else
   fi
 
   # 追加 PassWall 源（curl 下载到本地，避免 SourceForge 301 重定向）
-  if [ "$SF_OK" = "1" ]; then
-    for feed in passwall_luci passwall_packages passwall2; do
-      curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
-        "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
-      if [ -s "/tmp/$feed.adb" ]; then
-        echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
-        ok "$feed 源已加载 ($(wc -c < /tmp/$feed.adb) 字节)"
-      else
-        echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-        err "$feed 源回退到远程"
-      fi
-    done
-  fi
+    if [ "$SF_OK" = "1" ]; then
+      for feed in passwall_luci passwall_packages passwall2; do
+        rm -f "/tmp/$feed.adb"
+        # 尝试多个 SourceForge URL
+        for sf_url in \
+          "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" \
+          "https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb"; do
+          curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" "$sf_url" 2>/dev/null
+          [ -s "/tmp/$feed.adb" ] && break
+        done
+        if [ -s "/tmp/$feed.adb" ]; then
+          echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
+          ok "$feed 源已加载 ($(wc -c < /tmp/$feed.adb) 字节)"
+        else
+          echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+          err "$feed 源回退到远程"
+        fi
+      done
+    fi
 
   apk update || { err "apk update 失败"; exit 1; }
 fi
