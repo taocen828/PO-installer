@@ -442,10 +442,10 @@ else
       curl -fsSL -o /tmp/luci-app-openclash.apk "https://ghfast.top/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
       
       if [ "$OC_DOWNLOAD_OK" = "1" ]; then
-        apk add --allow-untrusted /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 安装成功" || {
-          err "OpenClash APK 安装失败，尝试跳过签名检查..."
-          apk add --allow-untrusted --no-deps /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 强制安装成功" || err "OpenClash 安装失败"
-        }
+              apk add --allow-untrusted /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 安装成功" || {
+                err "OpenClash 安装失败（依赖缺失，尝试强制安装...）"
+                apk add --allow-untrusted --force-broken-world /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 强制安装成功" || err "OpenClash 安装失败"
+              }
       else
         err "OpenClash 下载失败（直连和代理均不可用）"
         info "提示: 如需使用代理，请设置环境变量:"
