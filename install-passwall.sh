@@ -385,14 +385,25 @@ if [ "$PKG_MGR" = "opkg" ]; then
 else
   # APK 模式
   if [ "$INSTALL_PW" = "1" ]; then
-    info "安装 PassWall..."
-    apk add luci-app-passwall luci-i18n-passwall-zh-cn 2>/dev/null && ok "PassWall 安装成功" || err "PassWall 安装失败"
+    if apk list --installed 2>/dev/null | grep -q "luci-app-passwall"; then
+      ok "PassWall 已安装，跳过"
+    else
+      info "安装 PassWall (含 Xray 内核)..."
+      apk add luci-app-passwall luci-i18n-passwall-zh-cn xray-core 2>/dev/null && ok "PassWall + Xray 安装成功" || err "PassWall 安装失败"
+    fi
   fi
   if [ "$INSTALL_PW2" = "1" ]; then
-    info "安装 PassWall2..."
-    apk add luci-app-passwall2 luci-i18n-passwall2-zh-cn 2>/dev/null && ok "PassWall2 安装成功" || err "PassWall2 安装失败"
+    if apk list --installed 2>/dev/null | grep -q "luci-app-passwall2"; then
+      ok "PassWall2 已安装，跳过"
+    else
+      info "安装 PassWall2 (含 Xray 内核)..."
+      apk add luci-app-passwall2 luci-i18n-passwall2-zh-cn xray-core 2>/dev/null && ok "PassWall2 + Xray 安装成功" || err "PassWall2 安装失败"
+    fi
   fi
   if [ "$INSTALL_OC" = "1" ]; then
+    if apk list --installed 2>/dev/null | grep -q "luci-app-openclash"; then
+      ok "OpenClash 已安装，跳过"
+    else
     info "安装 OpenClash..."
     OC_APK_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.apk' | head -1)
     OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name":[^,]+' | cut -d'"' -f4)
@@ -408,7 +419,10 @@ else
       curl -fsSL -o /tmp/luci-app-openclash.apk "https://ghfast.top/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
       
       if [ "$OC_DOWNLOAD_OK" = "1" ]; then
-        apk add /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 安装成功" || err "OpenClash APK 安装失败"
+        apk add --allow-untrusted /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 安装成功" || {
+          err "OpenClash APK 安装失败，尝试跳过签名检查..."
+          apk add --allow-untrusted --no-deps /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 强制安装成功" || err "OpenClash 安装失败"
+        }
       else
         err "OpenClash 下载失败（直连和代理均不可用）"
         info "提示: 如需使用代理，请设置环境变量:"
@@ -435,6 +449,7 @@ else
     else
       err "无法获取 OpenClash 下载地址"
     fi
+  fi
   fi
 
   # 安装后清理
