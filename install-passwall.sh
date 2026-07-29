@@ -279,12 +279,16 @@ else
     rm -f /etc/apk/repositories.d/customfeeds.list
 
     if [ "$SF_OK" = "1" ]; then
-      wget -q --no-check-certificate -O /etc/apk/keys/openwrt-passwall-build.pem \
-        https://master.dl.sourceforge.net/project/openwrt-passwall-build/apk.pub 2>/dev/null || true
-      for feed in passwall_luci passwall_packages passwall2; do
-        echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-      done
-    fi
+          for feed in passwall_luci passwall_packages passwall2; do
+            curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
+              "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
+            if [ -s "/tmp/$feed.adb" ]; then
+              echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
+            else
+              echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+            fi
+          done
+        fi
     if [ "$OW_OK" = "1" ]; then
       for feed in base packages luci; do
         echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
