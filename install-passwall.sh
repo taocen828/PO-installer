@@ -282,17 +282,17 @@ if [ "$PKG_MGR" = "opkg" ]; then
 
 else
   # APK 模式
-  cp /etc/apk/repositories.d/customfeeds.list /etc/apk/repositories.d/customfeeds.list.bak 2>/dev/null
-  rm -f /etc/apk/repositories.d/customfeeds.list
-
-  # 系统源不可用时加回退源
-  if [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ]; then
-    for feed in base packages luci; do
-      echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-    done
+  # 如果系统源文件不存在，配置回退源
+  if [ "$SYS_SOURCE_OK" != "1" ] || [ ! -f /etc/apk/repositories.d/distfeeds.list ]; then
+    if [ "$OW_OK" = "1" ]; then
+      for feed in base packages luci; do
+        echo "$OW_USE/$feed/packages.adb" > /etc/apk/repositories.d/customfeeds.list
+      done
+      ok "配置 OpenWrt 回退源"
+    fi
   fi
 
-  # 始终添加 PassWall 源（curl 下载到本地，避免 SourceForge 301 重定向）
+  # 追加 PassWall 源（curl 下载到本地，避免 SourceForge 301 重定向）
   if [ "$SF_OK" = "1" ]; then
     for feed in passwall_luci passwall_packages passwall2; do
       curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
@@ -401,22 +401,22 @@ if [ "$PKG_MGR" = "opkg" ]; then
   fi
 else
   # APK 模式
-  if [ "$INSTALL_PW" = "1" ]; then
-    if apk list --installed 2>/dev/null | grep -q "luci-app-passwall"; then
-      ok "PassWall 已安装，跳过"
-    else
-      info "安装 PassWall (含 Xray 内核)..."
-      apk add luci-app-passwall luci-i18n-passwall-zh-cn xray-core 2>/dev/null && ok "PassWall + Xray 安装成功" || err "PassWall 安装失败"
+    if [ "$INSTALL_PW" = "1" ]; then
+      if apk info luci-app-passwall 2>/dev/null | grep -q "description"; then
+        ok "PassWall 已安装，跳过"
+      else
+        info "安装 PassWall (含 Xray 内核)..."
+        apk add --allow-untrusted luci-app-passwall luci-i18n-passwall-zh-cn xray-core 2>/dev/null && ok "PassWall + Xray 安装成功" || err "PassWall 安装失败"
+      fi
     fi
-  fi
-  if [ "$INSTALL_PW2" = "1" ]; then
-    if apk list --installed 2>/dev/null | grep -q "luci-app-passwall2"; then
-      ok "PassWall2 已安装，跳过"
-    else
-      info "安装 PassWall2 (含 Xray 内核)..."
-      apk add luci-app-passwall2 luci-i18n-passwall2-zh-cn xray-core 2>/dev/null && ok "PassWall2 + Xray 安装成功" || err "PassWall2 安装失败"
+    if [ "$INSTALL_PW2" = "1" ]; then
+      if apk info luci-app-passwall2 2>/dev/null | grep -q "description"; then
+        ok "PassWall2 已安装，跳过"
+      else
+        info "安装 PassWall2 (含 Xray 内核)..."
+        apk add --allow-untrusted luci-app-passwall2 luci-i18n-passwall2-zh-cn xray-core 2>/dev/null && ok "PassWall2 + Xray 安装成功" || err "PassWall2 安装失败"
+      fi
     fi
-  fi
   if [ "$INSTALL_OC" = "1" ]; then
     if apk list --installed 2>/dev/null | grep -q "luci-app-openclash"; then
       ok "OpenClash 已安装，跳过"
