@@ -390,24 +390,11 @@ else
       # 尝试多个下载方式：直连 → GitHub 代理 → 用户自定义代理
       OC_DOWNLOAD_OK=0
       
-      # 方式1: 直连（curl -L 跟随重定向）
-      curl -fsSL -o /tmp/luci-app-openclash.apk "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
-      
-      # 方式2: GitHub 代理镜像
-      if [ "$OC_DOWNLOAD_OK" != "1" ]; then
-        for gh_proxy in "https://gh-proxy.com" "https://ghfast.top"; do
-          info "尝试 $gh_proxy ..."
-          curl -fsSL -o /tmp/luci-app-openclash.apk "$gh_proxy/$OC_APK_URL" --max-time 60 2>/dev/null && {
-            OC_DOWNLOAD_OK=1; break
-          }
-        done
-      fi
-      
-      # 方式3: 用户自定义代理
-      if [ "$OC_DOWNLOAD_OK" != "1" ] && [ -n "$HTTP_PROXY" ]; then
-        info "尝试用户自定义代理..."
-        curl -fsSL -o /tmp/luci-app-openclash.apk -x "$HTTP_PROXY" "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
-      fi
+      curl -fsSL -o /tmp/luci-app-openclash.apk "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
+      curl -fsSL -o /tmp/luci-app-openclash.apk -x "$HTTP_PROXY" "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
+      curl -fsSL -o /tmp/luci-app-openclash.apk "https://gh-proxy.com/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
+      curl -fsSL -o /tmp/luci-app-openclash.apk "https://ghfast.top/$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1 || \
+      curl -fsSL -o /tmp/luci-app-openclash.apk -x "$MY_PROXY" "$OC_APK_URL" --max-time 60 2>/dev/null && OC_DOWNLOAD_OK=1
       
       if [ "$OC_DOWNLOAD_OK" = "1" ]; then
         apk add /tmp/luci-app-openclash.apk 2>/dev/null && ok "OpenClash 安装成功" || err "OpenClash APK 安装失败"
