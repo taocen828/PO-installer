@@ -10,9 +10,7 @@ err()  { echo -e "${RED}[✗]${NC} $1"; }
 hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
 check_url() { curl -sL -o /dev/null -w "%{http_code}" "$1" --max-time 8 2>/dev/null; }
 
-#==============================================
-# 0. 管道模式检测
-#==============================================
+# 管道模式
 if [ ! -t 0 ] && [ -z "$0" -o "$0" = "sh" -o "$0" = "-sh" ]; then
   echo "检测到管道模式执行，正在保存脚本..."
   cat > /tmp/install-passwall.sh
@@ -38,7 +36,6 @@ echo ""
 # 1. 系统检测
 #==============================================
 hdr "系统检测"
-
 PKG_MGR=""
 if command -v apk >/dev/null 2>&1; then
   PKG_MGR="apk"; ok "包管理器: APK (OpenWrt 25.12+)"
@@ -80,7 +77,6 @@ ok "源版本: $PW_VER"
 # 2. 源连通性检测
 #==============================================
 hdr "源连通性检测"
-
 SF_OK=0; OW_OK=0; OW_USE=""
 [ "$PKG_MGR" = "opkg" ] && SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$PW_VER/$SYS_ARCH" || SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
 SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
@@ -88,12 +84,7 @@ SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
 [ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓" || err "PassWall 源不可用"
 
 if [ "$PKG_MGR" = "opkg" ]; then
-  case "$PW_VER" in
-    22.03) OW_VER="22.03.7" ;;
-    23.05) OW_VER="23.05.5" ;;
-    24.10) OW_VER="24.10.0" ;;
-    *)     OW_VER="23.05.5" ;;
-  esac
+  case "$PW_VER" in 22.03) OW_VER="22.03.7" ;; 23.05) OW_VER="23.05.5" ;; 24.10) OW_VER="24.10.0" ;; *) OW_VER="23.05.5" ;; esac
   OW_BASE="https://downloads.openwrt.org/releases/$OW_VER/packages/$SYS_ARCH"
   OW_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/$OW_VER/packages/$SYS_ARCH"
   OW_OK=1
@@ -147,20 +138,17 @@ hdr "空间检测"
 REQUIRED_SPACE_MB=20
 [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 280))
 [ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
-
 OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
-
 ok "Overlay 可用: ${OVERLAY_SPACE}MB"
 info "预计需要: ${REQUIRED_SPACE_MB}MB"
-[ "$OVERLAY_SPACE" -ge "$REQUIRED_SPACE_MB" ] && ok "空间充足" || err "空间不足！可用 ${OVERLAY_SPACE}MB，需要 ${REQUIRED_SPACE_MB}MB"
+[ "$OVERLAY_SPACE" -ge "$REQUIRED_SPACE_MB" ] && ok "空间充足" || err "空间不足"
 
 #==============================================
-# 4. 配置源（注释原源，添加回退 + PassWall 源）
+# 4. 配置源
 #==============================================
 hdr "软件源配置"
-
 info "检测系统默认源..."
 SYS_SOURCE_OK=0
 if [ "$PKG_MGR" = "opkg" ]; then
@@ -172,42 +160,34 @@ fi
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
 else
-  err "系统源不可用，尝试配置回退源..."
-
+  err "系统源不可用，配置回退源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^[^#]/#&/' /etc/opkg/distfeeds.conf
     if [ "$OW_OK" = "1" ]; then
-      for feed in base packages luci; do
-        echo "src/gz openwrt_$feed $OW_USE/$feed" >> /etc/opkg/customfeeds.conf
-      done
+      for feed in base packages luci; do echo "src/gz openwrt_$feed $OW_USE/$feed" >> /etc/opkg/customfeeds.conf; done
       ok "已配置 OpenWrt 回退源"
     fi
   else
     [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^[^#]/#&/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
     if [ "$OW_OK" = "1" ]; then
       echo "# OpenWrt 回退源" > /etc/apk/repositories.d/customfeeds.list
-      for feed in base packages luci; do
-        echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-      done
+      for feed in base packages luci; do echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list; done
       ok "已配置 OpenWrt 回退源"
     fi
   fi
 fi
 
-# 添加 PassWall 源（始终添加）
+# PassWall 源
 if [ "$SF_OK" = "1" ]; then
   info "添加 PassWall 源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
     opkg-key add /tmp/ipk.pub 2>/dev/null || true
-    for feed in passwall_luci passwall_packages passwall2; do
-      echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
-    done
+    for feed in passwall_luci passwall_packages passwall2; do echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf; done
     opkg update 2>/dev/null && ok "源配置完成" || err "opkg update 失败"
   else
     for feed in passwall_luci passwall_packages passwall2; do
-      curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
-        "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
+      curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
       if [ -s "/tmp/$feed.adb" ]; then
         echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
         ok "$feed 源已加载 ($(wc -c < /tmp/$feed.adb) 字节)"
@@ -233,7 +213,6 @@ get_version() {
     apk info "$pkg" 2>/dev/null | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
   fi
 }
-
 check_installed() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
@@ -244,35 +223,17 @@ check_installed() {
   return 1
 }
 
-# 安装/升级函数：先尝试远程安装，失败则下载 .apk 本地安装
+# 静默安装
 apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
-    opkg install "$pkg" --force-overwrite --force-depends 2>/dev/null
+    opkg install "$pkg" --force-overwrite --force-depends >/dev/null 2>&1
   else
-    apk add --allow-untrusted --force-broken-world "$pkg" 2>/dev/null
-    # 如果远程安装失败，尝试从本地 .adb 解析文件名下载 .apk
-    if ! check_installed "$pkg"; then
-      local feed=""
-      case "$pkg" in
-        luci-app-passwall|luci-i18n-passwall-zh-cn|luci-app-passwall2|luci-i18n-passwall2-zh-cn) feed="passwall_luci" ;;
-        *) feed="passwall_packages" ;;
-      esac
-      local adb_path="/tmp/$feed.adb"
-      if [ -s "$adb_path" ]; then
-        local apk_name=$(gzip -dc "$adb_path" 2>/dev/null | grep -A1 "^Package: $pkg$" | grep "^Filename:" | head -1 | awk '{print $2}')
-        if [ -n "$apk_name" ]; then
-          curl -fsL --max-time 30 -o "/tmp/${pkg}.apk" \
-            "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/${apk_name}?download" 2>/dev/null
-          [ -s "/tmp/${pkg}.apk" ] && apk add --allow-untrusted --no-network "/tmp/${pkg}.apk" 2>/dev/null
-        fi
-      fi
-    fi
+    apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
   fi
-  return 0
 }
 
-# 封装：安装单个包，带版本显示
+# 安装函数
 pkginstall() {
   local pkg="$1" desc="$2"
   if check_installed "$pkg"; then
@@ -284,7 +245,7 @@ pkginstall() {
   fi
 }
 
-# 封装：升级单个包
+# 升级函数
 pkgupgrade() {
   local pkg="$1" desc="$2"
   if check_installed "$pkg"; then
@@ -300,18 +261,10 @@ pkgupgrade() {
 }
 
 # PassWall
-if [ "$INSTALL_PW" = "1" ]; then
-  pkginstall "luci-app-passwall" "PassWall"
-  pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
-  pkginstall "xray-core" "Xray 内核"
-fi
+[ "$INSTALL_PW" = "1" ] && pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" && pkginstall "xray-core" "Xray 内核"
 
 # PassWall2
-if [ "$INSTALL_PW2" = "1" ]; then
-  pkginstall "luci-app-passwall2" "PassWall2"
-  pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"
-  [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
-fi
+[ "$INSTALL_PW2" = "1" ] && pkginstall "luci-app-passwall2" "PassWall2" && pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" && [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
 
 # OpenClash
 if [ "$INSTALL_OC" = "1" ]; then
@@ -319,7 +272,6 @@ if [ "$INSTALL_OC" = "1" ]; then
   if check_installed "luci-app-openclash"; then
     VER=$(get_version "luci-app-openclash")
     ok "OpenClash 已安装 ($VER)"
-    # 检查更新
     OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 2>/dev/null)
     if [ -n "$OC_LATEST" ] && [ "$VER" != "$OC_LATEST" ]; then
       echo -n "OpenClash $OC_LATEST 可用，升级？[Y/n]: "
@@ -332,8 +284,8 @@ if [ "$INSTALL_OC" = "1" ]; then
             curl -fsSL -o /tmp/luci-app-openclash.ipk "$url" --max-time 60 2>/dev/null && break
           done
           [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ] && \
-            apk_install "/tmp/luci-app-openclash.ipk" && check_installed "luci-app-openclash" && \
-            ok "OpenClash $(get_version luci-app-openclash) ✓"
+            { [ "$PKG_MGR" = "opkg" ] && opkg install /tmp/luci-app-openclash.ipk --force-overwrite >/dev/null 2>&1 || apk add --allow-untrusted /tmp/luci-app-openclash.ipk >/dev/null 2>&1; } && \
+            check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
         fi
       ;; esac
     fi
@@ -348,12 +300,11 @@ if [ "$INSTALL_OC" = "1" ]; then
         curl -fsSL -o /tmp/luci-app-openclash.ipk "$url" --max-time 60 2>/dev/null && break
       done
       if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
-        apk_install "/tmp/luci-app-openclash.ipk"
+        [ "$PKG_MGR" = "opkg" ] && opkg install /tmp/luci-app-openclash.ipk --force-overwrite >/dev/null 2>&1 || apk add --allow-untrusted /tmp/luci-app-openclash.ipk >/dev/null 2>&1
         check_installed "luci-app-openclash" && { ok "OpenClash $(get_version luci-app-openclash) ✓"; OC_INSTALLED=1; } || err "OpenClash 安装失败"
       fi
     fi
   fi
-
   # Clash 核心
   if [ "$OC_INSTALLED" = "1" ]; then
     OC_CORE_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
@@ -381,33 +332,34 @@ for pkg in v2ray-geoip v2ray-geosite; do
 done
 
 #==============================================
-# 7. 可选组件
+# 7. 可选组件（一次性列出，用户输入序号）
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "可选组件"
+  echo "可选组件列表："
   echo ""
-  echo -n "是否安装可选组件？[Y/n]: "
-  read -r OPT_ALL
-  case "$OPT_ALL" in n|N|no|NO) info "跳过可选组件";; *)
-    for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
-      comp="${comp_desc%%:*}"
-      desc="${comp_desc##*:}"
-      if check_installed "$comp"; then
-              ok "$comp $(get_version $comp) ✓"
-              echo -n "  升级 $comp？[Y/n]: "
-              read -r UP_ANS
-              case "$UP_ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
-                pkgupgrade "$comp" "$desc"
-              ;; esac
-            else
-              printf "  %-25s %s [Y/n]: " "$comp" "$desc"
-              read -r ANS
-              case "$ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
-                pkginstall "$comp" "$desc"
-              ;; esac
-      fi
-    done
-  ;; esac
+  i=1
+  for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
+    comp="${comp_desc%%:*}"
+    desc="${comp_desc##*:}"
+    if check_installed "$comp"; then
+      echo "  $i) $desc ($(get_version $comp)) ✓"
+    else
+      echo "  $i) $desc"
+    fi
+    eval "OPT_COMP_$i=\"$comp\""
+    eval "OPT_DESC_$i=\"$desc\""
+    i=$((i + 1))
+  done
+  echo ""
+  echo "输入序号安装（多个用空格隔开，回车跳过）: "
+  echo -n "> "
+  read -r OPT_CHOICES
+  for idx in $OPT_CHOICES; do
+    eval "comp=\"\$OPT_COMP_$idx\""
+    eval "desc=\"\$OPT_DESC_$idx\""
+    [ -n "$comp" ] && pkginstall "$comp" "$desc"
+  done
 fi
 
 #==============================================
@@ -424,9 +376,9 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
       CUR_NUM=$(echo "$CURRENT_XRAY" | sed 's/-r[0-9]*$//')
       if [ "$CUR_NUM" != "$XRAY_NUM" ]; then
         info "GitHub 最新: $XRAY_LATEST"
-                apk_install "xray-core"
-                new_ver=$(get_version "xray-core")
-                [ "$CURRENT_XRAY" != "$new_ver" ] && ok "Xray: $CURRENT_XRAY → $new_ver ✓" || ok "Xray 已是最新版"
+        apk_install "xray-core"
+        new_ver=$(get_version "xray-core")
+        [ "$CURRENT_XRAY" != "$new_ver" ] && ok "Xray: $CURRENT_XRAY → $new_ver ✓" || ok "Xray 已是最新版"
       else
         ok "已是最新版"
       fi
@@ -437,7 +389,15 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
 fi
 
 #==============================================
-# 9. 结果汇总
+# 9. 刷新 LuCI
+#==============================================
+if command -v luci-reload >/dev/null 2>&1; then
+  luci-reload 2>/dev/null || true
+  ok "LuCI 已刷新"
+fi
+
+#==============================================
+# 10. 结果汇总
 #==============================================
 echo ""
 echo "============================================="
