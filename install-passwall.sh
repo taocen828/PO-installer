@@ -225,58 +225,92 @@ fi
 #==============================================
 hdr "安装主程序"
 
-check_installed() {
-  local pkg="$1"
-  if [ "$PKG_MGR" = "opkg" ]; then
-    opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
-  else
-    apk info "$pkg" 2>/dev/null | grep -q "description" && return 0
-  fi
-  return 1
-}
-
 get_version() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep "^$pkg " | awk '{print $3}'
   else
-    apk info "$pkg" 2>/dev/null | grep "^$pkg" | head -1 | awk '{print $2}'
+    apk info "$pkg" 2>/dev/null | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
   fi
 }
 
-# 安装/升级函数：先尝试安装，不管返回码，最后检查是否装上了
+check_installed() {
+  local pkg="$1"
+  if [ "$PKG_MGR" = "opkg" ]; then
+    opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
+  else
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
+  fi
+  return 1
+}
+
+# 安装/升级函数：先尝试远程安装，失败则下载 .apk 本地安装
 apk_install() {
   local pkg="$1"
-  [ "$PKG_MGR" = "opkg" ] && opkg install "$pkg" --force-overwrite --force-depends 2>/dev/null || \
-  apk add --allow-untrusted --force-broken-world "$pkg" 2>/dev/null
+  if [ "$PKG_MGR" = "opkg" ]; then
+    opkg install "$pkg" --force-overwrite --force-depends 2>/dev/null
+  else
+    apk add --allow-untrusted --force-broken-world "$pkg" 2>/dev/null
+    # 如果远程安装失败，尝试从本地 .adb 解析文件名下载 .apk
+    if ! check_installed "$pkg"; then
+      local feed=""
+      case "$pkg" in
+        luci-app-passwall|luci-i18n-passwall-zh-cn|luci-app-passwall2|luci-i18n-passwall2-zh-cn) feed="passwall_luci" ;;
+        *) feed="passwall_packages" ;;
+      esac
+      local adb_path="/tmp/$feed.adb"
+      if [ -s "$adb_path" ]; then
+        local apk_name=$(gzip -dc "$adb_path" 2>/dev/null | grep -A1 "^Package: $pkg$" | grep "^Filename:" | head -1 | awk '{print $2}')
+        if [ -n "$apk_name" ]; then
+          curl -fsL --max-time 30 -o "/tmp/${pkg}.apk" \
+            "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/${apk_name}?download" 2>/dev/null
+          [ -s "/tmp/${pkg}.apk" ] && apk add --allow-untrusted --no-network "/tmp/${pkg}.apk" 2>/dev/null
+        fi
+      fi
+    fi
+  fi
   return 0
+}
+
+# 封装：安装单个包，带版本显示
+pkginstall() {
+  local pkg="$1" desc="$2"
+  if check_installed "$pkg"; then
+    ok "$desc $(get_version $pkg) ✓"
+  else
+    info "安装 $desc..."
+    apk_install "$pkg"
+    check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+  fi
+}
+
+# 封装：升级单个包
+pkgupgrade() {
+  local pkg="$1" desc="$2"
+  if check_installed "$pkg"; then
+    local ver=$(get_version "$pkg")
+    apk_install "$pkg"
+    local nver=$(get_version "$pkg")
+    [ "$ver" != "$nver" ] && [ -n "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($ver) ✓"
+  else
+    info "安装 $desc..."
+    apk_install "$pkg"
+    check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+  fi
 }
 
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
-  for pkg in luci-app-passwall luci-i18n-passwall-zh-cn xray-core; do
-    if check_installed "$pkg"; then
-      ok "$pkg $(get_version $pkg) ✓"
-    else
-      info "安装 $pkg..."
-      apk_install "$pkg"
-      check_installed "$pkg" && ok "$pkg $(get_version $pkg) ✓" || err "$pkg 安装失败"
-    fi
-  done
+  pkginstall "luci-app-passwall" "PassWall"
+  pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
+  pkginstall "xray-core" "Xray 内核"
 fi
 
 # PassWall2
 if [ "$INSTALL_PW2" = "1" ]; then
-  for pkg in luci-app-passwall2 luci-i18n-passwall2-zh-cn xray-core; do
-    if [ "$pkg" = "xray-core" ] && [ "$INSTALL_PW" = "1" ]; then continue; fi
-    if check_installed "$pkg"; then
-      ok "$pkg $(get_version $pkg) ✓"
-    else
-      info "安装 $pkg..."
-      apk_install "$pkg"
-      check_installed "$pkg" && ok "$pkg $(get_version $pkg) ✓" || err "$pkg 安装失败"
-    fi
-  done
+  pkginstall "luci-app-passwall2" "PassWall2"
+  pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"
+  [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
 fi
 
 # OpenClash
@@ -343,11 +377,7 @@ fi
 #==============================================
 [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ] && hdr "Geo 数据库"
 for pkg in v2ray-geoip v2ray-geosite; do
-  check_installed "$pkg" && ok "$pkg $(get_version $pkg) ✓" || {
-    info "安装 $pkg..."
-    apk_install "$pkg"
-    check_installed "$pkg" && ok "$pkg $(get_version $pkg) ✓" || err "$pkg 安装失败"
-  }
+  pkgupgrade "$pkg" "$pkg"
 done
 
 #==============================================
@@ -363,20 +393,18 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
       comp="${comp_desc%%:*}"
       desc="${comp_desc##*:}"
       if check_installed "$comp"; then
-        ok "$comp $(get_version $comp) ✓"
-        echo -n "  升级 $comp？[Y/n]: "
-        read -r UP_ANS
-        case "$UP_ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
-          apk_install "$comp"
-          check_installed "$comp" && ok "$comp $(get_version $comp) ✓" || err "$comp 升级失败"
-        ;; esac
-      else
-        printf "  %-25s %s [Y/n]: " "$comp" "$desc"
-        read -r ANS
-        case "$ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
-          apk_install "$comp"
-          check_installed "$comp" && ok "$comp $(get_version $comp) ✓" || err "$comp 安装失败"
-        ;; esac
+              ok "$comp $(get_version $comp) ✓"
+              echo -n "  升级 $comp？[Y/n]: "
+              read -r UP_ANS
+              case "$UP_ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
+                pkgupgrade "$comp" "$desc"
+              ;; esac
+            else
+              printf "  %-25s %s [Y/n]: " "$comp" "$desc"
+              read -r ANS
+              case "$ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
+                pkginstall "$comp" "$desc"
+              ;; esac
       fi
     done
   ;; esac
@@ -396,9 +424,9 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
       CUR_NUM=$(echo "$CURRENT_XRAY" | sed 's/-r[0-9]*$//')
       if [ "$CUR_NUM" != "$XRAY_NUM" ]; then
         info "GitHub 最新: $XRAY_LATEST"
-        apk_install "xray-core"
-        local new_ver=$(get_version "xray-core")
-        [ "$CURRENT_XRAY" != "$new_ver" ] && ok "Xray: $CURRENT_XRAY → $new_ver ✓" || ok "Xray 已是最新版"
+                apk_install "xray-core"
+                new_ver=$(get_version "xray-core")
+                [ "$CURRENT_XRAY" != "$new_ver" ] && ok "Xray: $CURRENT_XRAY → $new_ver ✓" || ok "Xray 已是最新版"
       else
         ok "已是最新版"
       fi
