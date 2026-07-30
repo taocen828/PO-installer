@@ -36,6 +36,33 @@ echo ""
 # 1. 系统检测
 #==============================================
 hdr "系统检测"
+
+# 修复 wget 损坏（apk 内部依赖 wget 下载文件）
+WGET_FIXED=0
+if [ ! -s /usr/bin/wget ] || ! head -1 /usr/bin/wget 2>/dev/null | grep -q "^#!/"; then
+  cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
+  cat > /usr/bin/wget << 'WGETEOF'
+#!/bin/sh
+# curl wrapper for apk internal wget calls
+# Translates: wget -O <file> <url>  ->  curl -fsSL -o <file> <url>
+URL=""; OUTFILE=""; QUITE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -O) shift; OUTFILE="$1" ;;
+    -q) QUITE=1 ;;
+    -P) shift ;;
+    --no-check-certificate) ;;
+    *) URL="$1" ;;
+  esac
+  shift
+done
+[ -z "$OUTFILE" ] && OUTFILE=/dev/null
+exec curl -fsL --max-time 60 -o "$OUTFILE" "$URL"
+WGETEOF
+  chmod +x /usr/bin/wget
+  WGET_FIXED=1
+  ok "修复 wget（已损坏，替换为 curl 包装器）"
+fi
 PKG_MGR=""
 if command -v apk >/dev/null 2>&1; then
   PKG_MGR="apk"; ok "包管理器: APK (OpenWrt 25.12+)"
@@ -230,31 +257,15 @@ check_installed() {
   fi
 }
 
-# APK 模式：下载 .apk 到 /tmp 后 --no-network 安装
-# 绕过 apk 内置 wget 不跟 SourceForge 301 重定向的问题
-apk_download() {
+# 测试脚本
+apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" != "apk" ]; then
     opkg install "$pkg" --force-overwrite --force-depends >/dev/null 2>&1
     return 0
   fi
-  local ver=$(apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//")
-  if [ -z "$ver" ]; then
-    apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
-    return 0
-  fi
-  local feed="passwall_packages"
-  case "$pkg" in
-    luci-app-passwall|luci-i18n-passwall-zh-cn|luci-app-passwall2|luci-i18n-passwall2-zh-cn) feed="passwall_luci" ;;
-  esac
-  local url="https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/${pkg}-${ver}.apk?download"
-  curl -fL -# --max-time 60 -o "/tmp/${pkg}.apk" "$url" 2>/dev/null
-  if [ -s "/tmp/${pkg}.apk" ]; then
-    apk add --allow-untrusted --no-network "/tmp/${pkg}.apk" >/dev/null 2>&1
-  fi
+  apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
 }
-
-apk_install() { apk_download "$1"; }
 
 # 安装函数
 pkginstall() {
