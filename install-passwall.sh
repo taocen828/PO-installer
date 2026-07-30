@@ -156,10 +156,13 @@ case "$MAIN_CHOICE" in
 esac
 
 #==============================================
-# 3.5 空间检测（全部插件，不针对选择项）
+# 3.5 空间检测（根据选择项估算）
 #==============================================
 hdr "空间检测"
-REQUIRED_SPACE_MB=330
+REQUIRED_SPACE_MB=30
+[ "$INSTALL_PW" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
+[ "$INSTALL_PW2" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
+[ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
 OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
@@ -203,25 +206,25 @@ fi
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
     info "添加 PassWall 源..."
-  if [ "$PKG_MGR" = "opkg" ]; then
-    wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
-    opkg-key add /tmp/ipk.pub 2>/dev/null || true
-    for feed in passwall_luci passwall_packages passwall2; do
-      echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
-    done
-    opkg update 2>/dev/null && ok "源配置完成" || err "opkg update 失败"
-      else
-        for feed in passwall_luci passwall_packages passwall2; do
-          echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-        done
-        apk update 2>/dev/null && ok "源配置完成" || err "apk update 失败"
-              fi
-            fi
-          fi
+    if [ "$PKG_MGR" = "opkg" ]; then
+      wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
+      opkg-key add /tmp/ipk.pub 2>/dev/null || true
+      for feed in passwall_luci passwall_packages passwall2; do
+        echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
+      done
+      opkg update 2>/dev/null && ok "源配置完成" || err "opkg update 失败"
+    else
+      for feed in passwall_luci passwall_packages passwall2; do
+        echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+      done
+      apk update 2>/dev/null && ok "源配置完成" || err "apk update 失败"
+    fi
+  fi
+fi
 
-    #==============================================
-    # 5. 安装主程序
-    #==============================================
+#==============================================
+# 5. 安装主程序
+#==============================================
 hdr "安装主程序"
 
 get_version() {
@@ -335,13 +338,11 @@ pkgupgrade() {
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 安装"
 
-  # 1) 主程序：检测安装和更新
-  OC_VER=$(get_version "luci-app-openclash")
-  OC_REPO_VER=$(get_repo_version "luci-app-openclash")
-
+  # 1) 主程序
   if check_installed "luci-app-openclash"; then
+    OC_VER=$(get_version "luci-app-openclash")
     ok "OpenClash 主程序已安装 ($OC_VER)"
-    # 检测是否有更新
+    # 检测 GitHub 最新版本
     OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 2>/dev/null)
     OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
     if [ -n "$OC_LATEST_NUM" ] && [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
@@ -384,8 +385,8 @@ if [ "$INSTALL_OC" = "1" ]; then
     ;; esac
   fi
 
-  # 2) Clash 内核
-  if [ -f /etc/openclash/core/clash ] && [ -s /etc/openclash/core/clash ]; then
+  # 2) Clash 内核（检测 clash/clash_meta/clash_tun 三种）
+  if [ -f /etc/openclash/core/clash ] || [ -f /etc/openclash/core/clash_meta ] || [ -f /etc/openclash/core/clash_tun ]; then
     ok "Clash 内核已安装"
   else
     echo -n "  下载 Clash 运行内核？[Y/n]: "
@@ -448,10 +449,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
 fi
 
 #==============================================
-# 8. Xray 已在主程序安装时处理，无需重复
-#==============================================
-#==============================================
-# 9. 刷新 LuCI
+# 8. 刷新 LuCI
 #==============================================
 if command -v luci-reload >/dev/null 2>&1; then
   luci-reload 2>/dev/null || true
@@ -459,7 +457,7 @@ if command -v luci-reload >/dev/null 2>&1; then
 fi
 
 #==============================================
-# 10. 结果汇总
+# 9. 结果汇总
 #==============================================
 echo ""
 echo "============================================="
