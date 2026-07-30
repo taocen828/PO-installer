@@ -199,9 +199,10 @@ else
   fi
 fi
 
-# 添加 PassWall 源
-if [ "$SF_OK" = "1" ]; then
-  info "添加 PassWall 源..."
+# 添加 PassWall 源（仅安装 PassWall/PassWall2 时需要）
+if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
+  if [ "$SF_OK" = "1" ]; then
+    info "添加 PassWall 源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
     opkg-key add /tmp/ipk.pub 2>/dev/null || true
@@ -214,8 +215,9 @@ if [ "$SF_OK" = "1" ]; then
           echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
         done
         apk update 2>/dev/null && ok "源配置完成" || err "apk update 失败"
-      fi
-    fi
+              fi
+            fi
+          fi
 
     #==============================================
     # 5. 安装主程序
@@ -332,36 +334,36 @@ pkgupgrade() {
 # OpenClash
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 安装"
-  # 1) 主程序
+
+  # 1) 主程序：检测安装和更新
+  OC_VER=$(get_version "luci-app-openclash")
+  OC_REPO_VER=$(get_repo_version "luci-app-openclash")
+
   if check_installed "luci-app-openclash"; then
-    VER=$(get_version "luci-app-openclash")
-    ok "OpenClash 主程序已安装 ($VER)"
-    echo -n "  检查 OpenClash 更新？[Y/n]: "
-    read -r OC_UP
-    case "$OC_UP" in n|N|no|NO) ;; *)
-      OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 2>/dev/null)
-      OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
-      if [ -n "$OC_LATEST_NUM" ] && [ "$VER" != "$OC_LATEST_NUM" ]; then
-        info "OpenClash $OC_LATEST 可用"
-        echo -n "  升级 OpenClash？[Y/n]: "
-        read -r OC_DO
-        case "$OC_DO" in n|N|no|NO) info "跳过" ;; *)
-          OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
-          if [ -n "$OC_URL" ]; then
-            info "下载 OpenClash $OC_LATEST..."
-            for url in "$OC_URL" "https://gh-proxy.com/$OC_URL" "https://ghfast.top/$OC_URL"; do
-              curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
-            done
-            if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
-              [ "$PKG_MGR" = "opkg" ] && opkg install /tmp/luci-app-openclash.ipk --force-overwrite >/dev/null 2>&1 || apk add --allow-untrusted /tmp/luci-app-openclash.ipk >/dev/null 2>&1
-              check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
-            fi
+    ok "OpenClash 主程序已安装 ($OC_VER)"
+    # 检测是否有更新
+    OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 2>/dev/null)
+    OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
+    if [ -n "$OC_LATEST_NUM" ] && [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
+      info "OpenClash $OC_LATEST 可用"
+      echo -n "  升级 OpenClash？[Y/n]: "
+      read -r OC_DO
+      case "$OC_DO" in n|N|no|NO) info "跳过" ;; *)
+        OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+        if [ -n "$OC_URL" ]; then
+          info "下载 OpenClash $OC_LATEST..."
+          for url in "$OC_URL" "https://gh-proxy.com/$OC_URL" "https://ghfast.top/$OC_URL"; do
+            curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
+          done
+          if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
+            [ "$PKG_MGR" = "opkg" ] && opkg install /tmp/luci-app-openclash.ipk --force-overwrite >/dev/null 2>&1 || apk add --allow-untrusted /tmp/luci-app-openclash.ipk >/dev/null 2>&1
+            check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
           fi
-        ;; esac
-      else
-        ok "已是最新版"
-      fi
-    ;; esac
+        fi
+      ;; esac
+    else
+      ok "OpenClash 已是最新版"
+    fi
   else
     echo -n "  安装 OpenClash 主程序？[Y/n]: "
     read -r OC_INST
@@ -382,29 +384,27 @@ if [ "$INSTALL_OC" = "1" ]; then
     ;; esac
   fi
 
-  # 2) Clash 内核（独立询问）
-  if check_installed "luci-app-openclash"; then
-    if [ -f /etc/openclash/core/clash ] && [ -s /etc/openclash/core/clash ]; then
-      ok "Clash 内核已安装，跳过"
-    else
-      echo -n "  下载 Clash 运行内核？[Y/n]: "
-      read -r CORE_ANS
-      case "$CORE_ANS" in n|N|no|NO) info "跳过 Clash 内核" ;; *)
-        info "下载 Clash 内核..."
-        OC_CORE_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
-        if [ -n "$OC_CORE_URL" ]; then
-          for url in "$OC_CORE_URL" "https://gh-proxy.com/$OC_CORE_URL" "https://ghfast.top/$OC_CORE_URL"; do
-            curl -fL -# --max-time 120 -o /tmp/clash-core.tar.gz "$url" 2>/dev/null && break
-          done
-          if [ -f /tmp/clash-core.tar.gz ] && [ -s /tmp/clash-core.tar.gz ]; then
-            cd /tmp && tar xzf clash-core.tar.gz 2>/dev/null
-            mkdir -p /etc/openclash/core
-            cp /tmp/clash* /etc/openclash/core/clash 2>/dev/null
-            chmod +x /etc/openclash/core/clash 2>/dev/null && ok "Clash 内核已安装" || err "Clash 内核安装失败"
-          fi
+  # 2) Clash 内核
+  if [ -f /etc/openclash/core/clash ] && [ -s /etc/openclash/core/clash ]; then
+    ok "Clash 内核已安装"
+  else
+    echo -n "  下载 Clash 运行内核？[Y/n]: "
+    read -r CORE_ANS
+    case "$CORE_ANS" in n|N|no|NO) info "跳过 Clash 内核" ;; *)
+      info "下载 Clash 内核..."
+      OC_CORE_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
+      if [ -n "$OC_CORE_URL" ]; then
+        for url in "$OC_CORE_URL" "https://gh-proxy.com/$OC_CORE_URL" "https://ghfast.top/$OC_CORE_URL"; do
+          curl -fL -# --max-time 120 -o /tmp/clash-core.tar.gz "$url" 2>/dev/null && break
+        done
+        if [ -f /tmp/clash-core.tar.gz ] && [ -s /tmp/clash-core.tar.gz ]; then
+          cd /tmp && tar xzf clash-core.tar.gz 2>/dev/null
+          mkdir -p /etc/openclash/core
+          cp /tmp/clash* /etc/openclash/core/clash 2>/dev/null
+          chmod +x /etc/openclash/core/clash 2>/dev/null && ok "Clash 内核已安装" || err "Clash 内核安装失败"
         fi
-      ;; esac
-    fi
+      fi
+    ;; esac
   fi
 fi
 
