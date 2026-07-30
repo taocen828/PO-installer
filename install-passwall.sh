@@ -240,12 +240,9 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # 必须有真实文件才算安装
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
-    local real_files=$(apk info -L "$pkg" 2>/dev/null | grep -v "^contains:" | grep -v "^$" | grep -v "^lib/" | wc -l)
-    [ "$real_files" -gt 0 ] && return 0
-    return 1
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
   fi
+  return 1
 }
 
 # 获取源中的最新版本
