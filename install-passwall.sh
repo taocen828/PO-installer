@@ -222,18 +222,37 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
+    # apk info 有数据 + 文件数 > 0 才算真正安装
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && [ "$(apk info -L "$pkg" 2>/dev/null | wc -l)" -gt 0 ] && return 0
   fi
   return 1
 }
 
-# 静默安装
+# 静默安装（APK 模式：先尝试远程，失败则下载 .apk 本地安装）
 apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg install "$pkg" --force-overwrite --force-depends >/dev/null 2>&1
-  else
-    apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
+    return 0
+  fi
+  # APK 模式
+  apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
+  # 检查是否真的装了文件（apk info -L 为空说明没下到 .apk）
+  local files=$(apk info -L "$pkg" 2>/dev/null | wc -l)
+  if [ "$files" -gt 0 ]; then
+    return 0
+  fi
+  # 没装到文件，从 .adb 中解析版本号，下载 .apk 本地安装
+  local ver=$(apk list "$pkg" 2>/dev/null | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//")
+  if [ -z "$ver" ]; then return 0; fi
+  local feed="passwall_packages"
+  case "$pkg" in
+    luci-app-passwall|luci-i18n-passwall-zh-cn|luci-app-passwall2|luci-i18n-passwall2-zh-cn) feed="passwall_luci" ;;
+  esac
+  local url="https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/${pkg}-${ver}.apk?download"
+  curl -fL -# --max-time 60 -o "/tmp/${pkg}.apk" "$url" 2>/dev/null
+  if [ -s "/tmp/${pkg}.apk" ]; then
+    apk add --allow-untrusted --no-network "/tmp/${pkg}.apk" >/dev/null 2>&1
   fi
 }
 
