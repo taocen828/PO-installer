@@ -448,37 +448,8 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
 fi
 
 #==============================================
-# 8. Xray 内核升级（从 PassWall 源安装最新版）
+# 8. Xray 已在主程序安装时处理，无需重复
 #==============================================
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
-  hdr "Xray 内核"
-  current_xray=$(get_version "xray-core")
-  repo_xray=$(get_repo_version "xray-core")
-  if check_installed "xray-core"; then
-    info "当前 Xray: $current_xray"
-    if [ -n "$repo_xray" ] && [ "$current_xray" != "$repo_xray" ]; then
-      info "源中有新版本: $repo_xray"
-      echo -n "  更新 Xray？[Y/n]: "
-      read -r XRAY_ANS
-      case "$XRAY_ANS" in n|N|no|NO) info "跳过" ;; *)
-        apk_install "xray-core"
-        nver=$(get_version "xray-core")
-        [ "$current_xray" != "$nver" ] && ok "Xray: $current_xray → $nver ✓" || ok "Xray 已是最新版"
-      ;; esac
-    else
-      ok "Xray 已是最新版 ($current_xray)"
-    fi
-  else
-    echo -n "  安装 Xray 内核？[Y/n]: "
-    read -r XRAY_INST
-    case "$XRAY_INST" in n|N|no|NO) info "跳过 Xray" ;; *)
-      info "安装 Xray 内核..."
-      apk_install "xray-core"
-      check_installed "xray-core" && ok "Xray $(get_version xray-core) ✓" || err "Xray 安装失败"
-    ;; esac
-  fi
-fi
-
 #==============================================
 # 9. 刷新 LuCI
 #==============================================
