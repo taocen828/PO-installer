@@ -21,7 +21,7 @@ fi
 
 echo ""
 echo "============================================"
-echo " PO-installer - PassWall 一键安装"
+echo " PO-installer - PassWall/OpenClash 一键安装"
 echo "============================================"
 echo ""
 
@@ -465,3 +465,12 @@ echo "============================================="
 echo ""
 echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
 echo ""
+
+# 自动删除脚本
+THIS_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
+case "$THIS_SCRIPT" in
+  /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
+    rm -f "$THIS_SCRIPT" 2>/dev/null
+    echo "本地脚本已自动删除"
+    ;;
+esac
