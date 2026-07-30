@@ -355,23 +355,31 @@ done
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "可选组件"
-  echo "是否安装以下可选组件？（输入 y/n）"
   echo ""
-  for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
-    comp="${comp_desc%%:*}"
-    desc="${comp_desc##*:}"
-    if check_installed "$comp"; then
-      ok "$comp $(get_version $comp) ✓"
-      apk_install "$comp"
-    else
-      printf "  %-25s %s [Y/n]: " "$comp" "$desc"
-      read -r ANS
-      case "$ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
-        apk_install "$comp"
-        check_installed "$comp" && ok "$comp $(get_version $comp) ✓" || err "$comp 安装失败"
-      ;; esac
-    fi
-  done
+  echo -n "是否安装可选组件？[Y/n]: "
+  read -r OPT_ALL
+  case "$OPT_ALL" in n|N|no|NO) info "跳过可选组件";; *)
+    for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
+      comp="${comp_desc%%:*}"
+      desc="${comp_desc##*:}"
+      if check_installed "$comp"; then
+        ok "$comp $(get_version $comp) ✓"
+        echo -n "  升级 $comp？[Y/n]: "
+        read -r UP_ANS
+        case "$UP_ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
+          apk_install "$comp"
+          check_installed "$comp" && ok "$comp $(get_version $comp) ✓" || err "$comp 升级失败"
+        ;; esac
+      else
+        printf "  %-25s %s [Y/n]: " "$comp" "$desc"
+        read -r ANS
+        case "$ANS" in n|N|no|NO) info "跳过 $comp" ;; *)
+          apk_install "$comp"
+          check_installed "$comp" && ok "$comp $(get_version $comp) ✓" || err "$comp 安装失败"
+        ;; esac
+      fi
+    done
+  ;; esac
 fi
 
 #==============================================
