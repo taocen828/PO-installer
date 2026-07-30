@@ -410,12 +410,14 @@ if [ "$INSTALL_OC" = "1" ]; then
 fi
 
 #==============================================
-# 6. Geo 数据库
+# 6. Geo 数据库（仅 PassWall/PassWall2 需要）
 #==============================================
-[ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ] && hdr "Geo 数据库"
-for pkg in v2ray-geoip v2ray-geosite; do
-  pkgupgrade "$pkg" "$pkg"
-done
+if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
+  hdr "Geo 数据库"
+  for pkg in v2ray-geoip v2ray-geosite; do
+    pkgupgrade "$pkg" "$pkg"
+  done
+fi
 
 #==============================================
 # 7. 可选组件（一次性列出，用户输入序号）
