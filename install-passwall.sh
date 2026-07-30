@@ -214,26 +214,17 @@ if [ "$SF_OK" = "1" ]; then
       echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
     done
     opkg update 2>/dev/null && ok "源配置完成" || err "opkg update 失败"
-  else
-    # 下载到本地（SourceForge 301 重定向，apk 内部 wget 不跟）
-    for feed in passwall_luci passwall_packages passwall2; do
-      curl -fL -# --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
-        "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
-      if [ -s "/tmp/$feed.adb" ]; then
-        echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
-        ok "$feed 源已加载 ($(wc -c < /tmp/$feed.adb) 字节)"
       else
-        echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-        err "$feed 源回退到远程"
+        for feed in passwall_luci passwall_packages passwall2; do
+          echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+        done
+        apk update 2>/dev/null && ok "源配置完成" || err "apk update 失败"
       fi
-    done
-    apk update 2>/dev/null && ok "源配置完成" || err "apk update 失败"
-  fi
-fi
+    fi
 
-#==============================================
-# 5. 安装主程序
-#==============================================
+    #==============================================
+    # 5. 安装主程序
+    #==============================================
 hdr "安装主程序"
 
 get_version() {
