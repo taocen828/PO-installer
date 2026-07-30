@@ -177,17 +177,21 @@ else
   fi
 fi
 
-# PassWall 源
+# 添加 PassWall 源
 if [ "$SF_OK" = "1" ]; then
   info "添加 PassWall 源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
     opkg-key add /tmp/ipk.pub 2>/dev/null || true
-    for feed in passwall_luci passwall_packages passwall2; do echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf; done
+    for feed in passwall_luci passwall_packages passwall2; do
+      echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
+    done
     opkg update 2>/dev/null && ok "源配置完成" || err "opkg update 失败"
   else
+    # 下载到本地（SourceForge 301 重定向，apk 内部 wget 不跟）
     for feed in passwall_luci passwall_packages passwall2; do
-      curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
+      curl -fsL --retry 3 --max-time 30 -o "/tmp/$feed.adb" \
+        "https://downloads.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH/$feed/packages.adb?download" 2>/dev/null
       if [ -s "/tmp/$feed.adb" ]; then
         echo "file:///tmp/$feed.adb" >> /etc/apk/repositories.d/customfeeds.list
         ok "$feed 源已加载 ($(wc -c < /tmp/$feed.adb) 字节)"
