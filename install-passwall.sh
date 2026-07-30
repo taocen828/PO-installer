@@ -240,12 +240,9 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # 索引 + 实际文件都存在才算安装
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
-    local first_file=$(apk info -L "$pkg" 2>/dev/null | grep -v "contains:" | grep -v "^$" | head -1)
-    [ -n "$first_file" ] && [ -f "$first_file" ] && return 0
-    return 1
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
   fi
+  return 1
 }
 
 # 测试脚本
