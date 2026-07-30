@@ -43,21 +43,18 @@ if [ ! -s /usr/bin/wget ] || ! head -1 /usr/bin/wget 2>/dev/null | grep -q "^#!/
   cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
   cat > /usr/bin/wget << 'WGETEOF'
 #!/bin/sh
-# curl wrapper for apk internal wget calls
-# Translates: wget -O <file> <url>  ->  curl -fsSL -o <file> <url>
-URL=""; OUTFILE=""; QUITE=0
+URL=""; OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -O) shift; OUTFILE="$1" ;;
-    -q) QUITE=1 ;;
-    -P) shift ;;
-    --no-check-certificate) ;;
-    *) URL="$1" ;;
+    -O) shift; OUT="$1";;
+    -q|-P|-c|-nc|-nv|-S|-s|--no-check-certificate) ;;
+    *) URL="$1";;
   esac
   shift
 done
-[ -z "$OUTFILE" ] && OUTFILE=/dev/null
-exec curl -fsL --max-time 60 -o "$OUTFILE" "$URL"
+[ -z "$URL" ] && exit 1
+[ -n "$OUT" ] && set -- -o "$OUT"
+exec curl -sL --max-time 60 "$@" "$URL"
 WGETEOF
   chmod +x /usr/bin/wget
   WGET_FIXED=1
