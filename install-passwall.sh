@@ -237,15 +237,25 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # 检查是否真装了文件（apk info -L 返回相对路径，需要加 /）
+    # 必须有真实文件才算安装
     apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
-    local first_file=$(apk info -L "$pkg" 2>/dev/null | grep -v "contains:" | grep -v "^$" | grep -v "^lib/apk/" | head -1)
-    [ -n "$first_file" ] && [ -f "/$first_file" ] && return 0
+    local real_files=$(apk info -L "$pkg" 2>/dev/null | grep -v "^contains:" | grep -v "^$" | grep -v "^lib/" | wc -l)
+    [ "$real_files" -gt 0 ] && return 0
     return 1
   fi
 }
 
-# 测试脚本
+# 获取源中的最新版本
+get_repo_version() {
+  local pkg="$1"
+  if [ "$PKG_MGR" = "opkg" ]; then
+    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | awk '{print $3}' | head -1
+  else
+    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
+  fi
+}
+
+# 包安装/升级
 apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" != "apk" ]; then
@@ -255,16 +265,49 @@ apk_install() {
   apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
 }
 
-# 安装函数
+# 智能安装：已装则检测更新，未装则安装
+pkg_install_or_upgrade() {
+  local pkg="$1" desc="$2" ask="$3"
+  if check_installed "$pkg"; then
+    local ver=$(get_version "$pkg")
+    local repo_ver=$(get_repo_version "$pkg")
+    if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+      info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)"
+      if [ "$ask" = "y" ]; then
+        echo -n "  更新 $desc？[Y/n]: "
+        read -r ANSWER
+        case "$ANSWER" in n|N|no|NO) info "跳过 $desc" ;; *)
+          apk_install "$pkg"
+          local nver=$(get_version "$pkg")
+          check_installed "$pkg" && { [ "$ver" != "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"; } || err "$desc 更新失败"
+        ;; esac
+      else
+        ok "$desc ($ver) ✓"
+      fi
+    else
+      ok "$desc ($ver) ✓"
+    fi
+  else
+    if [ "$ask" = "y" ]; then
+      echo -n "  安装 $desc？[Y/n]: "
+      read -r ANSWER
+      case "$ANSWER" in n|N|no|NO) info "跳过 $desc" ;; *)
+        info "安装 $desc..."
+        apk_install "$pkg"
+        check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+      ;; esac
+    else
+      info "安装 $desc..."
+      apk_install "$pkg"
+      check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+    fi
+  fi
+}
+
+# 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
-  if check_installed "$pkg"; then
-    ok "$desc $(get_version $pkg) ✓"
-  else
-    info "安装 $desc..."
-    apk_install "$pkg"
-    check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
-  fi
+  pkg_install_or_upgrade "$pkg" "$desc" "n"
 }
 
 # 升级函数
@@ -411,16 +454,22 @@ fi
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "Xray 内核"
+  current_xray=$(get_version "xray-core")
+  repo_xray=$(get_repo_version "xray-core")
   if check_installed "xray-core"; then
-    CURRENT_XRAY=$(get_version "xray-core")
-    info "当前 Xray: $CURRENT_XRAY"
-    echo -n "  更新 Xray 内核？[Y/n]: "
-    read -r XRAY_ANS
-    case "$XRAY_ANS" in n|N|no|NO) info "跳过 Xray" ;; *)
-      apk_install "xray-core"
-      new_ver=$(get_version "xray-core")
-      [ "$CURRENT_XRAY" != "$new_ver" ] && ok "Xray: $CURRENT_XRAY → $new_ver ✓" || ok "Xray 已是最新版 ($CURRENT_XRAY)"
-    ;; esac
+    info "当前 Xray: $current_xray"
+    if [ -n "$repo_xray" ] && [ "$current_xray" != "$repo_xray" ]; then
+      info "源中有新版本: $repo_xray"
+      echo -n "  更新 Xray？[Y/n]: "
+      read -r XRAY_ANS
+      case "$XRAY_ANS" in n|N|no|NO) info "跳过" ;; *)
+        apk_install "xray-core"
+        nver=$(get_version "xray-core")
+        [ "$current_xray" != "$nver" ] && ok "Xray: $current_xray → $nver ✓" || ok "Xray 已是最新版"
+      ;; esac
+    else
+      ok "Xray 已是最新版 ($current_xray)"
+    fi
   else
     echo -n "  安装 Xray 内核？[Y/n]: "
     read -r XRAY_INST
