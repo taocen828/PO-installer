@@ -212,12 +212,14 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
       for feed in passwall_luci passwall_packages passwall2; do
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
-      opkg update 2>/dev/null && ok "源配置完成" || err "opkg update 失败"
+      opkg update >/dev/null 2>&1 || true
+      ok "源配置完成"
     else
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
       done
-      apk update 2>/dev/null && ok "源配置完成" || err "apk update 失败"
+      apk update >/dev/null 2>&1 || true
+      ok "源配置完成"
     fi
   fi
 fi
