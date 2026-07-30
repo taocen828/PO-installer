@@ -222,29 +222,27 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # apk info 有数据 + 文件数 > 0 才算真正安装
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && [ "$(apk info -L "$pkg" 2>/dev/null | wc -l)" -gt 0 ] && return 0
+    # 索引 + 实际文件都存在才算安装
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
+    local first_file=$(apk info -L "$pkg" 2>/dev/null | grep -v "contains:" | grep -v "^$" | head -1)
+    [ -n "$first_file" ] && [ -f "$first_file" ] && return 0
+    return 1
   fi
-  return 1
 }
 
-# 静默安装（APK 模式：先尝试远程，失败则下载 .apk 本地安装）
-apk_install() {
+# APK 模式：下载 .apk 到 /tmp 后 --no-network 安装
+# 绕过 apk 内置 wget 不跟 SourceForge 301 重定向的问题
+apk_download() {
   local pkg="$1"
-  if [ "$PKG_MGR" = "opkg" ]; then
+  if [ "$PKG_MGR" != "apk" ]; then
     opkg install "$pkg" --force-overwrite --force-depends >/dev/null 2>&1
     return 0
   fi
-  # APK 模式
-  apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
-  # 检查是否真的装了文件（apk info -L 为空说明没下到 .apk）
-  local files=$(apk info -L "$pkg" 2>/dev/null | wc -l)
-  if [ "$files" -gt 0 ]; then
+  local ver=$(apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//")
+  if [ -z "$ver" ]; then
+    apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
     return 0
   fi
-  # 没装到文件，从 .adb 中解析版本号，下载 .apk 本地安装
-  local ver=$(apk list "$pkg" 2>/dev/null | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//")
-  if [ -z "$ver" ]; then return 0; fi
   local feed="passwall_packages"
   case "$pkg" in
     luci-app-passwall|luci-i18n-passwall-zh-cn|luci-app-passwall2|luci-i18n-passwall2-zh-cn) feed="passwall_luci" ;;
@@ -255,6 +253,8 @@ apk_install() {
     apk add --allow-untrusted --no-network "/tmp/${pkg}.apk" >/dev/null 2>&1
   fi
 }
+
+apk_install() { apk_download "$1"; }
 
 # 安装函数
 pkginstall() {
