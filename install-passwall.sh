@@ -156,12 +156,10 @@ case "$MAIN_CHOICE" in
 esac
 
 #==============================================
-# 3.5 空间检测
+# 3.5 空间检测（全部插件，不针对选择项）
 #==============================================
 hdr "空间检测"
-REQUIRED_SPACE_MB=20
-[ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 280))
-[ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
+REQUIRED_SPACE_MB=330
 OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
