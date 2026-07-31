@@ -428,7 +428,7 @@ fi
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "Geo 数据库"
-  for pkg in v2ray-geoip v2ray-geosite; do
+  for pkg in geoview v2ray-geoip v2ray-geosite; do
     pkgupgrade "$pkg" "$pkg"
   done
 fi
