@@ -309,7 +309,22 @@ pkg_install_or_upgrade() {
 # 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
-  pkg_install_or_upgrade "$pkg" "$desc" "n"
+  if check_installed "$pkg"; then
+    local ver=$(get_version "$pkg")
+    local repo_ver=$(get_repo_version "$pkg")
+    if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+      info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
+      apk_install "$pkg"
+      local nver=$(get_version "$pkg")
+      [ "$ver" != "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"
+    else
+      ok "$desc ($ver) ✓"
+    fi
+  else
+    info "安装 $desc..."
+    apk_install "$pkg"
+    check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+  fi
 }
 
 # 升级函数
