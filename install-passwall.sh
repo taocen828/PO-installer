@@ -261,10 +261,10 @@ get_repo_version() {
 apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" != "apk" ]; then
-    opkg install "$pkg" --force-overwrite --force-depends >/dev/null 2>&1
+    opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v "^Configuring\|^\.\.\.$" || true
     return 0
   fi
-  apk add --allow-untrusted --force-broken-world "$pkg" >/dev/null 2>&1
+  apk add --allow-untrusted --force-broken-world "$pkg" 2>&1 | grep -v "^WARNING.*opening" || true
 }
 
 # 智能安装：已装则检测更新，未装则安装
@@ -371,29 +371,37 @@ if [ "$INSTALL_OC" = "1" ]; then
             curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
           done
           if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
-            [ "$PKG_MGR" = "opkg" ] && opkg install /tmp/luci-app-openclash.ipk --force-overwrite >/dev/null 2>&1 || apk add --allow-untrusted /tmp/luci-app-openclash.ipk >/dev/null 2>&1
-            check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
-          fi
-        fi
-      ;; esac
-    else
-      ok "OpenClash 已是最新版"
-    fi
-  else
-    echo -n "  安装 OpenClash 主程序？[Y/n]: "
-    read -r OC_INST
-    case "$OC_INST" in n|N|no|NO) info "跳过 OpenClash" ;; *)
-      info "安装 OpenClash..."
-      OC_VER=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
-      OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
-      if [ -n "$OC_URL" ]; then
-        info "下载 OpenClash $OC_VER..."
-        for url in "$OC_URL" "https://gh-proxy.com/$OC_URL" "https://ghfast.top/$OC_URL"; do
-          curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
-        done
-        if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
-          [ "$PKG_MGR" = "opkg" ] && opkg install /tmp/luci-app-openclash.ipk --force-overwrite >/dev/null 2>&1 || apk add --allow-untrusted /tmp/luci-app-openclash.ipk >/dev/null 2>&1
-          check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
+                      if [ "$PKG_MGR" = "opkg" ]; then
+                        opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v "^Configuring\|^\.\.\.$" || true
+                      else
+                        apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
+                      fi
+                      check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
+                    fi
+                  fi
+                ;; esac
+              else
+                ok "OpenClash 已是最新版"
+              fi
+            else
+              echo -n "  安装 OpenClash 主程序？[Y/n]: "
+              read -r OC_INST
+              case "$OC_INST" in n|N|no|NO) info "跳过 OpenClash" ;; *)
+                info "安装 OpenClash..."
+                OC_VER=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+                OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+                if [ -n "$OC_URL" ]; then
+                  info "下载 OpenClash $OC_VER..."
+                  for url in "$OC_URL" "https://gh-proxy.com/$OC_URL" "https://ghfast.top/$OC_URL"; do
+                    curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
+                  done
+                  if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
+                    if [ "$PKG_MGR" = "opkg" ]; then
+                      opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v "^Configuring\|^\.\.\.$" || true
+                    else
+                      apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
+                    fi
+                    check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
         fi
       fi
     ;; esac
