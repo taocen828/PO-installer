@@ -472,10 +472,12 @@ get_repo_version() {
 }
 
 # 包安装/升级
+# 过滤已知无害的 opkg 噪音: Configuring 进度、remove_obsolesced_files(旧文件已删)、opkg.lock 警告
 apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" != "apk" ]; then
-    opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v "^Configuring\|^\.\.\.$" || true
+    opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | \
+      grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
     return 0
   fi
   apk add --allow-untrusted --force-broken-world "$pkg" 2>&1 | grep -v "^WARNING.*opening" || true
@@ -594,7 +596,7 @@ if [ "$INSTALL_OC" = "1" ]; then
           done
           if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
                       if [ "$PKG_MGR" = "opkg" ]; then
-                        opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v "^Configuring\|^\.\.\.$" || true
+                        opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
                       else
                         apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
                       fi
@@ -619,7 +621,7 @@ if [ "$INSTALL_OC" = "1" ]; then
                   done
                   if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
                     if [ "$PKG_MGR" = "opkg" ]; then
-                      opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v "^Configuring\|^\.\.\.$" || true
+                      opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
                     else
                       apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
                     fi
