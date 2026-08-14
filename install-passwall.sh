@@ -405,12 +405,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     if [ "$PKG_MGR" = "opkg" ]; then
       wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
       opkg-key add /tmp/ipk.pub 2>/dev/null || true
+      # 先清除旧声明（幂等，避免重复运行产生 Duplicate src declaration）
+      sed -i '/passwall/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
       opkg update >/dev/null 2>&1 || true
       ok "源配置完成 (SourceForge)"
     else
+      # 先清除旧声明（幂等）
+      sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' /etc/apk/repositories.d/customfeeds.list 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
       done
@@ -421,6 +425,8 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     info "使用国内 immortalwrt 镜像作为 PassWall 源..."
     info "说明: PassWall 包从 immortalwrt 官方源获取，kmod 依赖仍走 OpenWrt 官方源，外网不通也能装"
     if [ "$PKG_MGR" = "opkg" ]; then
+      # 先清除旧声明（幂等）
+      sed -i '/passwall/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
       { echo "src/gz passwall_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci"
         echo "src/gz passwall_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages"
       } >> /etc/opkg/customfeeds.conf
