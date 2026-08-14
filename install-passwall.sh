@@ -244,9 +244,9 @@ if [ "$SF_OK" != "1" ] && [ "$PKG_MGR" = "opkg" ]; then
 fi
 
 # OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
-# 24.10+ 官方已切换 APK，源索引文件为 packages.adb；其余为 Packages.gz
+# 索引文件类型按包管理器判断：opkg→Packages.gz（含 24.10），apk→packages.adb
 PKG_FILE="Packages.gz"
-[ "$PW_VER" = "24.10" -o "$PW_VER" = "snapshots" ] && PKG_FILE="packages.adb"
+[ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
 OW_OK=0
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   if [ "$PW_VER" = "snapshots" ]; then
