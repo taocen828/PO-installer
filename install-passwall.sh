@@ -223,7 +223,25 @@ SF_PW_VER="$PW_VER"
 [ "$PKG_MGR" = "opkg" ] && SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$SF_PW_VER/$SYS_ARCH" || SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
 SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
 [ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_BASE/passwall_luci/packages.adb"
-[ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓" || err "PassWall 源不可用"
+[ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓ (SourceForge)" || err "PassWall 源不可用（SourceForge 国外直连失败）"
+
+# 国内 PassWall 备用源：immortalwrt 官方源自带 passwall 全家桶（luci-app-passwall/xray-core/sing-box 等），
+# 且国内有完整镜像（上海交大/VSean）。外网不通时自动降级使用。
+IW_OK=0; IW_USE=""; IW_VER=""
+if [ "$SF_OK" != "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+  info "SourceForge 不通，探测国内 immortalwrt 镜像（自带 PassWall 包）..."
+  for iw in "https://mirror.sjtu.edu.cn/immortalwrt" "https://mirrors.vsean.net/immortalwrt" "https://downloads.immortalwrt.org"; do
+    [ "$(check_url $iw/releases/23.05.4/packages/$SYS_ARCH/luci/Packages.gz)" != "200" ] && continue
+    IW_USE=$iw; IW_VER="23.05.4"
+    # 确认 luci feed 有 passwall（.gz 解压后 grep 包名）
+    if curl -sL --max-time 8 "$iw/releases/$IW_VER/packages/$SYS_ARCH/luci/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | grep -q "luci-app-passwall"; then
+      IW_OK=1
+      ok "国内 PassWall 源 ✓ (immortalwrt 镜像: $IW_USE)"
+      break
+    fi
+  done
+  [ "$IW_OK" = "0" ] && err "国内 immortalwrt 镜像也不可用"
+fi
 
 # OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
 # 24.10+ 官方已切换 APK，源索引文件为 packages.adb；其余为 Packages.gz
@@ -343,9 +361,10 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
   info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
 
 # 添加 PassWall 源（仅安装 PassWall/PassWall2 时需要）
+# 降级链: SourceForge 官方 → immortalwrt 国内镜像（外网不通时）
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
-    info "添加 PassWall 源..."
+    info "添加 PassWall 源 (SourceForge)..."
     if [ "$PKG_MGR" = "opkg" ]; then
       wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
       opkg-key add /tmp/ipk.pub 2>/dev/null || true
@@ -353,14 +372,26 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
       opkg update >/dev/null 2>&1 || true
-      ok "源配置完成"
+      ok "源配置完成 (SourceForge)"
     else
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
       done
       apk update >/dev/null 2>&1 || true
-      ok "源配置完成"
+      ok "源配置完成 (SourceForge)"
     fi
+  elif [ "$IW_OK" = "1" ]; then
+    info "使用国内 immortalwrt 镜像作为 PassWall 源..."
+    info "说明: PassWall 包从 immortalwrt 官方源获取，kmod 依赖仍走 OpenWrt 官方源，外网不通也能装"
+    if [ "$PKG_MGR" = "opkg" ]; then
+      { echo "src/gz passwall_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci"
+        echo "src/gz passwall_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages"
+      } >> /etc/opkg/customfeeds.conf
+      opkg update >/dev/null 2>&1 || true
+      ok "源配置完成 (immortalwrt $IW_VER)"
+    fi
+  else
+    err "PassWall 源不可用：SourceForge 与国内镜像均无法连接，PassWall 无法安装（OpenClash 不受影响）"
   fi
 fi
 
@@ -486,7 +517,15 @@ pkgupgrade() {
 [ "$INSTALL_PW" = "1" ] && pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" && pkginstall "xray-core" "Xray 内核"
 
 # PassWall2
-[ "$INSTALL_PW2" = "1" ] && pkginstall "luci-app-passwall2" "PassWall2" && pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" && [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+# PassWall2（注意: 国内 immortalwrt 源不含 PassWall2，仅 SourceForge 有）
+if [ "$INSTALL_PW2" = "1" ]; then
+  if [ "$SF_OK" = "1" ]; then
+    pkginstall "luci-app-passwall2" "PassWall2" && pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" && [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+  else
+    info "跳过 PassWall2: 当前 PassWall 源为国内 immortalwrt 镜像，不含 PassWall2 包（PassWall 经典版不受影响）"
+    [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+  fi
+fi
 
 # OpenClash
 if [ "$INSTALL_OC" = "1" ]; then
