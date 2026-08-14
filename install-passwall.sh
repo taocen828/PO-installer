@@ -76,8 +76,8 @@ fi
 
 SYS_ARCH=""
 if [ "$PKG_MGR" = "opkg" ]; then
-  SYS_ARCH=$(opkg print-architecture 2>/dev/null | grep -oE 'mipsel_24kc|aarch64_cortex-a53|aarch64_cortex-a72|aarch64_generic|x86_64|arm_cortex-a7_neon-vfpv4|mips_24kc|arm_cortex-a9_vfpv3-d16|arm_cortex-a15_neon-vfpv4|i386_pentium4|mipsel_74kc|x86_generic' | head -1)
-  [ -z "$SYS_ARCH" ] && SYS_ARCH=$(opkg print-architecture 2>/dev/null | head -2 | tail -1 | awk '{print $2}')
+  # 通用提取：任意架构（不限于白名单），取第一个非 all/noarch/any 的架构
+  SYS_ARCH=$(opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -vE '^(all|noarch|any)$' | head -1)
 else
   SYS_ARCH=$(apk info --print-arch 2>/dev/null)
   [ -z "$SYS_ARCH" ] && SYS_ARCH=$(cat /etc/apk/arch 2>/dev/null)
@@ -102,46 +102,122 @@ echo "$PW_VER" | grep -qE "^2[5-9]|^3" && PW_VER="snapshots"
 [ "$PKG_MGR" = "apk" ] && PW_VER="snapshots"
 ok "源版本: $PW_VER"
 
-# 目标平台检测（targets 目录，kmod 源专用）
+# 架构 → 目标平台候选映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
+arch_to_targets() {
+  case "$1" in
+    aarch64_cortex-a53)   echo "armvirt/64 bcm27xx/bcm2710 bcm4908/generic mediatek/mt7622 mvebu/cortexa53 sunxi/cortexa53" ;;
+    aarch64_cortex-a72)   echo "bcm27xx/bcm2711 mvebu/cortexa72" ;;
+    aarch64_generic)      echo "octeontx/generic rockchip/armv8" ;;
+    arc_archs)            echo "archs38/generic" ;;
+    arm_arm1176jzf-s_vfp) echo "bcm27xx/bcm2708" ;;
+    arm_arm926ej-s)       echo "at91/sam9x mxs/generic" ;;
+    arm_cortex-a15_neon-vfpv4) echo "armvirt/32 ipq806x/generic" ;;
+    arm_cortex-a5_vfpv4)  echo "at91/sama5" ;;
+    arm_cortex-a7)        echo "mediatek/mt7629" ;;
+    arm_cortex-a7_neon-vfpv4) echo "bcm27xx/bcm2709 imx/cortexa7 ipq40xx/generic ipq40xx/mikrotik layerscape/armv7 mediatek/mt7623 sunxi/cortexa7" ;;
+    arm_cortex-a7_vfpv4)  echo "at91/sama7" ;;
+    arm_cortex-a8_vfpv3)  echo "omap/generic sunxi/cortexa8" ;;
+    arm_cortex-a9)        echo "bcm53xx/generic" ;;
+    arm_cortex-a9_neon)   echo "imx/cortexa9 zynq/generic" ;;
+    arm_cortex-a9_vfpv3-d16) echo "mvebu/cortexa9 tegra/generic" ;;
+    arm_fa526)            echo "gemini/generic" ;;
+    arm_mpcore)           echo "oxnas/ox820" ;;
+    arm_xscale)           echo "kirkwood/generic" ;;
+    i386_pentium-mmx)     echo "x86/geode x86/legacy" ;;
+    i386_pentium4)        echo "x86/generic" ;;
+    mips64_octeonplus)    echo "octeon/generic" ;;
+    mips_24kc)            echo "ath79/generic ath79/mikrotik ath79/nand ath79/tiny lantiq/xrx200 lantiq/xway malta/be realtek/rtl839x realtek/rtl930x realtek/rtl931x" ;;
+    mips_4kec)            echo "realtek/rtl838x" ;;
+    mips_mips32)          echo "ath25/generic bcm63xx/generic bcm63xx/smp lantiq/ase" ;;
+    mipsel_24kc)          echo "ramips/mt7620 ramips/mt7621 ramips/mt76x8 ramips/rt288x ramips/rt305x" ;;
+    mipsel_24kc_24kf)     echo "pistachio/generic" ;;
+    mipsel_74kc)          echo "bcm47xx/mips74k ramips/rt3883" ;;
+    mipsel_mips32)        echo "bcm47xx/generic bcm47xx/legacy" ;;
+    powerpc_464fp)        echo "apm821xx/nand apm821xx/sata" ;;
+    powerpc_8540)         echo "mpc85xx/p1010 mpc85xx/p1020 mpc85xx/p2020" ;;
+    x86_64)               echo "x86/64" ;;
+    *)                    echo "" ;;
+  esac
+}
+
+# 本地目标平台检测（不联网）：DISTRIB_TARGET → distfeeds URL → 架构映射
 SYS_TARGET="$DISTRIB_TARGET"
-[ -z "$SYS_TARGET" ] && SYS_TARGET=$(grep -m1 'DISTRIB_TARGET' /etc/openwrt_release 2>/dev/null | sed 's/.*="\(.*\)"/\1/')
-[ -z "$SYS_TARGET" ] && case "$SYS_ARCH" in
-  x86_64) SYS_TARGET="x86/64" ;;
-  aarch64_cortex-a53) SYS_TARGET="mediatek/mt7622" ;;
-  mipsel_24kc) SYS_TARGET="ramips/mt7621" ;;
-  arm_cortex-a7_neon-vfpv4) SYS_TARGET="sunxi/cortexa7" ;;
-esac
+[ -z "$SYS_TARGET" ] && SYS_TARGET=$(grep -hoE 'targets/[a-z0-9]+/[a-z0-9]+' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | head -1 | cut -d/ -f2-)
+[ -z "$SYS_TARGET" ] && SYS_TARGET=$(arch_to_targets "$SYS_ARCH" | awk '{print $1}')
+ARCH_TARGETS=$(arch_to_targets "$SYS_ARCH")
 [ -n "$SYS_TARGET" ] && ok "目标平台: $SYS_TARGET" || info "目标平台: 未知（仅能检测 packages 源）"
 
-# 精确小版本反推：优先 DISTRIB_RELEASE，其次内核版本映射，最后大版本兜底
-OW_VER=""
-OW_VER=$(echo "$SYS_RELEASE" | grep -oE '^(22|23|24)\.[0-9]+\.[0-9]+' | head -1)
-if [ -z "$OW_VER" ]; then
-  KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-  case "$KERNEL_VER" in
-    5.10.146) OW_VER="22.03.1" ;;
-    5.10.161) OW_VER="22.03.3" ;;
-    5.10.176) OW_VER="22.03.4" ;;
-    5.10.201) OW_VER="22.03.6" ;;
-    5.10.221) OW_VER="22.03.7" ;;
-    5.10.*) OW_VER="22.03.7" ;;
-    5.15.*) OW_VER="23.05.6" ;;
-    6.1.*|6.6.*) OW_VER="24.10.5" ;;
-  esac
-fi
-[ -z "$OW_VER" ] && case "$PW_VER" in
-  22.03) OW_VER="22.03.7" ;;
-  23.05) OW_VER="23.05.6" ;;
-  24.10) OW_VER="24.10.5" ;;
+# 内核版本
+KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+[ -n "$KERNEL_VER" ] && ok "内核版本: $KERNEL_VER"
+
+# 版本系列链（按内核主线；4.14→19.07, 5.4→21.02, 6.x 兜底 24.10/snapshots）
+case "$KERNEL_VER" in
+  4.14.*) SERIES_CHAIN="19.07" ;;
+  5.4.*)  SERIES_CHAIN="21.02" ;;
+  5.10.*) SERIES_CHAIN="22.03" ;;
+  5.15.*) SERIES_CHAIN="23.05" ;;
+  6.1.*|6.6.*|6.12.*) SERIES_CHAIN="24.10" ;;
+  6.*)    SERIES_CHAIN="24.10 snapshots" ;;
+  *)      SERIES_CHAIN="snapshots" ;;
 esac
-[ -n "$OW_VER" ] && ok "匹配源版本: $OW_VER (内核 $KERNEL_VER)"
 
 #==============================================
 # 2. 源连通性检测
 #==============================================
 hdr "源连通性检测"
 SF_OK=0; OW_OK=0; OW_USE=""
-# PassWall 源版本：跟随精确反推的大版本（22.03/23.05/24.10），快照用 snapshots
+
+# 列出镜像上某系列的所有小版本（从新到旧）
+list_series_vers() {
+  curl -sL --max-time 10 "$1/releases/" 2>/dev/null | grep -oE "$2\.[0-9]+/" | tr -d '/' | sort -uVr
+}
+
+# 动态探测精确源版本 + 目标平台：用内核版本精确匹配官方 manifest
+# 返回: OW_VER 精确版本号, SYS_TARGET 精确 target/subtarget
+probe_ow_ver() {
+  local MIR="$1" v t mf kv
+  OW_VER=""
+  # 1) DISTRIB_RELEASE 直接给出（最准）
+  OW_VER=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10)\.[0-9]+' | head -1)
+  [ -n "$OW_VER" ] && return 0
+  # 2) 遍历候选平台 × 系列链，manifest 内核精确匹配（覆盖所有内核所有硬件）
+  #    候选平台: 本地检测 target 优先，然后架构映射全列表
+  local cands="$SYS_TARGET $ARCH_TARGETS"
+  for t in $cands; do
+    [ -z "$t" ] && continue
+    for s in $SERIES_CHAIN; do
+      for v in $(list_series_vers "$MIR" "$s"); do
+        mf="$MIR/releases/$v/targets/${t%/*}/${t#*/}/openwrt-$v-${t%/*}-${t#*/}.manifest"
+        kv=$(curl -sL --max-time 5 "$mf" 2>/dev/null | sed -n 's/^kernel - \([0-9.]*\)-.*/\1/p' | head -1)
+        [ "$kv" = "$KERNEL_VER" ] && { OW_VER="$v"; SYS_TARGET="$t"; return 0; }
+      done
+    done
+  done
+  # 3) 兜底：系列链最新版本
+  for s in $SERIES_CHAIN; do
+    OW_VER=$(list_series_vers "$MIR" "$s" | head -1)
+    [ -n "$OW_VER" ] && break
+  done
+  [ -n "$OW_VER" ] && return 0
+  return 1
+}
+
+# 候选 OpenWrt 镜像（阿里云 → 清华 → 官方），先确定可用主镜像
+MIR_BASES="https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.openwrt.org"
+MIR_USE=""
+for m in $MIR_BASES; do
+  [ "$(check_url $m/releases/)" = "200" ] && { MIR_USE=$m; break; }
+done
+if [ -n "$MIR_USE" ]; then
+  ok "OpenWrt 镜像 ✓ ($MIR_USE)"
+  probe_ow_ver "$MIR_USE"
+  [ -n "$OW_VER" ] && ok "匹配源版本: $OW_VER (内核 $KERNEL_VER)" || err "无法确定源版本"
+else
+  err "所有 OpenWrt 镜像不可用"
+fi
+
+# PassWall 源版本：跟随探测到的精确版本（22.03/23.05/24.10），快照用 snapshots
 SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
 [ "$PKG_MGR" = "opkg" ] && SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$SF_PW_VER/$SYS_ARCH" || SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
@@ -149,41 +225,28 @@ SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
 [ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_BASE/passwall_luci/packages.adb"
 [ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓" || err "PassWall 源不可用"
 
-# OpenWrt 镜像（按优先级：阿里云 → 清华 → 官方），自动挑选可用镜像
-# 24.10+ 官方已切换 APK，源索引文件为 packages.adb；22.03/23.05 为 Packages.gz
-if [ "$PKG_MGR" = "opkg" ]; then
-  PKG_FILE="Packages.gz"
-  [ "$PW_VER" = "24.10" -o "$PW_VER" = "snapshots" ] && PKG_FILE="packages.adb"
+# OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
+# 24.10+ 官方已切换 APK，源索引文件为 packages.adb；其余为 Packages.gz
+PKG_FILE="Packages.gz"
+[ "$PW_VER" = "24.10" -o "$PW_VER" = "snapshots" ] && PKG_FILE="packages.adb"
+OW_OK=0
+if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   if [ "$PW_VER" = "snapshots" ]; then
-    OW_BASES="https://mirrors.aliyun.com/openwrt/snapshots https://mirrors.tuna.tsinghua.edu.cn/openwrt/snapshots https://downloads.openwrt.org/snapshots"
+    OW_BASE="$MIR_USE/snapshots"
   else
-    OW_BASES="https://mirrors.aliyun.com/openwrt/releases/$OW_VER https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/$OW_VER https://downloads.openwrt.org/releases/$OW_VER"
+    OW_BASE="$MIR_USE/releases/$OW_VER"
   fi
-  for OW_BASE in $OW_BASES; do
-    OW_OK=1
-    for feed in base luci; do
-      [ "$(check_url $OW_BASE/packages/$SYS_ARCH/$feed/$PKG_FILE)" != "200" ] && { OW_OK=0; break; }
-    done
-    # targets 源（kmod 所在目录）也需可用
-    if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
-      [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ] && OW_OK=0
-    fi
-    [ "$OW_OK" = "1" ] && { OW_USE=$OW_BASE; break; }
+  OW_OK=1
+  for feed in base luci; do
+    [ "$(check_url $OW_BASE/packages/$SYS_ARCH/$feed/$PKG_FILE)" != "200" ] && { OW_OK=0; break; }
   done
-  [ -n "$OW_USE" ] && ok "OpenWrt 源 ✓ ($OW_USE)" || err "所有 OpenWrt OPKG 源不可用"
-else
-  PKG_FILE="packages.adb"
-  OW_BASES="https://mirrors.aliyun.com/openwrt/snapshots https://mirrors.tuna.tsinghua.edu.cn/openwrt/snapshots https://downloads.openwrt.org/snapshots"
-  for OW_BASE in $OW_BASES; do
-    OW_OK=1
-    [ "$(check_url $OW_BASE/packages/$SYS_ARCH/base/$PKG_FILE)" != "200" ] && OW_OK=0
-    if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
-      [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ] && OW_OK=0
-    fi
-    [ "$OW_OK" = "1" ] && { OW_USE=$OW_BASE; break; }
-  done
-  [ -n "$OW_USE" ] && ok "OpenWrt 源 ✓ ($OW_USE)" || err "所有 OpenWrt APK 源不可用"
+  # targets 源（kmod 所在目录）也需可用
+  if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
+    [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ] && OW_OK=0
+  fi
+  [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt 源 ✓ ($OW_BASE)"
 fi
+[ "$OW_OK" = "0" ] && err "OpenWrt 源不可用（镜像或版本探测失败）"
 
 #==============================================
 # 3. 安装选择
