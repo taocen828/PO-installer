@@ -622,15 +622,12 @@ if [ "$INSTALL_OC" = "1" ]; then
   OC_LATEST=$(get_oc_latest)
   OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
   if [ -z "$OC_LATEST_NUM" ]; then
-    info "GitHub API 不可达（直连+代理均失败），跳过版本检测"
-    if [ -z "$OC_VER" ]; then
-      info "尝试从 immortalwrt 源安装 OpenClash..."
-      if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-        opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
-        check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 安装失败"
-      else
-        err "无可用降级源 (immortalwrt 源不可用或 APK 系统)，OpenClash 未安装"
-      fi
+    info "GitHub API 不可达（直连+代理均失败），尝试 immortalwrt 源安装/升级..."
+    if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+      opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+      check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 安装/升级失败"
+    else
+      err "无可用降级源 (immortalwrt 源不可用或 APK 系统)"
     fi
   elif [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
     info "OpenClash 更新: $OC_VER → $OC_LATEST..."
