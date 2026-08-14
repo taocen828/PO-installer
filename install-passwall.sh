@@ -591,6 +591,26 @@ if [ "$INSTALL_PW2" = "1" ]; then
 fi
 
 # OpenClash
+# 下载函数: 直连 → ghfast.top → ghproxy.net (gh-proxy.com 已挂 403, 移除)
+# 返回 0=成功 1=全部失败
+dl_with_mirror() {
+  local url="$1" out="$2" u
+  for u in "$url" "https://ghfast.top/$url" "https://ghproxy.net/$url"; do
+    curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null && [ -s "$out" ] && return 0
+    rm -f "$out"
+  done
+  return 1
+}
+
+# 获取 OpenClash 最新版本 (GitHub API → 代理重试)
+get_oc_latest() {
+  local api="https://api.github.com/repos/vernesong/OpenClash/releases/latest" u r
+  for u in "$api" "https://ghfast.top/$api" "https://ghproxy.net/$api"; do
+    r=$(curl -sL --max-time 10 "$u" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+    [ -n "$r" ] && { echo "$r"; return 0; }
+  done
+  return 1
+}
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 安装"
 
@@ -598,8 +618,8 @@ if [ "$INSTALL_OC" = "1" ]; then
   if check_installed "luci-app-openclash"; then
     OC_VER=$(get_version "luci-app-openclash")
     ok "OpenClash 主程序已安装 ($OC_VER)"
-    # 检测 GitHub 最新版本
-    OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 2>/dev/null)
+    # 检测 GitHub 最新版本 (直连→代理)
+    OC_LATEST=$(get_oc_latest)
     OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
     if [ -z "$OC_LATEST_NUM" ]; then
       info "GitHub API 不可达（无外网/被墙），跳过版本检测（已装 $OC_VER）"
@@ -609,45 +629,66 @@ if [ "$INSTALL_OC" = "1" ]; then
       read -r OC_DO
       case "$OC_DO" in n|N|no|NO) info "跳过" ;; *)
         OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+        if [ -z "$OC_URL" ]; then
+          OC_URL=$(curl -sL --max-time 10 "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" 2>/dev/null | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+        fi
         if [ -n "$OC_URL" ]; then
           info "下载 OpenClash $OC_LATEST..."
-          for url in "$OC_URL" "https://gh-proxy.com/$OC_URL" "https://ghfast.top/$OC_URL"; do
-            curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
-          done
-          if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
-                      if [ "$PKG_MGR" = "opkg" ]; then
-                        opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
-                      else
-                        apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
-                      fi
-                      check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
-                    fi
-                  fi
-                ;; esac
-              else
-                ok "OpenClash 已是最新版"
-              fi
+          if dl_with_mirror "$OC_URL" /tmp/luci-app-openclash.ipk; then
+            if [ "$PKG_MGR" = "opkg" ]; then
+              opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
             else
+              apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
+            fi
+            rm -f /tmp/luci-app-openclash.ipk
+            check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
+          else
+            err "GitHub 全部通道失败，降级尝试 immortalwrt 源..."
+            if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+              opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+              check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 升级失败"
+            else
+              err "无可用降级源 (immortalwrt 源不可用或 APK 系统)，OpenClash 保持 $OC_VER"
+            fi
+          fi
+        else
+          err "无法获取 OpenClash 下载地址 (GitHub 不可达)"
+        fi
+      ;; esac
+      ok "OpenClash 已是最新版"
+    fi
+  else
               echo -n "  安装 OpenClash 主程序？[Y/n]: "
               read -r OC_INST
               case "$OC_INST" in n|N|no|NO) info "跳过 OpenClash" ;; *)
                 info "安装 OpenClash..."
-                OC_VER=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+                OC_VER=$(get_oc_latest)
                 OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+                if [ -z "$OC_URL" ]; then
+                  OC_URL=$(curl -sL --max-time 10 "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" 2>/dev/null | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+                fi
                 if [ -n "$OC_URL" ]; then
                   info "下载 OpenClash $OC_VER..."
-                  for url in "$OC_URL" "https://gh-proxy.com/$OC_URL" "https://ghfast.top/$OC_URL"; do
-                    curl -fL -# --max-time 60 -o /tmp/luci-app-openclash.ipk "$url" 2>/dev/null && break
-                  done
-                  if [ -f /tmp/luci-app-openclash.ipk ] && [ -s /tmp/luci-app-openclash.ipk ]; then
+                  if dl_with_mirror "$OC_URL" /tmp/luci-app-openclash.ipk; then
                     if [ "$PKG_MGR" = "opkg" ]; then
                       opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
                     else
                       apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
                     fi
+                    rm -f /tmp/luci-app-openclash.ipk
                     check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓"
-        fi
-      fi
+                  else
+                    err "GitHub 全部通道失败，降级尝试 immortalwrt 源..."
+                    if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+                      opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+                      check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 安装失败"
+                    else
+                      err "无可用降级源，OpenClash 安装失败"
+                    fi
+                  fi
+                else
+                  err "无法获取 OpenClash 下载地址 (GitHub 不可达)"
+                fi
     ;; esac
   fi
 
@@ -661,9 +702,7 @@ if [ "$INSTALL_OC" = "1" ]; then
       info "下载 Clash 内核..."
       OC_CORE_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
       if [ -n "$OC_CORE_URL" ]; then
-        for url in "$OC_CORE_URL" "https://gh-proxy.com/$OC_CORE_URL" "https://ghfast.top/$OC_CORE_URL"; do
-          curl -fL -# --max-time 120 -o /tmp/clash-core.tar.gz "$url" 2>/dev/null && break
-        done
+        if dl_with_mirror "$OC_CORE_URL" /tmp/clash-core.tar.gz; then
         if [ -f /tmp/clash-core.tar.gz ] && [ -s /tmp/clash-core.tar.gz ]; then
           cd /tmp && tar xzf clash-core.tar.gz 2>/dev/null
           mkdir -p /etc/openclash/core
@@ -678,6 +717,7 @@ if [ "$INSTALL_OC" = "1" ]; then
           rm -f /tmp/clash-core.tar.gz /tmp/clash* 2>/dev/null
         fi
       fi
+    fi
     ;; esac
   fi
 fi
