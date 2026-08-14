@@ -471,13 +471,48 @@ get_repo_version() {
   fi
 }
 
+# 从 opkg 索引找包下载 URL（用于带进度下载）
+# 索引在 /var/opkg-lists/<feed>（opkg update 后的解压文本）
+find_pkg_url() {
+  local pkg="$1" fn="" feed="" url=""
+  for idx in /var/opkg-lists/*; do
+    [ -f "$idx" ] || continue
+    fn=$(awk -v p="$pkg" '
+      $1=="Package:" && $2==p {f=1; next}
+      f && $1=="Filename:" {print $2; exit}
+    ' "$idx" 2>/dev/null)
+    [ -n "$fn" ] && { feed=$(basename "$idx"); break; }
+  done
+  [ -z "$fn" ] && { echo ""; return; }
+  url=$(grep -h "^src/gz $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
+  [ -z "$url" ] && { echo ""; return; }
+  echo "$url/$fn"
+}
+
 # 包安装/升级
+# 大包走 curl 带进度下载（显示百分比），小包/依赖走 opkg 静默
 # 过滤已知无害的 opkg 噪音: Configuring 进度、remove_obsolesced_files(旧文件已删)、opkg.lock 警告
 apk_install() {
   local pkg="$1"
   if [ "$PKG_MGR" != "apk" ]; then
-    opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | \
-      grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+    local url prog
+    url=$(find_pkg_url "$pkg")
+    if [ -n "$url" ]; then
+      prog="-sS"; [ -t 1 ] && prog="--progress-bar"
+      info "下载 $pkg (带进度)..."
+      if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
+        opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends 2>&1 | \
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+        rm -f "/tmp/pkg_$pkg.ipk"
+      else
+        err "下载 $pkg 失败，回退 opkg 直接安装..."
+        opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | \
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+      fi
+    else
+      opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | \
+        grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+    fi
     return 0
   fi
   apk add --allow-untrusted --force-broken-world "$pkg" 2>&1 | grep -v "^WARNING.*opening" || true
