@@ -38,10 +38,12 @@ echo ""
 hdr "系统检测"
 
 # 修复 wget 损坏（apk 内部依赖 wget 下载文件）
+# 用"能否运行"判断而非文件头检测（ELF 二进制/symlink 会误判）
 WGET_FIXED=0
-if [ ! -s /usr/bin/wget ] || ! head -1 /usr/bin/wget 2>/dev/null | grep -q "^#!/"; then
-  cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
-  cat > /usr/bin/wget << 'WGETEOF'
+if ! command -v wget >/dev/null 2>&1 || ! wget --version >/dev/null 2>&1; then
+  if [ -w /usr/bin ]; then
+    cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
+    cat > /usr/bin/wget << 'WGETEOF'
 #!/bin/sh
 URL=""; OUT=""
 while [ $# -gt 0 ]; do
@@ -56,9 +58,12 @@ done
 [ -n "$OUT" ] && set -- -o "$OUT"
 exec curl -sL --max-time 60 "$@" "$URL"
 WGETEOF
-  chmod +x /usr/bin/wget
-  WGET_FIXED=1
-  ok "修复 wget（已损坏，替换为 curl 包装器）"
+    chmod +x /usr/bin/wget
+    WGET_FIXED=1
+    ok "修复 wget（不可用，替换为 curl 包装器）"
+  else
+    info "wget 不可用且 /usr/bin 只读，跳过（后续使用 curl）"
+  fi
 fi
 PKG_MGR=""
 if command -v apk >/dev/null 2>&1; then
@@ -81,13 +86,13 @@ fi
 [ -z "$SYS_ARCH" ] && { err "无法检测架构"; exit 1; }
 ok "CPU 架构: $SYS_ARCH"
 
-. /etc/openwrt_release 2>/dev/null || true
+if [ -r /etc/openwrt_release ]; then . /etc/openwrt_release; fi
 SYS_RELEASE="$DISTRIB_RELEASE"; SYS_DESC="$DISTRIB_DESCRIPTION"
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE=$(cat /etc/version 2>/dev/null | head -1)
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE="unknown"
 ok "系统: $SYS_DESC ($SYS_RELEASE)"
 
-PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\([0-9]*\.[0-9]*\).*/\1/p')
+PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(2[0-9]\.[0-9]*\).*/\1/p')
 [ -z "$PW_VER" ] && PW_VER="23.05"
 echo "$SYS_RELEASE" | grep -qiE "istore|immortalwrt|koolshare|lede" && PW_VER="23.05"
 echo "$PW_VER" | grep -q "^22" && PW_VER="22.03"
@@ -97,41 +102,87 @@ echo "$PW_VER" | grep -qE "^2[5-9]|^3" && PW_VER="snapshots"
 [ "$PKG_MGR" = "apk" ] && PW_VER="snapshots"
 ok "源版本: $PW_VER"
 
+# 目标平台检测（targets 目录，kmod 源专用）
+SYS_TARGET="$DISTRIB_TARGET"
+[ -z "$SYS_TARGET" ] && SYS_TARGET=$(grep -m1 'DISTRIB_TARGET' /etc/openwrt_release 2>/dev/null | sed 's/.*="\(.*\)"/\1/')
+[ -z "$SYS_TARGET" ] && case "$SYS_ARCH" in
+  x86_64) SYS_TARGET="x86/64" ;;
+  aarch64_cortex-a53) SYS_TARGET="mediatek/mt7622" ;;
+  mipsel_24kc) SYS_TARGET="ramips/mt7621" ;;
+  arm_cortex-a7_neon-vfpv4) SYS_TARGET="sunxi/cortexa7" ;;
+esac
+[ -n "$SYS_TARGET" ] && ok "目标平台: $SYS_TARGET" || info "目标平台: 未知（仅能检测 packages 源）"
+
+# 精确小版本反推：优先 DISTRIB_RELEASE，其次内核版本映射，最后大版本兜底
+OW_VER=""
+OW_VER=$(echo "$SYS_RELEASE" | grep -oE '^(22|23|24)\.[0-9]+\.[0-9]+' | head -1)
+if [ -z "$OW_VER" ]; then
+  KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+  case "$KERNEL_VER" in
+    5.10.146) OW_VER="22.03.1" ;;
+    5.10.161) OW_VER="22.03.3" ;;
+    5.10.176) OW_VER="22.03.4" ;;
+    5.10.201) OW_VER="22.03.6" ;;
+    5.10.221) OW_VER="22.03.7" ;;
+    5.10.*) OW_VER="22.03.7" ;;
+    5.15.*) OW_VER="23.05.6" ;;
+    6.1.*|6.6.*) OW_VER="24.10.5" ;;
+  esac
+fi
+[ -z "$OW_VER" ] && case "$PW_VER" in
+  22.03) OW_VER="22.03.7" ;;
+  23.05) OW_VER="23.05.6" ;;
+  24.10) OW_VER="24.10.5" ;;
+esac
+[ -n "$OW_VER" ] && ok "匹配源版本: $OW_VER (内核 $KERNEL_VER)"
+
 #==============================================
 # 2. 源连通性检测
 #==============================================
 hdr "源连通性检测"
 SF_OK=0; OW_OK=0; OW_USE=""
-[ "$PKG_MGR" = "opkg" ] && SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$PW_VER/$SYS_ARCH" || SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
+# PassWall 源版本：跟随精确反推的大版本（22.03/23.05/24.10），快照用 snapshots
+SF_PW_VER="$PW_VER"
+[ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
+[ "$PKG_MGR" = "opkg" ] && SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$SF_PW_VER/$SYS_ARCH" || SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
 SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
 [ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_BASE/passwall_luci/packages.adb"
 [ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓" || err "PassWall 源不可用"
 
+# OpenWrt 镜像（按优先级：阿里云 → 清华 → 官方），自动挑选可用镜像
+# 24.10+ 官方已切换 APK，源索引文件为 packages.adb；22.03/23.05 为 Packages.gz
 if [ "$PKG_MGR" = "opkg" ]; then
-  case "$PW_VER" in 22.03) OW_VER="22.03.7" ;; 23.05) OW_VER="23.05.5" ;; 24.10) OW_VER="24.10.0" ;; *) OW_VER="23.05.5" ;; esac
-  OW_BASE="https://downloads.openwrt.org/releases/$OW_VER/packages/$SYS_ARCH"
-  OW_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/$OW_VER/packages/$SYS_ARCH"
-  OW_OK=1
-  for feed in base packages luci; do
-    [ "$(check_url $OW_BASE/$feed/Packages.gz)" != "200" ] && { OW_OK=0; break; }
-  done
-  [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt 官方源 ✓"
-  if [ "$OW_OK" != "1" ]; then
-    OW_OK=1
-    for feed in base packages luci; do
-      [ "$(check_url $OW_MIRROR/$feed/Packages.gz)" != "200" ] && { OW_OK=0; break; }
-    done
-    [ "$OW_OK" = "1" ] && OW_USE=$OW_MIRROR && ok "OpenWrt 清华镜像 ✓"
+  PKG_FILE="Packages.gz"
+  [ "$PW_VER" = "24.10" -o "$PW_VER" = "snapshots" ] && PKG_FILE="packages.adb"
+  if [ "$PW_VER" = "snapshots" ]; then
+    OW_BASES="https://mirrors.aliyun.com/openwrt/snapshots https://mirrors.tuna.tsinghua.edu.cn/openwrt/snapshots https://downloads.openwrt.org/snapshots"
+  else
+    OW_BASES="https://mirrors.aliyun.com/openwrt/releases/$OW_VER https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/$OW_VER https://downloads.openwrt.org/releases/$OW_VER"
   fi
-  [ "$OW_OK" = "0" ] && err "所有 OpenWrt OPKG 源不可用"
+  for OW_BASE in $OW_BASES; do
+    OW_OK=1
+    for feed in base luci; do
+      [ "$(check_url $OW_BASE/packages/$SYS_ARCH/$feed/$PKG_FILE)" != "200" ] && { OW_OK=0; break; }
+    done
+    # targets 源（kmod 所在目录）也需可用
+    if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
+      [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ] && OW_OK=0
+    fi
+    [ "$OW_OK" = "1" ] && { OW_USE=$OW_BASE; break; }
+  done
+  [ -n "$OW_USE" ] && ok "OpenWrt 源 ✓ ($OW_USE)" || err "所有 OpenWrt OPKG 源不可用"
 else
-  OW_BASE="https://downloads.openwrt.org/snapshots/packages/$SYS_ARCH"
-  OW_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/openwrt/snapshots/packages/$SYS_ARCH"
-  OW_OK=0
-  [ "$(check_url $OW_BASE/base/packages.adb)" = "200" ] && OW_OK=1 && OW_USE=$OW_BASE && ok "OpenWrt 快照源 ✓"
-  [ "$OW_OK" != "1" ] && [ "$SYS_RELEASE" != "unknown" ] && [ "$(check_url https://downloads.openwrt.org/releases/$SYS_RELEASE/packages/$SYS_ARCH/base/packages.adb)" = "200" ] && OW_OK=1 && OW_USE="https://downloads.openwrt.org/releases/$SYS_RELEASE/packages/$SYS_ARCH" && ok "OpenWrt 发行版源 ✓"
-  [ "$OW_OK" != "1" ] && [ "$(check_url $OW_MIRROR/base/packages.adb)" = "200" ] && OW_OK=1 && OW_USE=$OW_MIRROR && ok "OpenWrt 清华快照源 ✓"
-  [ "$OW_OK" = "0" ] && err "所有 OpenWrt APK 源不可用"
+  PKG_FILE="packages.adb"
+  OW_BASES="https://mirrors.aliyun.com/openwrt/snapshots https://mirrors.tuna.tsinghua.edu.cn/openwrt/snapshots https://downloads.openwrt.org/snapshots"
+  for OW_BASE in $OW_BASES; do
+    OW_OK=1
+    [ "$(check_url $OW_BASE/packages/$SYS_ARCH/base/$PKG_FILE)" != "200" ] && OW_OK=0
+    if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
+      [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ] && OW_OK=0
+    fi
+    [ "$OW_OK" = "1" ] && { OW_USE=$OW_BASE; break; }
+  done
+  [ -n "$OW_USE" ] && ok "OpenWrt 源 ✓ ($OW_USE)" || err "所有 OpenWrt APK 源不可用"
 fi
 
 #==============================================
@@ -177,30 +228,56 @@ hdr "软件源配置"
 info "检测系统默认源..."
 SYS_SOURCE_OK=0
 if [ "$PKG_MGR" = "opkg" ]; then
-  opkg update 2>&1 | grep -qi "Updated list" && SYS_SOURCE_OK=1
+  opkg update >/dev/null 2>&1 && SYS_SOURCE_OK=1
 else
-  apk update 2>&1 | grep -qi "OK" && SYS_SOURCE_OK=1
+  apk update >/dev/null 2>&1 && SYS_SOURCE_OK=1
 fi
 
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
 else
-  err "系统源不可用，配置回退源..."
+  err "系统源不可用，配置 OpenWrt 镜像源..."
   if [ "$PKG_MGR" = "opkg" ]; then
-    [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^[^#]/#&/' /etc/opkg/distfeeds.conf
-    if [ "$OW_OK" = "1" ]; then
-      for feed in base packages luci; do echo "src/gz openwrt_$feed $OW_USE/$feed" >> /etc/opkg/customfeeds.conf; done
-      ok "已配置 OpenWrt 回退源"
+    [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^/#/' /etc/opkg/distfeeds.conf
+    if [ -n "$OW_USE" ]; then
+      { echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
+        if [ -n "$SYS_TARGET" ]; then
+          echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages"
+        fi
+        echo "src/gz openwrt_base $OW_USE/packages/$SYS_ARCH/base"
+        echo "src/gz openwrt_luci $OW_USE/packages/$SYS_ARCH/luci"
+        echo "src/gz openwrt_packages $OW_USE/packages/$SYS_ARCH/packages"
+        echo "src/gz openwrt_routing $OW_USE/packages/$SYS_ARCH/routing"
+        echo "src/gz openwrt_telephony $OW_USE/packages/$SYS_ARCH/telephony"
+      } > /etc/opkg/customfeeds.conf
+      ok "已配置 OpenWrt 镜像源 ($OW_USE)"
     fi
   else
-    [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^[^#]/#&/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
-    if [ "$OW_OK" = "1" ]; then
-      echo "# OpenWrt 回退源" > /etc/apk/repositories.d/customfeeds.list
-      for feed in base packages luci; do echo "$OW_USE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list; done
-      ok "已配置 OpenWrt 回退源"
+    [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^/#/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
+    if [ -n "$OW_USE" ]; then
+      { echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
+        echo "$OW_USE/packages/$SYS_ARCH/luci/packages.adb"
+        echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
+        echo "$OW_USE/packages/$SYS_ARCH/routing/packages.adb"
+        echo "$OW_USE/packages/$SYS_ARCH/telephony/packages.adb"
+        if [ -n "$SYS_TARGET" ]; then
+          echo "$OW_USE/targets/$SYS_TARGET/packages/packages.adb"
+        fi
+      } > /etc/apk/repositories.d/customfeeds.list
+      ok "已配置 OpenWrt 镜像源 ($OW_USE)"
     fi
   fi
+  # 重新验证源
+  if [ "$PKG_MGR" = "opkg" ]; then
+    opkg update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
+  else
+    apk update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
+  fi
 fi
+
+# 自编译固件提示（Kiddin'/immortalwrt 等：kmod 内核模块可能不匹配官方源）
+echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
+  info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
 
 # 添加 PassWall 源（仅安装 PassWall/PassWall2 时需要）
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
