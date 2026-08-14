@@ -8,7 +8,7 @@ ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
-check_url() { curl -sL -o /dev/null -w "%{http_code}" "$1" --max-time 8 2>/dev/null; }
+check_url() { curl -sL -o /dev/null -r 0-1024 -w "%{http_code}" "$1" --max-time 8 2>/dev/null; }
 
 # 管道模式
 if [ ! -t 0 ] && [ -z "$0" -o "$0" = "sh" -o "$0" = "-sh" ]; then
@@ -28,7 +28,13 @@ echo ""
 if [ -z "$HTTP_PROXY" ]; then
   echo -n "需要代理？输入地址 (http://user:pass@host:port) 或直接回车跳过: "
   read -r PROXY_INPUT
-  [ -n "$PROXY_INPUT" ] && export HTTP_PROXY="$PROXY_INPUT" && echo "  ✓ 已设置代理"
+  if [ -n "$PROXY_INPUT" ]; then
+    # 大小写都导出: curl 可能忽略大写 HTTP_PROXY(CGI 安全), busybox wget/opkg 认小写
+    export HTTP_PROXY="$PROXY_INPUT" HTTPS_PROXY="$PROXY_INPUT"
+    export http_proxy="$PROXY_INPUT" https_proxy="$PROXY_INPUT"
+    export ALL_PROXY="$PROXY_INPUT" all_proxy="$PROXY_INPUT"
+    echo "  ✓ 已设置代理"
+  fi
 fi
 echo ""
 
@@ -94,7 +100,6 @@ ok "系统: $SYS_DESC ($SYS_RELEASE)"
 
 PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(2[0-9]\.[0-9]*\).*/\1/p')
 [ -z "$PW_VER" ] && PW_VER="23.05"
-echo "$SYS_RELEASE" | grep -qiE "istore|immortalwrt|koolshare|lede" && PW_VER="23.05"
 echo "$PW_VER" | grep -q "^22" && PW_VER="22.03"
 echo "$PW_VER" | grep -q "^23" && PW_VER="23.05"
 echo "$PW_VER" | grep -q "^24" && PW_VER="24.10"
@@ -356,8 +361,10 @@ if [ "$SYS_SOURCE_OK" = "1" ]; then
 else
   err "系统源不可用，配置 OpenWrt 镜像源..."
   if [ "$PKG_MGR" = "opkg" ]; then
-    [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^/#/' /etc/opkg/distfeeds.conf
     if [ -n "$OW_USE" ]; then
+      # 备份后注释系统源（可恢复）
+      cp /etc/opkg/distfeeds.conf /tmp/distfeeds.conf.bak 2>/dev/null
+      [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^/#/' /etc/opkg/distfeeds.conf
       { echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
         if [ -n "$SYS_TARGET" ]; then
           echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages"
@@ -369,10 +376,13 @@ else
         echo "src/gz openwrt_telephony $OW_USE/packages/$SYS_ARCH/telephony"
       } > /etc/opkg/customfeeds.conf
       ok "已配置 OpenWrt 镜像源 ($OW_USE)"
+    else
+      err "无可用镜像源，系统源保持不动（未修改）"
     fi
   else
-    [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^/#/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
     if [ -n "$OW_USE" ]; then
+      cp /etc/apk/repositories.d/distfeeds.list /tmp/distfeeds.list.bak 2>/dev/null
+      [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^/#/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
       { echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/luci/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
@@ -383,6 +393,8 @@ else
         fi
       } > /etc/apk/repositories.d/customfeeds.list
       ok "已配置 OpenWrt 镜像源 ($OW_USE)"
+    else
+      err "无可用镜像源，系统源保持不动（未修改）"
     fi
   fi
   # 重新验证源
@@ -493,68 +505,39 @@ find_pkg_url() {
 # 大包走 curl 带进度下载（显示百分比），小包/依赖走 opkg 静默
 # 过滤已知无害的 opkg 噪音: Configuring 进度、remove_obsolesced_files(旧文件已删)、opkg.lock 警告
 apk_install() {
-  local pkg="$1"
+  local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
-    local url prog
+    local url prog log=/tmp/opkg_install.log
     url=$(find_pkg_url "$pkg")
     if [ -n "$url" ]; then
       prog="-sS"; [ -t 1 ] && prog="--progress-bar"
       info "下载 $pkg (带进度)..."
       if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
-        opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends 2>&1 | \
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
-        rm -f "/tmp/pkg_$pkg.ipk"
+        opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+        rc=$?
+        grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+        rm -f "/tmp/pkg_$pkg.ipk" "$log"
       else
         err "下载 $pkg 失败，回退 opkg 直接安装..."
-        opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | \
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+        opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+        rc=$?
+        grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+        rm -f "$log"
       fi
     else
-      opkg install "$pkg" --force-downgrade --force-overwrite --force-depends 2>&1 | \
-        grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+      opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+      rc=$?
+      grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+      rm -f "$log"
     fi
-    return 0
+    return $rc
   fi
-  apk add --allow-untrusted --force-broken-world "$pkg" 2>&1 | grep -v "^WARNING.*opening" || true
-}
-
-# 智能安装：已装则检测更新，未装则安装
-pkg_install_or_upgrade() {
-  local pkg="$1" desc="$2" ask="$3"
-  if check_installed "$pkg"; then
-    local ver=$(get_version "$pkg")
-    local repo_ver=$(get_repo_version "$pkg")
-    if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
-      info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)"
-      if [ "$ask" = "y" ]; then
-        echo -n "  更新 $desc？[Y/n]: "
-        read -r ANSWER
-        case "$ANSWER" in n|N|no|NO) info "跳过 $desc" ;; *)
-          apk_install "$pkg"
-          local nver=$(get_version "$pkg")
-          check_installed "$pkg" && { [ "$ver" != "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"; } || err "$desc 更新失败"
-        ;; esac
-      else
-        ok "$desc ($ver) ✓"
-      fi
-    else
-      ok "$desc ($ver) ✓"
-    fi
-  else
-    if [ "$ask" = "y" ]; then
-      echo -n "  安装 $desc？[Y/n]: "
-      read -r ANSWER
-      case "$ANSWER" in n|N|no|NO) info "跳过 $desc" ;; *)
-        info "安装 $desc..."
-        apk_install "$pkg"
-        check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
-      ;; esac
-    else
-      info "安装 $desc..."
-      apk_install "$pkg"
-      check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
-    fi
-  fi
+  local log=/tmp/apk_add.log
+  apk add --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+  rc=$?
+  grep -v "^WARNING.*opening" "$log" || true
+  rm -f "$log"
+  return $rc
 }
 
 # 简化版（不询问，直接安装）
@@ -618,7 +601,9 @@ if [ "$INSTALL_OC" = "1" ]; then
     # 检测 GitHub 最新版本
     OC_LATEST=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 2>/dev/null)
     OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
-    if [ -n "$OC_LATEST_NUM" ] && [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
+    if [ -z "$OC_LATEST_NUM" ]; then
+      info "GitHub API 不可达（无外网/被墙），跳过版本检测（已装 $OC_VER）"
+    elif [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
       info "OpenClash $OC_LATEST 可用"
       echo -n "  升级 OpenClash？[Y/n]: "
       read -r OC_DO
@@ -682,8 +667,15 @@ if [ "$INSTALL_OC" = "1" ]; then
         if [ -f /tmp/clash-core.tar.gz ] && [ -s /tmp/clash-core.tar.gz ]; then
           cd /tmp && tar xzf clash-core.tar.gz 2>/dev/null
           mkdir -p /etc/openclash/core
-          cp /tmp/clash* /etc/openclash/core/clash 2>/dev/null
-          chmod +x /etc/openclash/core/clash 2>/dev/null && ok "Clash 内核已安装" || err "Clash 内核安装失败"
+          # 找解压出的真实二进制（单个文件重命名 clash，避免多文件 cp 失败）
+          BIN=$(find /tmp -maxdepth 1 -type f -name "clash*" ! -name "*.tar.gz" 2>/dev/null | head -1)
+          if [ -n "$BIN" ]; then
+            cp -f "$BIN" /etc/openclash/core/clash 2>/dev/null
+            chmod +x /etc/openclash/core/clash 2>/dev/null && ok "Clash 内核已安装" || err "Clash 内核安装失败"
+          else
+            err "未找到 Clash 内核二进制"
+          fi
+          rm -f /tmp/clash-core.tar.gz /tmp/clash* 2>/dev/null
         fi
       fi
     ;; esac
