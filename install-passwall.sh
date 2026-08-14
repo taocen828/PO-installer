@@ -409,9 +409,10 @@ fi
 echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
   info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
 
-# 添加 PassWall 源（仅安装 PassWall/PassWall2 时需要）
+# 添加 PassWall 源（装 PassWall/PassWall2/OpenClash 时都需要）
+# OpenClash 也需要 immortalwrt 源作为 GitHub 不可达时的降级通道
 # 降级链: SourceForge 官方 → immortalwrt 国内镜像（外网不通时）
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
+if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
     info "添加 PassWall 源 (SourceForge)..."
     if [ "$PKG_MGR" = "opkg" ]; then
@@ -507,15 +508,14 @@ find_pkg_url() {
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
-    # 预解析依赖清单 (模拟安装), 用于显示包名级进度
-    local total=0 cur=0 dep
-    for dep in $(opkg install --noaction "$pkg" --force-downgrade --force-overwrite --force-depends 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/'); do
-      total=$((total + 1))
-    done
+    # 预解析依赖清单 (模拟安装), 用于显示包名级进度; 排除主包自身(后面单独处理)
+    local total=0 cur=0 dep deps
+    deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite --force-depends 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
+    for dep in $deps; do total=$((total + 1)); done
     [ "$total" = "0" ] && total=1
     cur=0
     # 逐个安装显示进度 (opkg 会跳过已装依赖, 只装缺的)
-    for dep in $(opkg install --noaction "$pkg" --force-downgrade --force-overwrite --force-depends 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/'); do
+    for dep in $deps; do
       cur=$((cur + 1))
       printf "\r  [%s/%s] 安装 %s...  " "$cur" "$total" "$dep"
       opkg install "$dep" --force-downgrade --force-overwrite --force-depends > /tmp/opkg_dep.log 2>&1
