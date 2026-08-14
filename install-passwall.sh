@@ -151,13 +151,14 @@ ARCH_TARGETS=$(arch_to_targets "$SYS_ARCH")
 KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 [ -n "$KERNEL_VER" ] && ok "内核版本: $KERNEL_VER"
 
-# 版本系列链（按内核主线；4.14→19.07, 5.4→21.02, 6.x 兜底 24.10/snapshots）
+# 版本系列链（按内核主线；4.14→19.07, 5.4→21.02, 6.12→25.12 优先(24.10.5 也用过 6.12), 6.x 兜底 24.10/snapshots）
 case "$KERNEL_VER" in
   4.14.*) SERIES_CHAIN="19.07" ;;
   5.4.*)  SERIES_CHAIN="21.02" ;;
   5.10.*) SERIES_CHAIN="22.03" ;;
   5.15.*) SERIES_CHAIN="23.05" ;;
-  6.1.*|6.6.*|6.12.*) SERIES_CHAIN="24.10" ;;
+  6.12.*) SERIES_CHAIN="25.12 24.10" ;;
+  6.1.*|6.6.*) SERIES_CHAIN="24.10" ;;
   6.*)    SERIES_CHAIN="24.10 snapshots" ;;
   *)      SERIES_CHAIN="snapshots" ;;
 esac
@@ -176,11 +177,13 @@ list_series_vers() {
 # 动态探测精确源版本 + 目标平台：用内核版本精确匹配官方 manifest
 # 返回: OW_VER 精确版本号, SYS_TARGET 精确 target/subtarget
 probe_ow_ver() {
-  local MIR="$1" v t mf kv
+  local MIR="$1" v t mf kv V
   OW_VER=""
-  # 1) DISTRIB_RELEASE 直接给出（最准）
-  OW_VER=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10)\.[0-9]+' | head -1)
-  [ -n "$OW_VER" ] && return 0
+  # 1) DISTRIB_RELEASE 直接给出（最准，但需验证镜像上确实存在该版本——镜像可能滞后）
+  V=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10|25\.12)\.[0-9]+' | head -1)
+  if [ -n "$V" ] && [ "$(check_url $MIR/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
+    OW_VER="$V"; return 0
+  fi
   # 2) 遍历候选平台 × 系列链，manifest 内核精确匹配（覆盖所有内核所有硬件）
   #    候选平台: 本地检测 target 优先，然后架构映射全列表
   local cands="$SYS_TARGET $ARCH_TARGETS"
@@ -189,38 +192,75 @@ probe_ow_ver() {
     for s in $SERIES_CHAIN; do
       for v in $(list_series_vers "$MIR" "$s"); do
         mf="$MIR/releases/$v/targets/${t%/*}/${t#*/}/openwrt-$v-${t%/*}-${t#*/}.manifest"
-        kv=$(curl -sL --max-time 5 "$mf" 2>/dev/null | sed -n 's/^kernel - \([0-9.]*\)-.*/\1/p' | head -1)
+        kv=$(curl -sL --max-time 5 "$mf" 2>/dev/null | sed -n 's/^kernel - \([0-9.]*\)[~-].*/\1/p' | head -1)
         [ "$kv" = "$KERNEL_VER" ] && { OW_VER="$v"; SYS_TARGET="$t"; return 0; }
       done
     done
   done
-  # 3) 兜底：系列链最新版本
-  for s in $SERIES_CHAIN; do
-    OW_VER=$(list_series_vers "$MIR" "$s" | head -1)
-    [ -n "$OW_VER" ] && break
-  done
-  [ -n "$OW_VER" ] && return 0
+  # 无精确匹配：不在此处兜底，让主循环尝试下一个镜像
   return 1
 }
 
-# 候选 OpenWrt 镜像（阿里云 → 清华 → 官方），先确定可用主镜像
+# 候选 OpenWrt 镜像（阿里云 → 清华 → 官方），依次探测直到找到匹配的镜像+版本
+# 注意: 阿里云可能滞后（如 25.12 系列未同步完整），自动切到有完整版本的镜像
+# 索引文件类型按包管理器判断：opkg→Packages.gz（含 24.10），apk→packages.adb
+PKG_FILE="Packages.gz"
+[ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
 MIR_BASES="https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.openwrt.org"
-MIR_USE=""
+MIR_USE=""; OW_VER=""
 for m in $MIR_BASES; do
-  [ "$(check_url $m/releases/)" = "200" ] && { MIR_USE=$m; break; }
+  [ "$(check_url $m/releases/)" = "200" ] || continue
+  # 优先: DISTRIB_RELEASE 精确匹配（最准，如 25.12.4）
+  V=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10|25\.12)\.[0-9]+' | head -1)
+  if [ -n "$V" ] && [ "$(check_url $m/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
+    MIR_USE=$m; OW_VER=$V
+    ok "OpenWrt 镜像 ✓ ($MIR_USE, 版本 $OW_VER)"
+    break
+  fi
+  # 次选: 内核版本精确匹配（覆盖自编译固件/无 RELEASE）
+  probe_ow_ver "$m"
+  if [ -n "$OW_VER" ]; then
+    MIR_USE=$m
+    ok "OpenWrt 镜像 ✓ ($MIR_USE, 内核匹配 $OW_VER)"
+    break
+  fi
 done
-if [ -n "$MIR_USE" ]; then
-  ok "OpenWrt 镜像 ✓ ($MIR_USE)"
-  probe_ow_ver "$MIR_USE"
-  [ -n "$OW_VER" ] && ok "匹配源版本: $OW_VER (内核 $KERNEL_VER)" || err "无法确定源版本"
+if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
+  ok "匹配源版本: $OW_VER (内核 $KERNEL_VER)"
 else
-  err "所有 OpenWrt 镜像不可用"
+  # 全局兜底：所有镜像都无精确匹配时，取系列链最新版本（best effort）
+  err "无精确匹配版本，尝试系列最新版本..."
+  for m in $MIR_BASES; do
+    [ "$(check_url $m/releases/)" = "200" ] || continue
+    for s in $SERIES_CHAIN; do
+      OW_VER=$(list_series_vers "$m" "$s" | head -1)
+      if [ -n "$OW_VER" ] && [ "$(check_url $m/releases/$OW_VER/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
+        MIR_USE=$m
+        info "使用镜像 $m 的系列最新版本 $OW_VER (可能与固件内核不完全匹配)"
+        break 2
+      fi
+      OW_VER=""
+    done
+  done
+  if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
+    ok "匹配源版本: $OW_VER (best effort)"
+  else
+    err "所有 OpenWrt 镜像均无法匹配源版本"
+  fi
 fi
 
-# PassWall 源版本：跟随探测到的精确版本（22.03/23.05/24.10），快照用 snapshots
+# PassWall 源版本：跟随探测到的精确版本（22.03/23.05/24.10/25.12）
+# 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
 SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
-[ "$PKG_MGR" = "opkg" ] && SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$SF_PW_VER/$SYS_ARCH" || SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
+if [ "$PKG_MGR" = "opkg" ]; then
+  case "$SF_PW_VER" in
+    25.12) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12
+  esac
+  SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$SF_PW_VER/$SYS_ARCH"
+else
+  SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
+fi
 SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
 [ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_BASE/passwall_luci/packages.adb"
 [ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓ (SourceForge)" || err "PassWall 源不可用（SourceForge 国外直连失败）"
@@ -244,16 +284,13 @@ if [ "$SF_OK" != "1" ] && [ "$PKG_MGR" = "opkg" ]; then
 fi
 
 # OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
-# 索引文件类型按包管理器判断：opkg→Packages.gz（含 24.10），apk→packages.adb
-PKG_FILE="Packages.gz"
-[ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
 OW_OK=0
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
-  if [ "$PW_VER" = "snapshots" ]; then
-    OW_BASE="$MIR_USE/snapshots"
-  else
-    OW_BASE="$MIR_USE/releases/$OW_VER"
-  fi
+  # OW_VER 为数字版本号 → releases；否则（snapshots）→ snapshots 目录
+  case "$OW_VER" in
+    [0-9]*.[0-9]*.[0-9]*) OW_BASE="$MIR_USE/releases/$OW_VER" ;;
+    *) OW_BASE="$MIR_USE/snapshots" ;;
+  esac
   OW_OK=1
   for feed in base luci; do
     [ "$(check_url $OW_BASE/packages/$SYS_ARCH/$feed/$PKG_FILE)" != "200" ] && { OW_OK=0; break; }
