@@ -502,11 +502,27 @@ find_pkg_url() {
 }
 
 # 包安装/升级
-# 大包走 curl 带进度下载（显示百分比），小包/依赖走 opkg 静默
+# 主包走 curl 带进度下载（百分比），依赖包逐个显示 [N/总数] 包名级进度
 # 过滤已知无害的 opkg 噪音: Configuring 进度、remove_obsolesced_files(旧文件已删)、opkg.lock 警告
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
+    # 预解析依赖清单 (模拟安装), 用于显示包名级进度
+    local total=0 cur=0 dep
+    for dep in $(opkg install --noaction "$pkg" --force-downgrade --force-overwrite --force-depends 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/'); do
+      total=$((total + 1))
+    done
+    [ "$total" = "0" ] && total=1
+    cur=0
+    # 逐个安装显示进度 (opkg 会跳过已装依赖, 只装缺的)
+    for dep in $(opkg install --noaction "$pkg" --force-downgrade --force-overwrite --force-depends 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/'); do
+      cur=$((cur + 1))
+      printf "\r  [%s/%s] 安装 %s...  " "$cur" "$total" "$dep"
+      opkg install "$dep" --force-downgrade --force-overwrite --force-depends > /tmp/opkg_dep.log 2>&1
+      rm -f /tmp/opkg_dep.log
+    done
+    printf "\r  [%s/%s] 完成             \n" "$total" "$total"
+    # 主包: curl 带进度下载
     local url prog log=/tmp/opkg_install.log
     url=$(find_pkg_url "$pkg")
     if [ -n "$url" ]; then
