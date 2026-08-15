@@ -8,7 +8,15 @@ ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
-check_url() { curl -sL -o /dev/null -r 0-1024 -w "%{http_code}" "$1" --max-time 8 2>/dev/null; }
+# 检查 URL 可达性: Range 只取1KB省流量; 206(Partial Content)=成功, 归一化为200
+# 失败时输出原因到 stderr 便于诊断 (DNS/超时/拒绝 等)
+check_url() {
+  local code
+  code=$(curl -sL -o /dev/null -r 0-1024 -w "%{http_code}" "$1" --max-time 8 2>/dev/null)
+  [ "$code" = "206" ] && code="200"
+  [ "$code" != "200" ] && [ -n "$code" ] && [ "$code" != "000" ] && echo "  [探测] $1 → HTTP $code" >&2
+  echo "$code"
+}
 
 # 管道模式
 if [ ! -t 0 ] && [ -z "$0" -o "$0" = "sh" -o "$0" = "-sh" ]; then
