@@ -2,19 +2,37 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
+# VERSION: 20260815.2 (排障版: 版本号显示 + check_url 强化诊断)
 #==============================================
+VERSION="20260815.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
-# 检查 URL 可达性: Range 只取1KB省流量; 206(Partial Content)=成功, 归一化为200
-# 失败时输出原因到 stderr 便于诊断 (DNS/超时/拒绝 等)
+# 检查 URL 可达性: 优先 curl(Range 只取1KB省流量), curl 不可用回退 wget
+# 206(Partial Content)=成功归一化为200; 000/空=DNS失败/超时/无curl, 输出诊断
 check_url() {
-  local code
-  code=$(curl -sL -o /dev/null -r 0-1024 -w "%{http_code}" "$1" --max-time 8 2>/dev/null)
+  local code url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -sL -o /dev/null -r 0-1024 -w "%{http_code}" "$url" --max-time 8 2>/dev/null)
+  elif command -v wget >/dev/null 2>&1; then
+    code=$(wget -q --spider --timeout=8 -O /dev/null "$url" 2>/dev/null; echo $?)
+    [ "$code" = "0" ] && code="200" || code="000"
+  else
+    echo "  [探测] 无 curl/wget 可用!" >&2
+    echo "000"; return
+  fi
   [ "$code" = "206" ] && code="200"
-  [ "$code" != "200" ] && [ -n "$code" ] && [ "$code" != "000" ] && echo "  [探测] $1 → HTTP $code" >&2
+  if [ "$code" != "200" ]; then
+    if [ -z "$code" ]; then
+      echo "  [探测] $url → 无响应(可能无curl或超时)" >&2
+    elif [ "$code" = "000" ]; then
+      echo "  [探测] $url → 连接失败(DNS/超时/被墙)" >&2
+    else
+      echo "  [探测] $url → HTTP $code" >&2
+    fi
+  fi
   echo "$code"
 }
 
@@ -29,7 +47,7 @@ fi
 
 echo ""
 echo "============================================"
-echo " PO-installer - PassWall/OpenClash 一键安装"
+echo " PO-installer - PassWall/OpenClash 一键安装 (v$VERSION)"
 echo "============================================"
 echo ""
 
