@@ -557,18 +557,22 @@ apk_install() {
       if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
         opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
         rc=$?
+        # 新版依赖缺失 (pkg_hash_check_unresolved) → 返回2, 上层保留旧版
+        grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
         grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
         rm -f "/tmp/pkg_$pkg.ipk" "$log"
       else
         err "下载 $pkg 失败，回退 opkg 直接安装..."
         opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
         rc=$?
+        grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
         grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
         rm -f "$log"
       fi
     else
       opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
       rc=$?
+      grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
       grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
       rm -f "$log"
     fi
@@ -591,6 +595,11 @@ pkginstall() {
     if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
       apk_install "$pkg"
+      local rc=$?
+      if [ "$rc" = "2" ]; then
+        err "$desc 升级失败: 新版缺少依赖 (coreutils-timeout/lyaml 等), 保留旧版 $ver"
+        return 1
+      fi
       local nver=$(get_version "$pkg")
       [ "$ver" != "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"
     else
@@ -609,6 +618,11 @@ pkgupgrade() {
   if check_installed "$pkg"; then
     local ver=$(get_version "$pkg")
     apk_install "$pkg"
+    local rc=$?
+    if [ "$rc" = "2" ]; then
+      err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
+      return 1
+    fi
     local nver=$(get_version "$pkg")
     [ "$ver" != "$nver" ] && [ -n "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($ver) ✓"
   else
@@ -625,7 +639,7 @@ pkgupgrade() {
 # PassWall2（注意: 国内 immortalwrt 源不含 PassWall2，仅 SourceForge 有）
 if [ "$INSTALL_PW2" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
-    pkginstall "luci-app-passwall2" "PassWall2" && pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" && [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+    pkginstall "luci-app-passwall2" "PassWall2"; pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"; [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
   else
     info "跳过 PassWall2: 当前 PassWall 源为国内 immortalwrt 镜像，不含 PassWall2 包（PassWall 经典版不受影响）"
     [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
