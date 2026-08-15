@@ -288,13 +288,43 @@ if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
     25.12) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12
   esac
-  SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$SF_PW_VER/$SYS_ARCH"
+  SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
 else
-  SF_BASE="https://master.dl.sourceforge.net/project/openwrt-passwall-build/snapshots/packages/$SYS_ARCH"
+  SF_PATH="snapshots/packages/$SYS_ARCH"
 fi
-SF_TEST="$SF_BASE/passwall_luci/Packages.gz"
-[ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_BASE/passwall_luci/packages.adb"
-[ "$(check_url $SF_TEST)" = "200" ] && SF_OK=1 && ok "PassWall 源 ✓ (SourceForge)" || err "PassWall 源不可用（SourceForge 国外直连失败）"
+
+# SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
+# 候选: master.dl(默认) / downloads(智能就近) / ghfast.top(国内代理)
+sf_pick_node() {
+  local spath="$1" best="" best_spd=0 prefix spd url
+  for prefix in \
+    "https://master.dl.sourceforge.net/project/openwrt-passwall-build" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build" \
+    "https://ghfast.top/https://master.dl.sourceforge.net/project/openwrt-passwall-build"; do
+    url="$prefix/$spath"
+    spd=$(curl -sL --max-time 5 -r 0-524287 -o /dev/null -w "%{speed_download}" "$url" 2>/dev/null)
+    [ -z "$spd" ] && continue
+    if awk "BEGIN{exit !($spd > $best_spd)}" 2>/dev/null; then
+      best_spd=$spd; best="$prefix"
+    fi
+  done
+  [ -n "$best" ] && echo "$best" || echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build"
+}
+
+SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
+SF_TEST="$SF_PREFIX/$SF_PATH/passwall_luci/Packages.gz"
+[ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_PREFIX/$SF_PATH/passwall_luci/packages.adb"
+if [ "$(check_url $SF_TEST)" = "200" ]; then
+  SF_OK=1
+  ok "PassWall 源 ✓ (SourceForge)"
+  info "SF 多节点测速，选最快下载节点..."
+  SF_PREFIX=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
+  ok "PassWall 下载节点: $SF_PREFIX"
+else
+  SF_OK=0
+  err "PassWall 源不可用（SourceForge 国外直连失败）"
+fi
+SF_BASE="$SF_PREFIX/$SF_PATH"
 
 # 国内 PassWall 备用源：immortalwrt 官方源自带 passwall 全家桶（luci-app-passwall/xray-core/sing-box 等），
 # 且国内有完整镜像（上海交大/VSean）。外网不通时自动降级使用。
