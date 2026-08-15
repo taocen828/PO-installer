@@ -578,7 +578,7 @@ apk_install() {
       rm -f /tmp/opkg_dep.log
     done
     printf "\r  [%s/%s] 完成             \n" "$total" "$total"
-    # 主包: curl 带进度下载
+    # 主包: 优先 find_pkg_url 拿 URL 走 curl 带进度; 找不到则 opkg download(也带进度到 stderr)
     local url prog log=/tmp/opkg_install.log
     url=$(find_pkg_url "$pkg")
     if [ -n "$url" ]; then
@@ -600,8 +600,25 @@ apk_install() {
         rm -f "$log"
       fi
     else
-      opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-      rc=$?
+      # find_pkg_url 找不到 URL(SF 无 Filename 字段) → opkg download 带进度直接显示
+      info "下载 $pkg (opkg download)..."
+      if (cd /tmp && opkg download "$pkg") 2>&1; then
+        # 找到下载的 ipk 并本地安装
+        local dl_ipk
+        dl_ipk=$(ls -t /tmp/*.ipk 2>/dev/null | head -1)
+        if [ -n "$dl_ipk" ]; then
+          opkg install "$dl_ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+          rc=$?
+          rm -f "$dl_ipk"
+        else
+          opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+          rc=$?
+        fi
+      else
+        # opkg download 失败, 直接 opkg install
+        opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+        rc=$?
+      fi
       grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
       grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
       rm -f "$log"
