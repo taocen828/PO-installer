@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.2 (排障版: 版本号显示 + check_url 强化诊断)
+# VERSION: 20260815.3 (选择循环 EOF 保护 + 无输入不默认)
 #==============================================
-VERSION="20260815.2"
+VERSION="20260815.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -380,7 +380,12 @@ echo "  4) 全部安装"
 echo ""
 printf "请输入选项 (1/2/3/4): "
 while :; do
-  read -r MAIN_CHOICE
+  if ! read -r MAIN_CHOICE; then
+    echo ""
+    info "输入流已关闭，默认安装 PassWall"
+    MAIN_CHOICE="1"
+    break
+  fi
   case "$MAIN_CHOICE" in
     1|2|3|4) break ;;
     *) printf "  无效输入，请重新选择 (1/2/3/4): " ;;
