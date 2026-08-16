@@ -268,9 +268,9 @@ for m in $MIR_BASES; do
 done
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   # OW_VER 用途: PassWall 源版本选择 + 系统源不可用时的 fallback 源
-  # 说明: opkg 系统下官方 25.12+ 已切 apk, 匹配到 24.10 是 opkg 最高可用官方版本
+  # 说明: opkg 系统官方 snapshots 已切 apk, 但 25.12 release 仍有 opkg 索引, 可正常匹配
   ok "PassWall 源版本: $OW_VER (官方镜像)"
-  [ "$PKG_MGR" = "opkg" ] && info "  └ opkg 系统: 官方 25.12+ 为 apk 格式, 最高可用 $OW_VER (系统源不受影响)"
+  [ "$PKG_MGR" = "opkg" ] && info "  └ opkg 系统: 官方 snapshots 为 apk, release 源正常 (系统源不受影响)"
 else
   # 全局兜底：所有镜像都无精确匹配时，取系列链最新版本（best effort）
   err "无精确匹配版本，尝试系列最新版本..."
