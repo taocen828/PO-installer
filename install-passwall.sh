@@ -186,7 +186,9 @@ esac
 if [ "$PKG_MGR" = "opkg" ]; then
   SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(25\.12|snapshots)$' | tr '\n' ' ')
   [ -z "$SERIES_CHAIN" ] && SERIES_CHAIN="24.10"
-  info "opkg 系统: 官方源最高匹配 24.10 (25.12+ 官方为 apk 格式)"
+  # 去尾随空格 (tr 换行→空格会产生)
+  SERIES_CHAIN=${SERIES_CHAIN% }
+  info "opkg 系统: 官方源最高匹配 $SERIES_CHAIN (25.12+ 官方为 apk 格式)"
 fi
 
 #==============================================
