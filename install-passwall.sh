@@ -267,7 +267,10 @@ for m in $MIR_BASES; do
   fi
 done
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
-  ok "匹配源版本: $OW_VER (内核 $KERNEL_VER)"
+  # OW_VER 用途: PassWall 源版本选择 + 系统源不可用时的 fallback 源
+  # 说明: opkg 系统下官方 25.12+ 已切 apk, 匹配到 24.10 是 opkg 最高可用官方版本
+  ok "PassWall 源版本: $OW_VER (官方镜像)"
+  [ "$PKG_MGR" = "opkg" ] && info "  └ opkg 系统: 官方 25.12+ 为 apk 格式, 最高可用 $OW_VER (系统源不受影响)"
 else
   # 全局兜底：所有镜像都无精确匹配时，取系列链最新版本（best effort）
   err "无精确匹配版本，尝试系列最新版本..."
@@ -277,14 +280,14 @@ else
       OW_VER=$(list_series_vers "$m" "$s" | head -1)
       if [ -n "$OW_VER" ] && [ "$(check_url $m/releases/$OW_VER/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
         MIR_USE=$m
-        info "使用镜像 $m 的系列最新版本 $OW_VER (可能与固件内核不完全匹配)"
+        info "使用镜像 $m 的系列最新版本 $OW_VER (PassWall 源用)"
         break 2
       fi
       OW_VER=""
     done
   done
   if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
-    ok "匹配源版本: $OW_VER (best effort)"
+    ok "PassWall 源版本: $OW_VER (best effort)"
   else
     err "所有 OpenWrt 镜像均无法匹配源版本"
   fi
