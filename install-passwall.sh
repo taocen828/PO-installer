@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.5 (check_installed 双重校验防假安装 + Clash 内核文件存在即已装)
+# VERSION: 20260815.6 (下载内容 magic 验证 + OpenClash 版本更新验证 + ImmortalWrt SNAPSHOT 源支持)
 #==============================================
-VERSION="20260815.5"
+VERSION="20260815.6"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -196,21 +196,28 @@ list_series_vers() {
 # 动态探测精确源版本 + 目标平台：用内核版本精确匹配官方 manifest
 # 返回: OW_VER 精确版本号, SYS_TARGET 精确 target/subtarget
 probe_ow_ver() {
-  local MIR="$1" v t mf kv V
+  local MIR="$1" v t mf kv V mfname
   OW_VER=""
+  # manifest 文件名前缀: immortalwrt 镜像用 immortalwrt-, openwrt 镜像用 openwrt-
+  mfname="openwrt"
+  echo "$MIR" | grep -q "immortalwrt" && mfname="immortalwrt"
   # 1) DISTRIB_RELEASE 直接给出（最准，但需验证镜像上确实存在该版本——镜像可能滞后）
   V=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10|25\.12)\.[0-9]+' | head -1)
   if [ -n "$V" ] && [ "$(check_url $MIR/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="$V"; return 0
   fi
-  # 2) 遍历候选平台 × 系列链，manifest 内核精确匹配（覆盖所有内核所有硬件）
+  # 2) SNAPSHOT 固件 (SYS_RELEASE=SNAPSHOT/r0-xxx): 直接探测 snapshots 目录
+  if [ "$(check_url $MIR/snapshots/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
+    OW_VER="snapshots"; return 0
+  fi
+  # 3) 遍历候选平台 × 系列链，manifest 内核精确匹配（覆盖所有内核所有硬件）
   #    候选平台: 本地检测 target 优先，然后架构映射全列表
   local cands="$SYS_TARGET $ARCH_TARGETS"
   for t in $cands; do
     [ -z "$t" ] && continue
     for s in $SERIES_CHAIN; do
       for v in $(list_series_vers "$MIR" "$s"); do
-        mf="$MIR/releases/$v/targets/${t%/*}/${t#*/}/openwrt-$v-${t%/*}-${t#*/}.manifest"
+        mf="$MIR/releases/$v/targets/${t%/*}/${t#*/}/$mfname-$v-${t%/*}-${t#*/}.manifest"
         kv=$(curl -sL --max-time 5 "$mf" 2>/dev/null | sed -n 's/^kernel - \([0-9.]*\)[~-].*/\1/p' | head -1)
         [ "$kv" = "$KERNEL_VER" ] && { OW_VER="$v"; SYS_TARGET="$t"; return 0; }
       done
@@ -225,7 +232,12 @@ probe_ow_ver() {
 # 索引文件类型按包管理器判断：opkg→Packages.gz（含 24.10），apk→packages.adb
 PKG_FILE="Packages.gz"
 [ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
-MIR_BASES="https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.openwrt.org"
+MIR_BASES="https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.openwrt.org https://downloads.immortalwrt.org"
+# ImmortalWrt 固件: immortalwrt 镜像排最前 (自编译/官方 iStoreOS 等)
+if echo "$SYS_DESC $DISTRIB_ID" | grep -qi immortalwrt; then
+  MIR_BASES="https://downloads.immortalwrt.org https://mirror.sjtu.edu.cn/immortalwrt https://mirrors.vsean.net/immortalwrt $MIR_BASES"
+  info "检测到 ImmortalWrt 固件，优先使用 immortalwrt 镜像"
+fi
 MIR_USE=""; OW_VER=""
 for m in $MIR_BASES; do
   [ "$(check_url $m/releases/)" = "200" ] || continue
@@ -731,10 +743,19 @@ fi
 # OpenClash
 # 下载函数: 直连 → ghfast.top → ghproxy.net (gh-proxy.com 已挂 403, 移除)
 # 返回 0=成功 1=全部失败
+# 验证下载内容: ipk/apk 必须是 ar 归档(!<arch>), gz 必须是 gzip 格式
+# (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
 dl_with_mirror() {
-  local url="$1" out="$2" u
+  local url="$1" out="$2" u magic
   for u in "$url" "https://ghfast.top/$url" "https://ghproxy.net/$url"; do
-    curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null && [ -s "$out" ] && return 0
+    curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
+    if [ -s "$out" ]; then
+      magic=$(head -c 8 "$out" 2>/dev/null | od -An -c | tr -d ' \n')
+      case "$out" in
+        *.gz)   echo "$magic" | grep -q '037213' && return 0 ;;
+        *)      echo "$magic" | grep -q '!<arch>' && return 0 ;;
+      esac
+    fi
     rm -f "$out"
   done
   return 1
@@ -782,9 +803,19 @@ if [ "$INSTALL_OC" = "1" ]; then
           apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
         fi
         rm -f /tmp/luci-app-openclash.ipk
-        check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓" || err "OpenClash 安装失败"
+        # 验证版本真正更新到目标 (旧版还在不算成功)
+        nver=$(get_version "luci-app-openclash")
+        if [ -n "$nver" ] && [ "$nver" = "$OC_LATEST_NUM" ]; then
+          ok "OpenClash 已升级到 $nver ✓"
+        elif [ -n "$nver" ] && [ "$OC_VER" != "$nver" ]; then
+          ok "OpenClash $nver ✓ (源版本与 GitHub 标记不一致)"
+        elif check_installed "luci-app-openclash"; then
+          err "OpenClash 安装包无效，版本未更新 (仍为 $nver)"
+        else
+          err "OpenClash 安装失败"
+        fi
       else
-        err "GitHub 全部通道失败，降级尝试 immortalwrt 源..."
+        err "GitHub 全部通道失败或下载内容无效，降级尝试 immortalwrt 源..."
         if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
           opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
           check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 安装失败"
