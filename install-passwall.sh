@@ -760,16 +760,18 @@ fi
 # 返回 0=成功 1=全部失败
 # 验证下载内容: ipk/apk 必须是 ar 归档(!<arch>), gz 必须是 gzip 格式
 # (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
-# 注意: OpenWrt 无 od/xxd, hexdump 也可能缺失; 用 dd 提取头部字节比较 (busybox 核心命令必有)
+# 注意: OpenWrt 无 od/xxd; 用 dd 提取头部字节比较 (busybox 核心命令必有)
+#       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar magic 4字节(!<ar) 纯 ASCII 无 NUL
 dl_with_mirror() {
   local url="$1" out="$2" u magic
   for u in "$url" "https://ghfast.top/$url" "https://ghproxy.net/$url"; do
     curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
     if [ -s "$out" ]; then
-      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
       case "$out" in
-        *.gz)   [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-        *)      [ "$magic" = "!<ar" ] && return 0 ;;
+        *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
+                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+        *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
+                [ "$magic" = "!<ar" ] && return 0 ;;
       esac
     fi
     rm -f "$out"
