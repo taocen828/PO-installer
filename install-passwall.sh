@@ -668,18 +668,25 @@ pkginstall() {
 }
 
 # 升级函数
+# 先比较版本: 已是最新则跳过下载 (避免每次跑脚本都重新下载 geo 包)
 pkgupgrade() {
   local pkg="$1" desc="$2"
   if check_installed "$pkg"; then
     local ver=$(get_version "$pkg")
-    apk_install "$pkg"
-    local rc=$?
-    if [ "$rc" = "2" ]; then
-      err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
-      return 1
+    local repo_ver=$(get_repo_version "$pkg")
+    if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+      info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
+      apk_install "$pkg"
+      local rc=$?
+      if [ "$rc" = "2" ]; then
+        err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
+        return 1
+      fi
+      local nver=$(get_version "$pkg")
+      [ "$ver" != "$nver" ] && [ -n "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"
+    else
+      ok "$desc ($ver) ✓"
     fi
-    local nver=$(get_version "$pkg")
-    [ "$ver" != "$nver" ] && [ -n "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($ver) ✓"
   else
     info "安装 $desc..."
     apk_install "$pkg"
@@ -775,10 +782,14 @@ if [ "$INSTALL_OC" = "1" ]; then
 
   # 2) Clash 内核: 已装也重新下载升级 (无确认)
   info "Clash 内核检查/升级..."
-  OC_CORE_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
-  if [ -z "$OC_CORE_URL" ]; then
-    OC_CORE_URL=$(curl -sL --max-time 10 "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" 2>/dev/null | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
-  fi
+  # 提取内核 URL: 直连 → ghfast → ghproxy 三通道轮换 (与 get_oc_latest 一致)
+  OC_CORE_URL=""
+  for api in "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
+             "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
+             "https://ghproxy.net/https://api.github.com/repos/vernesong/OpenClash/releases/latest"; do
+    OC_CORE_URL=$(curl -sL --max-time 10 "$api" 2>/dev/null | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
+    [ -n "$OC_CORE_URL" ] && break
+  done
   if [ -n "$OC_CORE_URL" ]; then
     info "下载 Clash 内核..."
     if dl_with_mirror "$OC_CORE_URL" /tmp/clash-core.tar.gz; then
