@@ -567,7 +567,8 @@ get_repo_version() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
     # 多源时 opkg list 按源顺序输出, 取最高版本 (PassWall 源通常最新)
-    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | awk '{print $3}' | sort -V | tail -1
+    # 注意: 版本多为日期戳 (202608082221.1), 用字典序排序 (sort -V 数值比较会把长日期当大数, 排序错误)
+    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | awk '{print $3}' | sort | tail -1
   else
     apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
   fi
