@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.4 (apk info -L 不可靠修复 + mihomo stderr 版本检测 + 序号控制字符过滤)
+# VERSION: 20260815.5 (check_installed 双重校验防假安装 + Clash 内核文件存在即已装)
 #==============================================
-VERSION="20260815.4"
+VERSION="20260815.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -543,11 +543,14 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # APK 模式: apk info -L 不可靠(可能返回空), 用元数据判断
-    # (wget 包装器已解决 SourceForge 重定向, 不会再有假安装)
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
+    # APK 模式: 元数据 + 实际文件列表双重判断
+    # 假安装(只注册元数据没装文件)时 apk info -L 无文件行 → 判未装
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
+    local files
+    files=$(apk info -L "$pkg" 2>/dev/null | grep -v "^$" | grep -vc "contains:")
+    [ "${files:-0}" -gt 0 ] && return 0
+    return 1
   fi
-  return 1
 }
 
 # 获取源中的最新版本
@@ -796,51 +799,94 @@ if [ "$INSTALL_OC" = "1" ]; then
     ok "OpenClash 已是最新版 ($OC_VER)"
   fi
 
-  # 2) Clash 内核: 检测已装版本，最新则跳过
+  # 2) Clash 内核: 文件存在且非空 = 已装, 不反复下载
   # 注意: OpenClash 的 GitHub release 只有 ipk/apk 主程序, 没有内核资产!
   #       内核需从 mihomo (Clash Meta) 官方 release 下载, 命名 mihomo-linux-<arch>-v<ver>.gz
-  info "Clash 内核检查/升级..."
-  # 检测已装内核版本 (mihomo -v 输出到 stderr, 需 2>&1 捕获)
+  info "Clash 内核检查..."
+  # 检测已装内核文件 (clash_meta / clash / clash_tun, 非空才算)
+  CORE_FILE=""
   INSTALLED_MIHOMO=""
-  if [ -f /etc/openclash/core/clash_meta ]; then
-    INSTALLED_MIHOMO=$(/etc/openclash/core/clash_meta -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    [ -z "$INSTALLED_MIHOMO" ] && INSTALLED_MIHOMO=$(/etc/openclash/core/clash_meta --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  elif [ -f /etc/openclash/core/clash ]; then
-    INSTALLED_MIHOMO=$(/etc/openclash/core/clash -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  elif [ -f /etc/openclash/core/clash_tun ]; then
-    INSTALLED_MIHOMO=$(/etc/openclash/core/clash_tun -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  fi
-  case "$SYS_ARCH" in
-    x86_64|amd64) MIHOMO_ARCH="amd64" ;;
-    aarch64*) MIHOMO_ARCH="arm64" ;;
-    *) MIHOMO_ARCH="$(echo "$SYS_ARCH" | grep -oE 'amd64|arm64|armv7|386' | head -1)" ;;
-  esac
-  [ -z "$MIHOMO_ARCH" ] && MIHOMO_ARCH="amd64"
-  # 获取 mihomo 最新版本 (直连 → ghfast → ghproxy)
-  MIHOMO_VER=""
-  for api in "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
-             "https://ghfast.top/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
-             "https://ghproxy.net/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"; do
-    MIHOMO_VER=$(curl -sL --max-time 10 "$api" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
-    [ -n "$MIHOMO_VER" ] && break
+  for c in /etc/openclash/core/clash_meta /etc/openclash/core/clash /etc/openclash/core/clash_tun; do
+    if [ -f "$c" ] && [ -s "$c" ]; then
+      CORE_FILE="$c"
+      break
+    fi
   done
-  if [ -n "$MIHOMO_VER" ]; then
-    if [ -n "$INSTALLED_MIHOMO" ] && [ "$INSTALLED_MIHOMO" = "$MIHOMO_VER" ]; then
-      ok "Clash Meta 内核已是最新 ($MIHOMO_VER)"
+  if [ -n "$CORE_FILE" ]; then
+    # 尝试解析版本 (mihomo -v 输出到 stderr, 需 2>&1; 解析失败也视为已装)
+    INSTALLED_MIHOMO=$("$CORE_FILE" -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    [ -z "$INSTALLED_MIHOMO" ] && INSTALLED_MIHOMO=$("$CORE_FILE" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$INSTALLED_MIHOMO" ]; then
+      ok "Clash 内核已安装 ($INSTALLED_MIHOMO)"
     else
-      MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_VER/mihomo-linux-$MIHOMO_ARCH-$MIHOMO_VER.gz"
-      info "下载 Clash Meta 内核 $MIHOMO_VER ($MIHOMO_ARCH)..."
-      if dl_with_mirror "$MIHOMO_URL" /tmp/mihomo-core.gz; then
-        mkdir -p /etc/openclash/core
-        gzip -dc /tmp/mihomo-core.gz > /etc/openclash/core/clash_meta 2>/dev/null
-        rm -f /tmp/mihomo-core.gz
-        chmod +x /etc/openclash/core/clash_meta 2>/dev/null && ok "Clash Meta 内核已安装/升级 ($MIHOMO_VER)" || err "Clash 内核安装失败"
-      else
-        err "Clash Meta 内核下载失败（GitHub 通道不可达）"
-      fi
+      ok "Clash 内核已安装 (跳过下载)"
+    fi
+    # 获取最新版本用于对比 (直连 → ghfast → ghproxy)
+    MIHOMO_VER=""
+    for api in "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
+               "https://ghfast.top/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
+               "https://ghproxy.net/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"; do
+      MIHOMO_VER=$(curl -sL --max-time 10 "$api" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
+      [ -n "$MIHOMO_VER" ] && break
+    done
+    # 版本可解析且落后于最新 → 询问升级
+    if [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ] && [ "$INSTALLED_MIHOMO" != "$MIHOMO_VER" ]; then
+      echo -n "  升级 Clash 内核 ($INSTALLED_MIHOMO → $MIHOMO_VER)？[Y/n]: "
+      read -r CORE_UP
+      case "$CORE_UP" in n|N|no|NO) info "跳过升级" ;; *)
+        case "$SYS_ARCH" in
+          x86_64|amd64) MIHOMO_ARCH="amd64" ;;
+          aarch64*) MIHOMO_ARCH="arm64" ;;
+          *) MIHOMO_ARCH="$(echo "$SYS_ARCH" | grep -oE 'amd64|arm64|armv7|386' | head -1)" ;;
+        esac
+        [ -z "$MIHOMO_ARCH" ] && MIHOMO_ARCH="amd64"
+        MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_VER/mihomo-linux-$MIHOMO_ARCH-$MIHOMO_VER.gz"
+        info "下载 Clash Meta 内核 $MIHOMO_VER ($MIHOMO_ARCH)..."
+        if dl_with_mirror "$MIHOMO_URL" /tmp/mihomo-core.gz; then
+          mkdir -p /etc/openclash/core
+          gzip -dc /tmp/mihomo-core.gz > "$CORE_FILE" 2>/dev/null
+          rm -f /tmp/mihomo-core.gz
+          chmod +x "$CORE_FILE" 2>/dev/null && ok "Clash Meta 内核已升级 ($MIHOMO_VER)" || err "Clash 内核安装失败"
+        else
+          err "Clash Meta 内核下载失败（GitHub 通道不可达）"
+        fi
+      ;; esac
+    elif [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ]; then
+      ok "Clash 内核已是最新 ($MIHOMO_VER)"
     fi
   else
-    err "无法获取 Clash Meta 内核版本 (GitHub 不可达)"
+    # 无内核 → 询问下载
+    echo -n "  下载 Clash 运行内核？[Y/n]: "
+    read -r CORE_ANS
+    case "$CORE_ANS" in n|N|no|NO) info "跳过 Clash 内核" ;; *)
+      case "$SYS_ARCH" in
+        x86_64|amd64) MIHOMO_ARCH="amd64" ;;
+        aarch64*) MIHOMO_ARCH="arm64" ;;
+        *) MIHOMO_ARCH="$(echo "$SYS_ARCH" | grep -oE 'amd64|arm64|armv7|386' | head -1)" ;;
+      esac
+      [ -z "$MIHOMO_ARCH" ] && MIHOMO_ARCH="amd64"
+      MIHOMO_VER=""
+      for api in "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
+                 "https://ghfast.top/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
+                 "https://ghproxy.net/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"; do
+        MIHOMO_VER=$(curl -sL --max-time 10 "$api" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
+        [ -n "$MIHOMO_VER" ] && break
+      done
+      if [ -n "$MIHOMO_VER" ]; then
+        MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_VER/mihomo-linux-$MIHOMO_ARCH-$MIHOMO_VER.gz"
+        info "下载 Clash Meta 内核 $MIHOMO_VER ($MIHOMO_ARCH)..."
+        if dl_with_mirror "$MIHOMO_URL" /tmp/mihomo-core.gz; then
+          mkdir -p /etc/openclash/core
+          gzip -dc /tmp/mihomo-core.gz > /etc/openclash/core/clash_meta 2>/dev/null
+          rm -f /tmp/mihomo-core.gz
+          chmod +x /etc/openclash/core/clash_meta 2>/dev/null && ok "Clash Meta 内核已安装 ($MIHOMO_VER)" || err "Clash 内核安装失败"
+        else
+          err "Clash Meta 内核下载失败（GitHub 通道不可达）"
+        fi
+      else
+        err "无法获取 Clash Meta 内核版本 (GitHub 不可达)"
+      fi
+    ;; esac
   fi
 fi
 
