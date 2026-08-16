@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.7 (apk add --force-reinstall 修复假安装残留导致安装失败)
+# VERSION: 20260815.8 (check_installed 回退元数据判断: apk info -L 在部分系统返回空导致误报失败)
 #==============================================
-VERSION="20260815.7"
+VERSION="20260815.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -555,14 +555,11 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # APK 模式: 元数据 + 实际文件列表双重判断
-    # 假安装(只注册元数据没装文件)时 apk info -L 无文件行 → 判未装
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
-    local files
-    files=$(apk info -L "$pkg" 2>/dev/null | grep -v "^$" | grep -vc "contains:")
-    [ "${files:-0}" -gt 0 ] && return 0
-    return 1
+    # APK 模式: 元数据判断 (实测 apk info -L 在部分 APK 系统返回空, 即使文件已装)
+    # 假安装问题已由 wget 包装器根治 (SourceForge 重定向), 元数据存在=包已装
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
   fi
+  return 1
 }
 
 # 获取源中的最新版本
