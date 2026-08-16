@@ -840,7 +840,13 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     comp="${comp_desc%%:*}"
     desc="${comp_desc##*:}"
     if check_installed "$comp"; then
-      echo "  $i) $desc ($(get_version $comp)) ✓"
+      local ver=$(get_version "$comp")
+      local repo_ver=$(get_repo_version "$comp")
+      if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+        echo "  $i) $desc ($ver → 可升级 $repo_ver) ⬆"
+      else
+        echo "  $i) $desc ($ver) ✓"
+      fi
     else
       echo "  $i) $desc"
     fi
