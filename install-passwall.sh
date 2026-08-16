@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.8 (check_installed 回退元数据判断: apk info -L 在部分系统返回空导致误报失败)
+# VERSION: 20260815.9 (opkg 多源版本: get_repo_version 取最高, find_pkg_url 优先 PassWall 源, 下载版本校验)
 #==============================================
-VERSION="20260815.8"
+VERSION="20260815.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -566,7 +566,8 @@ check_installed() {
 get_repo_version() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
-    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | awk '{print $3}' | head -1
+    # 多源时 opkg list 按源顺序输出, 取最高版本 (PassWall 源通常最新)
+    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | awk '{print $3}' | sort -V | tail -1
   else
     apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
   fi
@@ -577,7 +578,8 @@ get_repo_version() {
 # 注意: 索引文件名可能带 .gz 后缀或 feed 名不同, 兼容多种命名
 find_pkg_url() {
   local pkg="$1" fn="" feed="" url=""
-  for idx in /var/opkg-lists/*; do
+  # 优先 PassWall 源索引 (版本最新), 再扫其他源
+  for idx in /var/opkg-lists/passwall* /var/opkg-lists/*; do
     [ -f "$idx" ] || continue
     fn=$(awk -v p="$pkg" '
       $1=="Package:" && $2==p {f=1; next}
@@ -615,38 +617,51 @@ apk_install() {
     done
     printf "\r  [%s/%s] 完成             \n" "$total" "$total"
     # 主包: 优先 find_pkg_url 拿 URL 走 curl 带进度; 找不到则 opkg download(也带进度到 stderr)
-    local url prog log=/tmp/opkg_install.log
+    local url prog log=/tmp/opkg_install.log repo_ver
     url=$(find_pkg_url "$pkg")
+    repo_ver=$(get_repo_version "$pkg")
     if [ -n "$url" ]; then
-      prog="-sS"; [ -t 1 ] && prog="--progress-bar"
-      info "下载 $pkg (带进度)..."
-      if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
-        opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-        rc=$?
-        # 新版依赖缺失 (pkg_hash_check_unresolved) → 返回2, 上层保留旧版
-        grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-        grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
-        rm -f "/tmp/pkg_$pkg.ipk" "$log"
-      else
-        err "下载 $pkg 失败，回退 opkg 直接安装..."
+      # 验证 URL 文件名版本 = 目标版本 (多源时 find_pkg_url 可能拿到旧源 URL, 下载旧版无意义)
+      if [ -n "$repo_ver" ] && ! echo "$url" | grep -Fq "$repo_ver"; then
+        info "索引版本不匹配 (期望 $repo_ver)，直接 opkg install..."
         opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
         rc=$?
         grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
         grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
         rm -f "$log"
+      else
+        prog="-sS"; [ -t 1 ] && prog="--progress-bar"
+        info "下载 $pkg (带进度)..."
+        if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
+          opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+          rc=$?
+          # 新版依赖缺失 (pkg_hash_check_unresolved) → 返回2, 上层保留旧版
+          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          rm -f "/tmp/pkg_$pkg.ipk" "$log"
+        else
+          err "下载 $pkg 失败，回退 opkg 直接安装..."
+          opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+          rc=$?
+          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          rm -f "$log"
+        fi
       fi
     else
       # find_pkg_url 找不到 URL → 再试 opkg download 预下载 (输出到 TTY 可见)
       info "下载 $pkg (opkg download)..."
       if (cd /tmp && opkg download "$pkg") 2>&1; then
-        # 找到下载的 ipk 并本地安装
+        # 找到下载的 ipk 并本地安装; 验证文件名版本 = 目标版本, 否则弃用直装
         local dl_ipk
         dl_ipk=$(ls -t /tmp/*.ipk 2>/dev/null | head -1)
-        if [ -n "$dl_ipk" ]; then
+        if [ -n "$dl_ipk" ] && { [ -z "$repo_ver" ] || echo "$dl_ipk" | grep -Fq "$repo_ver"; }; then
           opkg install "$dl_ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
           rc=$?
           rm -f "$dl_ipk"
         else
+          [ -n "$dl_ipk" ] && rm -f "$dl_ipk"
+          info "下载版本不匹配 (期望 $repo_ver)，直接 opkg install..."
           opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
           rc=$?
         fi
