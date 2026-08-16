@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.3 (选择循环 EOF 保护 + 无输入不默认)
+# VERSION: 20260815.4 (apk info -L 不可靠修复 + mihomo stderr 版本检测 + 序号控制字符过滤)
 #==============================================
-VERSION="20260815.3"
+VERSION="20260815.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -543,14 +543,11 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # 防假安装: 元数据 + 真实文件都要存在才算安装
-    # (SourceForge 重定向失败时 apk 只注册元数据, apk info -L 为空)
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
-    local n
-    n=$(apk info -L "$pkg" 2>/dev/null | grep -vc "^contains:\|^$\|^lib/")
-    [ "${n:-0}" -gt 0 ] && return 0
-    return 1
+    # APK 模式: apk info -L 不可靠(可能返回空), 用元数据判断
+    # (wget 包装器已解决 SourceForge 重定向, 不会再有假安装)
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
   fi
+  return 1
 }
 
 # 获取源中的最新版本
@@ -803,15 +800,15 @@ if [ "$INSTALL_OC" = "1" ]; then
   # 注意: OpenClash 的 GitHub release 只有 ipk/apk 主程序, 没有内核资产!
   #       内核需从 mihomo (Clash Meta) 官方 release 下载, 命名 mihomo-linux-<arch>-v<ver>.gz
   info "Clash 内核检查/升级..."
-  # 检测已装内核版本
+  # 检测已装内核版本 (mihomo -v 输出到 stderr, 需 2>&1 捕获)
   INSTALLED_MIHOMO=""
   if [ -f /etc/openclash/core/clash_meta ]; then
-    INSTALLED_MIHOMO=$(/etc/openclash/core/clash_meta -v 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    [ -z "$INSTALLED_MIHOMO" ] && INSTALLED_MIHOMO=$(/etc/openclash/core/clash_meta --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    INSTALLED_MIHOMO=$(/etc/openclash/core/clash_meta -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    [ -z "$INSTALLED_MIHOMO" ] && INSTALLED_MIHOMO=$(/etc/openclash/core/clash_meta --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   elif [ -f /etc/openclash/core/clash ]; then
-    INSTALLED_MIHOMO=$(/etc/openclash/core/clash -v 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    INSTALLED_MIHOMO=$(/etc/openclash/core/clash -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   elif [ -f /etc/openclash/core/clash_tun ]; then
-    INSTALLED_MIHOMO=$(/etc/openclash/core/clash_tun -v 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    INSTALLED_MIHOMO=$(/etc/openclash/core/clash_tun -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   fi
   case "$SYS_ARCH" in
     x86_64|amd64) MIHOMO_ARCH="amd64" ;;
@@ -888,6 +885,9 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   echo -n "> "
   read -r OPT_CHOICES
   for idx in $OPT_CHOICES; do
+    # 过滤非数字字符(退格^H等控制字符会混入序号)
+    idx=$(printf '%s' "$idx" | tr -cd '0-9')
+    [ -z "$idx" ] && continue
     eval "comp=\"\$OPT_COMP_$idx\""
     eval "desc=\"\$OPT_DESC_$idx\""
     [ -n "$comp" ] && pkginstall "$comp" "$desc"
