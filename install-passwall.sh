@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.6 (下载内容 magic 验证 + OpenClash 版本更新验证 + ImmortalWrt SNAPSHOT 源支持)
+# VERSION: 20260815.7 (apk add --force-reinstall 修复假安装残留导致安装失败)
 #==============================================
-VERSION="20260815.6"
+VERSION="20260815.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -665,7 +665,9 @@ apk_install() {
     return $rc
   fi
   local log=/tmp/apk_add.log
-  apk add --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+  # --force-reinstall: 修复假安装(数据库有元数据但文件缺失)时 apk add 跳过解压的问题
+  # 之前的 SourceForge 重定向失败可能留下只注册元数据无文件的"假安装", apk add 认为已装直接 OK
+  apk add --allow-untrusted --force-broken-world --force-reinstall "$pkg" > "$log" 2>&1
   rc=$?
   grep -v "^WARNING.*opening" "$log" || true
   rm -f "$log"
@@ -800,7 +802,7 @@ if [ "$INSTALL_OC" = "1" ]; then
         if [ "$PKG_MGR" = "opkg" ]; then
           opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
         else
-          apk add --allow-untrusted /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
+          apk add --allow-untrusted --force-reinstall /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
         fi
         rm -f /tmp/luci-app-openclash.ipk
         # 验证版本真正更新到目标 (旧版还在不算成功)
