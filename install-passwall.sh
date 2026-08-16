@@ -50,18 +50,6 @@ echo "============================================"
 echo " PO-installer - PassWall/OpenClash 一键安装 (v$VERSION)"
 echo "============================================"
 echo ""
-
-if [ -z "$HTTP_PROXY" ]; then
-  echo -n "需要代理？输入地址 (http://user:pass@host:port) 或直接回车跳过: "
-  read -r PROXY_INPUT
-  if [ -n "$PROXY_INPUT" ]; then
-    # 大小写都导出: curl 可能忽略大写 HTTP_PROXY(CGI 安全), busybox wget/opkg 认小写
-    export HTTP_PROXY="$PROXY_INPUT" HTTPS_PROXY="$PROXY_INPUT"
-    export http_proxy="$PROXY_INPUT" https_proxy="$PROXY_INPUT"
-    export ALL_PROXY="$PROXY_INPUT" all_proxy="$PROXY_INPUT"
-    echo "  ✓ 已设置代理"
-  fi
-fi
 echo ""
 
 #==============================================
