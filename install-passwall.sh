@@ -181,14 +181,14 @@ case "$KERNEL_VER" in
   6.*)    SERIES_CHAIN="24.10 snapshots" ;;
   *)      SERIES_CHAIN="snapshots" ;;
 esac
-# opkg 系统: 官方 25.12+ 已全面切 apk (无 Packages.gz), opkg 最高只能用 24.10
-# (第三方固件如 Kwrt/iStoreOS 标 25.12-SNAPSHOT 但仍用 opkg, 官方源无对应 opkg 包)
+# opkg 系统: 官方 snapshots(master) 已切 apk (无 Packages.gz), 但 25.12 release 仍有 opkg 索引
+# 只过滤 snapshots, 保留 25.12 (Kwrt/iStoreOS 等 25.12-SNAPSHOT opkg 固件可用官方 25.12 源)
 if [ "$PKG_MGR" = "opkg" ]; then
-  SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(25\.12|snapshots)$' | tr '\n' ' ')
+  SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(snapshots)$' | tr '\n' ' ')
   [ -z "$SERIES_CHAIN" ] && SERIES_CHAIN="24.10"
   # 去尾随空格 (tr 换行→空格会产生)
   SERIES_CHAIN=${SERIES_CHAIN% }
-  info "opkg 系统: 官方源最高匹配 $SERIES_CHAIN (25.12+ 官方为 apk 格式)"
+  info "opkg 系统: 官方 snapshots 为 apk 格式，源链过滤 snapshots → $SERIES_CHAIN"
 fi
 
 #==============================================
