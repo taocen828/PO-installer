@@ -785,33 +785,36 @@ if [ "$INSTALL_OC" = "1" ]; then
   fi
 
   # 2) Clash 内核: 已装也重新下载升级 (无确认)
+  # 注意: OpenClash 的 GitHub release 只有 ipk/apk 主程序, 没有内核资产!
+  #       内核需从 mihomo (Clash Meta) 官方 release 下载, 命名 mihomo-linux-<arch>-v<ver>.gz
   info "Clash 内核检查/升级..."
-  # 提取内核 URL: 直连 → ghfast → ghproxy 三通道轮换 (与 get_oc_latest 一致)
-  OC_CORE_URL=""
-  for api in "https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
-             "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" \
-             "https://ghproxy.net/https://api.github.com/repos/vernesong/OpenClash/releases/latest"; do
-    OC_CORE_URL=$(curl -sL --max-time 10 "$api" 2>/dev/null | grep -oE 'https://[^"]+clash-linux-[^"]+\.tar\.gz' | head -1)
-    [ -n "$OC_CORE_URL" ] && break
+  case "$SYS_ARCH" in
+    x86_64|amd64) MIHOMO_ARCH="amd64" ;;
+    aarch64*) MIHOMO_ARCH="arm64" ;;
+    *) MIHOMO_ARCH="$(echo "$SYS_ARCH" | grep -oE 'amd64|arm64|armv7|386' | head -1)" ;;
+  esac
+  [ -z "$MIHOMO_ARCH" ] && MIHOMO_ARCH="amd64"
+  # 获取 mihomo 最新版本 (直连 → ghfast → ghproxy)
+  MIHOMO_VER=""
+  for api in "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
+             "https://ghfast.top/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" \
+             "https://ghproxy.net/https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"; do
+    MIHOMO_VER=$(curl -sL --max-time 10 "$api" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
+    [ -n "$MIHOMO_VER" ] && break
   done
-  if [ -n "$OC_CORE_URL" ]; then
-    info "下载 Clash 内核..."
-    if dl_with_mirror "$OC_CORE_URL" /tmp/clash-core.tar.gz; then
-      cd /tmp && tar xzf clash-core.tar.gz 2>/dev/null
+  if [ -n "$MIHOMO_VER" ]; then
+    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_VER/mihomo-linux-$MIHOMO_ARCH-$MIHOMO_VER.gz"
+    info "下载 Clash Meta 内核 $MIHOMO_VER ($MIHOMO_ARCH)..."
+    if dl_with_mirror "$MIHOMO_URL" /tmp/mihomo-core.gz; then
       mkdir -p /etc/openclash/core
-      BIN=$(find /tmp -maxdepth 1 -type f -name "clash*" ! -name "*.tar.gz" 2>/dev/null | head -1)
-      if [ -n "$BIN" ]; then
-        cp -f "$BIN" /etc/openclash/core/clash 2>/dev/null
-        chmod +x /etc/openclash/core/clash 2>/dev/null && ok "Clash 内核已安装/升级" || err "Clash 内核安装失败"
-      else
-        err "未找到 Clash 内核二进制"
-      fi
-      rm -f /tmp/clash-core.tar.gz /tmp/clash* 2>/dev/null
+      gzip -dc /tmp/mihomo-core.gz > /etc/openclash/core/clash_meta 2>/dev/null
+      rm -f /tmp/mihomo-core.gz
+      chmod +x /etc/openclash/core/clash_meta 2>/dev/null && ok "Clash Meta 内核已安装/升级 ($MIHOMO_VER)" || err "Clash 内核安装失败"
     else
-      err "Clash 内核下载失败（GitHub 通道不可达）"
+      err "Clash Meta 内核下载失败（GitHub 通道不可达）"
     fi
   else
-    err "无法获取 Clash 内核下载地址 (GitHub 不可达)"
+    err "无法获取 Clash Meta 内核版本 (GitHub 不可达)"
   fi
 fi
 
