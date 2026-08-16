@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.9 (opkg 多源版本: get_repo_version 取最高, find_pkg_url 优先 PassWall 源, 下载版本校验)
+# VERSION: 20260815.10 (dl_with_mirror magic 校验改用 dd - OpenWrt 无 od/xxd 导致下载判失败)
 #==============================================
-VERSION="20260815.9"
+VERSION="20260815.10"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -760,15 +760,16 @@ fi
 # 返回 0=成功 1=全部失败
 # 验证下载内容: ipk/apk 必须是 ar 归档(!<arch>), gz 必须是 gzip 格式
 # (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
+# 注意: OpenWrt 无 od/xxd, hexdump 也可能缺失; 用 dd 提取头部字节比较 (busybox 核心命令必有)
 dl_with_mirror() {
   local url="$1" out="$2" u magic
   for u in "$url" "https://ghfast.top/$url" "https://ghproxy.net/$url"; do
     curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
     if [ -s "$out" ]; then
-      magic=$(head -c 8 "$out" 2>/dev/null | od -An -c | tr -d ' \n')
+      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
       case "$out" in
-        *.gz)   echo "$magic" | grep -q '037213' && return 0 ;;
-        *)      echo "$magic" | grep -q '!<arch>' && return 0 ;;
+        *.gz)   [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+        *)      [ "$magic" = "!<ar" ] && return 0 ;;
       esac
     fi
     rm -f "$out"
