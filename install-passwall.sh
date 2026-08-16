@@ -550,6 +550,7 @@ get_repo_version() {
 
 # 从 opkg 索引找包下载 URL（用于带进度下载）
 # 索引在 /var/opkg-lists/<feed>（opkg update 后的解压文本）
+# 注意: 索引文件名可能带 .gz 后缀或 feed 名不同, 兼容多种命名
 find_pkg_url() {
   local pkg="$1" fn="" feed="" url=""
   for idx in /var/opkg-lists/*; do
@@ -561,7 +562,10 @@ find_pkg_url() {
     [ -n "$fn" ] && { feed=$(basename "$idx"); break; }
   done
   [ -z "$fn" ] && { echo ""; return; }
-  url=$(grep -h "^src/gz $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
+  # feed 名可能带 .gz 后缀, 去掉
+  feed=${feed%.gz}
+  # 从 distfeeds/customfeeds 找该 feed 的 URL (兼容 src/gz 和 src 格式)
+  url=$(grep -h "^src/gz $feed \|^src $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
   [ -z "$url" ] && { echo ""; return; }
   echo "$url/$fn"
 }
@@ -608,7 +612,7 @@ apk_install() {
         rm -f "$log"
       fi
     else
-      # find_pkg_url 找不到 URL(SF 无 Filename 字段) → opkg download 带进度直接显示
+      # find_pkg_url 找不到 URL → 再试 opkg download 预下载 (输出到 TTY 可见)
       info "下载 $pkg (opkg download)..."
       if (cd /tmp && opkg download "$pkg") 2>&1; then
         # 找到下载的 ipk 并本地安装
