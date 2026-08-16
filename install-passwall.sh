@@ -485,8 +485,8 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 # 源组合: SF 可用 → 加 SF + immortalwrt(补充); SF 不可用 → 仅 immortalwrt
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
-    # 清旧声明（幂等）
-    sed -i '/passwall/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
+    # 清旧声明（幂等）: 匹配 passwall 和 iw_ 前缀 (SF: passwall_*, immortalwrt: iw_*)
+    sed -i '/passwall/d; /^src\/gz iw_/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
     # 1) SF 源（可用时）
     if [ "$SF_OK" = "1" ]; then
       wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
