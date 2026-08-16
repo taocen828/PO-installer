@@ -327,25 +327,34 @@ fi
 SF_BASE="$SF_PREFIX/$SF_PATH"
 
 # 国内 PassWall 备用源：immortalwrt 官方源自带 passwall 全家桶（luci-app-passwall/xray-core/sing-box 等），
-# 且国内有完整镜像（上海交大/VSean）。外网不通时自动降级使用。
+# 且国内有完整镜像（上海交大/VSean）。
+# 注意: 始终探测(不只在 SF 失败时)——SF 某些版本/架构构建残缺(如 21.02 aarch64 缺 passwall2/geoview),
+#       immortalwrt 作为补充源可兜底。版本优先匹配当前系列, 无则用 23.05.4 兜底。
 IW_OK=0; IW_USE=""; IW_VER=""
-if [ "$SF_OK" != "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-  info "SourceForge 不通，探测国内 immortalwrt 镜像（自带 PassWall 包）..."
+if [ "$PKG_MGR" = "opkg" ]; then
+  info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
+  # 按当前版本系列选 immortalwrt 版本 (21.02→21.02.7, 22.03→23.05.4, 23.05→23.05.4, 24.10→24.10.6)
+  case "$PW_VER" in
+    21.02) IW_CAND="21.02.7" ;;
+    22.03|23.05) IW_CAND="23.05.4" ;;
+    24.10) IW_CAND="24.10.6" ;;
+    *) IW_CAND="23.05.4" ;;
+  esac
   for iw in "https://mirror.sjtu.edu.cn/immortalwrt" "https://mirrors.vsean.net/immortalwrt" "https://downloads.immortalwrt.org"; do
-    [ "$(check_url $iw/releases/23.05.4/packages/$SYS_ARCH/luci/Packages.gz)" != "200" ] && continue
-    IW_USE=$iw; IW_VER="23.05.4"
+    [ "$(check_url $iw/releases/$IW_CAND/packages/$SYS_ARCH/luci/Packages.gz)" != "200" ] && continue
+    IW_USE=$iw; IW_VER="$IW_CAND"
     # 确认 luci feed 有 passwall（.gz 解压后 grep 包名）
     if curl -sL --max-time 8 "$iw/releases/$IW_VER/packages/$SYS_ARCH/luci/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | grep -q "luci-app-passwall"; then
       IW_OK=1
-      ok "国内 PassWall 源 ✓ (immortalwrt 镜像: $IW_USE)"
+      ok "国内 PassWall 源 ✓ (immortalwrt $IW_VER 镜像: $IW_USE)"
       break
     fi
   done
-  [ "$IW_OK" = "0" ] && err "国内 immortalwrt 镜像也不可用"
+  [ "$IW_OK" = "0" ] && info "immortalwrt 镜像不可用（仅 SF 源）"
 fi
 
 # OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
-OW_OK=0
+OW_OK=0; TARGET_OK=0
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   # OW_VER 为数字版本号 → releases；否则（snapshots）→ snapshots 目录
   case "$OW_VER" in
@@ -356,9 +365,15 @@ if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   for feed in base luci; do
     [ "$(check_url $OW_BASE/packages/$SYS_ARCH/$feed/$PKG_FILE)" != "200" ] && { OW_OK=0; break; }
   done
-  # targets 源（kmod 所在目录）也需可用
+  # targets 源（kmod 所在目录）: 厂商定制 target (如 mt7987) 官方可能没有,
+  # 此时降级为"仅 packages 源"——普通包可装, 仅 kmod 不可用
+  TARGET_OK=1
   if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
-    [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ] && OW_OK=0
+    if [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ]; then
+      TARGET_OK=0
+      info "目标平台 $SYS_TARGET 在官方源无 kmod 源（厂商定制平台?），降级为仅 packages 源"
+      info "提示: 普通包(PassWall/核心)可正常安装, kmod 内核模块需用固件厂商源"
+    fi
   fi
   [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt 源 ✓ ($OW_BASE)"
 fi
@@ -422,7 +437,7 @@ else
       cp /etc/opkg/distfeeds.conf /tmp/distfeeds.conf.bak 2>/dev/null
       [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^/#/' /etc/opkg/distfeeds.conf
       { echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
-        if [ -n "$SYS_TARGET" ]; then
+        if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
           echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages"
         fi
         echo "src/gz openwrt_base $OW_USE/packages/$SYS_ARCH/base"
@@ -444,7 +459,7 @@ else
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/routing/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/telephony/packages.adb"
-        if [ -n "$SYS_TARGET" ]; then
+        if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
           echo "$OW_USE/targets/$SYS_TARGET/packages/packages.adb"
         fi
       } > /etc/apk/repositories.d/customfeeds.list
@@ -467,43 +482,44 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 
 # 添加 PassWall 源（装 PassWall/PassWall2/OpenClash 时都需要）
 # OpenClash 也需要 immortalwrt 源作为 GitHub 不可达时的降级通道
-# 降级链: SourceForge 官方 → immortalwrt 国内镜像（外网不通时）
+# 源组合: SF 可用 → 加 SF + immortalwrt(补充); SF 不可用 → 仅 immortalwrt
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
-  if [ "$SF_OK" = "1" ]; then
-    info "添加 PassWall 源 (SourceForge)..."
-    if [ "$PKG_MGR" = "opkg" ]; then
+  if [ "$PKG_MGR" = "opkg" ]; then
+    # 清旧声明（幂等）
+    sed -i '/passwall/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
+    # 1) SF 源（可用时）
+    if [ "$SF_OK" = "1" ]; then
       wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
       opkg-key add /tmp/ipk.pub 2>/dev/null || true
-      # 先清除旧声明（幂等，避免重复运行产生 Duplicate src declaration）
-      sed -i '/passwall/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
-      opkg update >/dev/null 2>&1 || true
-      ok "源配置完成 (SourceForge)"
+    fi
+    # 2) immortalwrt 补充源（探测到即可用, SF 残缺时兜底）
+    if [ "$IW_OK" = "1" ]; then
+      echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
+      echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
+    fi
+    opkg update >/dev/null 2>&1 || true
+    if [ "$SF_OK" = "1" ]; then
+      ok "源配置完成 (SourceForge + immortalwrt 补充)"
+    elif [ "$IW_OK" = "1" ]; then
+      ok "源配置完成 (immortalwrt $IW_VER)"
     else
-      # 先清除旧声明（幂等）
+      err "PassWall 源不可用：SourceForge 与国内镜像均无法连接，PassWall 无法安装（OpenClash 不受影响）"
+    fi
+  else
+    # APK 系统: 仅 SF (immortalwrt 是 opkg 体系)
+    if [ "$SF_OK" = "1" ]; then
       sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' /etc/apk/repositories.d/customfeeds.list 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
       done
       apk update >/dev/null 2>&1 || true
       ok "源配置完成 (SourceForge)"
+    else
+      err "PassWall 源不可用：SourceForge 无法连接"
     fi
-  elif [ "$IW_OK" = "1" ]; then
-    info "使用国内 immortalwrt 镜像作为 PassWall 源..."
-    info "说明: PassWall 包从 immortalwrt 官方源获取，kmod 依赖仍走 OpenWrt 官方源，外网不通也能装"
-    if [ "$PKG_MGR" = "opkg" ]; then
-      # 先清除旧声明（幂等）
-      sed -i '/passwall/d' /etc/opkg/customfeeds.conf 2>/dev/null || true
-      { echo "src/gz passwall_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci"
-        echo "src/gz passwall_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages"
-      } >> /etc/opkg/customfeeds.conf
-      opkg update >/dev/null 2>&1 || true
-      ok "源配置完成 (immortalwrt $IW_VER)"
-    fi
-  else
-    err "PassWall 源不可用：SourceForge 与国内镜像均无法连接，PassWall 无法安装（OpenClash 不受影响）"
   fi
 fi
 
@@ -684,6 +700,7 @@ pkgupgrade() {
 
 # PassWall2
 # PassWall2（注意: 国内 immortalwrt 源不含 PassWall2，仅 SourceForge 有）
+# SF 某些版本/架构构建残缺(架构不兼容)时, 明确提示改用 PassWall 经典版
 if [ "$INSTALL_PW2" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
     pkginstall "luci-app-passwall2" "PassWall2"; pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"; [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
