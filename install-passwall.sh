@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260815.10 (dl_with_mirror magic 校验改用 dd - OpenWrt 无 od/xxd 导致下载判失败)
+# VERSION: 20260816.1 (GitHub 代理多通道 + 降级源版本验证 + opkg 系统 SERIES_CHAIN 过滤 25.12/snapshots)
 #==============================================
-VERSION="20260815.10"
+VERSION="20260816.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -181,6 +181,13 @@ case "$KERNEL_VER" in
   6.*)    SERIES_CHAIN="24.10 snapshots" ;;
   *)      SERIES_CHAIN="snapshots" ;;
 esac
+# opkg 系统: 官方 25.12+ 已全面切 apk (无 Packages.gz), opkg 最高只能用 24.10
+# (第三方固件如 Kwrt/iStoreOS 标 25.12-SNAPSHOT 但仍用 opkg, 官方源无对应 opkg 包)
+if [ "$PKG_MGR" = "opkg" ]; then
+  SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(25\.12|snapshots)$' | tr '\n' ' ')
+  [ -z "$SERIES_CHAIN" ] && SERIES_CHAIN="24.10"
+  info "opkg 系统: 官方源最高匹配 24.10 (25.12+ 官方为 apk 格式)"
+fi
 
 #==============================================
 # 2. 源连通性检测
@@ -207,7 +214,8 @@ probe_ow_ver() {
     OW_VER="$V"; return 0
   fi
   # 2) SNAPSHOT 固件 (SYS_RELEASE=SNAPSHOT/r0-xxx): 直接探测 snapshots 目录
-  if [ "$(check_url $MIR/snapshots/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
+  #    (opkg 系统跳过: 官方 snapshots 已切 apk, 无 Packages.gz)
+  if [ "$PKG_MGR" != "opkg" ] && [ "$(check_url $MIR/snapshots/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="snapshots"; return 0
   fi
   # 3) 遍历候选平台 × 系列链，manifest 内核精确匹配（覆盖所有内核所有硬件）
@@ -764,7 +772,12 @@ fi
 #       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar magic 4字节(!<ar) 纯 ASCII 无 NUL
 dl_with_mirror() {
   local url="$1" out="$2" u magic
-  for u in "$url" "https://ghfast.top/$url" "https://ghproxy.net/$url"; do
+  # 多通道: 直连 + 多个国内 GitHub 代理 (gh-proxy.com 已挂 403 移除)
+  for u in "$url" \
+           "https://ghfast.top/$url" \
+           "https://ghproxy.net/$url" \
+           "https://ghproxy.cc/$url" \
+           "https://gh.ddlc.top/$url"; do
     curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
     if [ -s "$out" ]; then
       case "$out" in
@@ -782,7 +795,11 @@ dl_with_mirror() {
 # 获取 OpenClash 最新版本 (GitHub API → 代理重试)
 get_oc_latest() {
   local api="https://api.github.com/repos/vernesong/OpenClash/releases/latest" u r
-  for u in "$api" "https://ghfast.top/$api" "https://ghproxy.net/$api"; do
+  for u in "$api" \
+           "https://ghfast.top/$api" \
+           "https://ghproxy.net/$api" \
+           "https://ghproxy.cc/$api" \
+           "https://gh.ddlc.top/$api"; do
     r=$(curl -sL --max-time 10 "$u" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
     [ -n "$r" ] && { echo "$r"; return 0; }
   done
@@ -802,7 +819,14 @@ if [ "$INSTALL_OC" = "1" ]; then
     info "GitHub API 不可达（直连+代理均失败），尝试 immortalwrt 源安装/升级..."
     if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
       opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
-      check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 安装/升级失败"
+      nver=$(get_version "luci-app-openclash")
+      if [ -n "$nver" ] && [ "$nver" != "$OC_VER" ]; then
+        ok "OpenClash $nver ✓ (immortalwrt 源升级)"
+      elif check_installed "luci-app-openclash"; then
+        ok "OpenClash $nver ✓ (immortalwrt 源)"
+      else
+        err "OpenClash 安装/升级失败"
+      fi
     else
       err "无可用降级源 (immortalwrt 源不可用或 APK 系统)"
     fi
@@ -836,7 +860,15 @@ if [ "$INSTALL_OC" = "1" ]; then
         err "GitHub 全部通道失败或下载内容无效，降级尝试 immortalwrt 源..."
         if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
           opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
-          check_installed "luci-app-openclash" && ok "OpenClash $(get_version luci-app-openclash) ✓ (immortalwrt 源)" || err "OpenClash 安装失败"
+          # 验证降级源是否真的提供了新版本 (immortalwrt 源可能滞后, 只有旧版 → 不算成功)
+          nver=$(get_version "luci-app-openclash")
+          if [ -n "$nver" ] && [ "$nver" != "$OC_VER" ]; then
+            ok "OpenClash $nver ✓ (immortalwrt 源升级)"
+          elif [ -n "$nver" ] && [ "$nver" = "$OC_LATEST_NUM" ]; then
+            ok "OpenClash $nver ✓ (immortalwrt 源)"
+          else
+            err "immortalwrt 源无新版 (仍为 $nver)，OpenClash 保持当前版本"
+          fi
         else
           err "无可用降级源 (immortalwrt 源不可用或 APK 系统)，OpenClash 未安装"
         fi
