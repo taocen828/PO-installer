@@ -379,13 +379,18 @@ echo "  3) OpenClash (Clash 内核)"
 echo "  4) 全部安装"
 echo ""
 printf "请输入选项 (1/2/3/4): "
-read -r MAIN_CHOICE
+while :; do
+  read -r MAIN_CHOICE
+  case "$MAIN_CHOICE" in
+    1|2|3|4) break ;;
+    *) printf "  无效输入，请重新选择 (1/2/3/4): " ;;
+  esac
+done
 case "$MAIN_CHOICE" in
   1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; ok "选择: PassWall" ;;
   2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; ok "选择: PassWall2" ;;
   3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; ok "选择: OpenClash" ;;
   4) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; ok "选择: 全部安装" ;;
-  *) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; ok "默认: PassWall" ;;
 esac
 
 #==============================================
@@ -533,9 +538,14 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
+    # 防假安装: 元数据 + 真实文件都要存在才算安装
+    # (SourceForge 重定向失败时 apk 只注册元数据, apk info -L 为空)
+    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" || return 1
+    local n
+    n=$(apk info -L "$pkg" 2>/dev/null | grep -vc "^contains:\|^$\|^lib/")
+    [ "${n:-0}" -gt 0 ] && return 0
+    return 1
   fi
-  return 1
 }
 
 # 获取源中的最新版本
