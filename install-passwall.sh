@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.1 (GitHub 代理多通道 + 降级源版本验证 + opkg 系统 SERIES_CHAIN 过滤 25.12/snapshots)
+# VERSION: 20260816.2 (修复 apk aarch64 源架构映射 + OpenClash apk 下载校验)
 #==============================================
-VERSION="20260816.1"
+VERSION="20260816.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -104,7 +104,8 @@ else
   [ -z "$SYS_ARCH" ] && SYS_ARCH=$(uname -m | sed 's/mips/mipsel_24kc/')
 fi
 [ -z "$SYS_ARCH" ] && { err "无法检测架构"; exit 1; }
-ok "CPU 架构: $SYS_ARCH"
+CPU_ARCH="$SYS_ARCH"
+ok "CPU 架构: $CPU_ARCH"
 
 if [ -r /etc/openwrt_release ]; then . /etc/openwrt_release; fi
 SYS_RELEASE="$DISTRIB_RELEASE"; SYS_DESC="$DISTRIB_DESCRIPTION"
@@ -159,9 +160,27 @@ arch_to_targets() {
   esac
 }
 
+# APK 报告的是运行时 CPU 架构(aarch64)，但 OpenWrt 25.12 源目录使用 arch_packages
+# (如 mediatek/filogic → aarch64_cortex-a53)。源 URL 必须用包架构，否则 packages.adb 404。
+apk_pkg_arch_from_target() {
+  case "$1" in
+    mediatek/filogic|mediatek/mt7622|bcm27xx/bcm2710|bcm4908/generic|mvebu/cortexa53|sunxi/cortexa53|armvirt/64) echo "aarch64_cortex-a53" ;;
+    bcm27xx/bcm2711|mvebu/cortexa72) echo "aarch64_cortex-a72" ;;
+    rockchip/armv8|octeontx/generic) echo "aarch64_generic" ;;
+    *) echo "" ;;
+  esac
+}
+
 # 本地目标平台检测（不联网）：DISTRIB_TARGET → distfeeds URL → 架构映射
 SYS_TARGET="$DISTRIB_TARGET"
-[ -z "$SYS_TARGET" ] && SYS_TARGET=$(grep -hoE 'targets/[a-z0-9]+/[a-z0-9]+' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | head -1 | cut -d/ -f2-)
+[ -z "$SYS_TARGET" ] && SYS_TARGET=$(grep -hoE 'targets/[a-z0-9]+/[a-z0-9]+' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/apk/repositories.d/*.list 2>/dev/null | head -1 | cut -d/ -f2-)
+if [ "$PKG_MGR" = "apk" ]; then
+  PKG_ARCH=$(apk_pkg_arch_from_target "$SYS_TARGET")
+  if [ -n "$PKG_ARCH" ]; then
+    SYS_ARCH="$PKG_ARCH"
+    ok "软件源架构: $SYS_ARCH"
+  fi
+fi
 [ -z "$SYS_TARGET" ] && SYS_TARGET=$(arch_to_targets "$SYS_ARCH" | awk '{print $1}')
 ARCH_TARGETS=$(arch_to_targets "$SYS_ARCH")
 [ -n "$SYS_TARGET" ] && ok "目标平台: $SYS_TARGET" || info "目标平台: 未知（仅能检测 packages 源）"
@@ -771,10 +790,10 @@ fi
 # OpenClash
 # 下载函数: 直连 → ghfast.top → ghproxy.net (gh-proxy.com 已挂 403, 移除)
 # 返回 0=成功 1=全部失败
-# 验证下载内容: ipk/apk 必须是 ar 归档(!<arch>), gz 必须是 gzip 格式
+# 验证下载内容: ipk 为 gzip/ar, apk 为 APK v3 adb(ADBd), gz 为 gzip
 # (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
 # 注意: OpenWrt 无 od/xxd; 用 dd 提取头部字节比较 (busybox 核心命令必有)
-#       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar magic 4字节(!<ar) 纯 ASCII 无 NUL
+#       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar/adb magic 4字节纯 ASCII 无 NUL
 dl_with_mirror() {
   local url="$1" out="$2" u magic
   # 多通道: 直连 + 多个国内 GitHub 代理 (gh-proxy.com 已挂 403 移除)
@@ -788,8 +807,12 @@ dl_with_mirror() {
       case "$out" in
         *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
                 [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+        *.apk)  magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
+                [ "$magic" = "ADBd" ] && return 0 ;;
         *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "!<ar" ] && return 0 ;;
+                [ "$magic" = "!<ar" ] && return 0
+                magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
+                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
       esac
     fi
     rm -f "$out"
@@ -837,19 +860,21 @@ if [ "$INSTALL_OC" = "1" ]; then
     fi
   elif [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
     info "OpenClash 更新: $OC_VER → $OC_LATEST..."
-    OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+    OC_EXT="ipk"; [ "$PKG_MGR" = "apk" ] && OC_EXT="apk"
+    OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
     if [ -z "$OC_URL" ]; then
-      OC_URL=$(curl -sL --max-time 10 "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" 2>/dev/null | grep -oE 'https://[^"]+\.(ipk|apk)' | head -1)
+      OC_URL=$(curl -sL --max-time 10 "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" 2>/dev/null | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
     fi
     if [ -n "$OC_URL" ]; then
-      info "下载 OpenClash $OC_LATEST..."
-      if dl_with_mirror "$OC_URL" /tmp/luci-app-openclash.ipk; then
+      info "下载 OpenClash $OC_LATEST ($OC_EXT)..."
+      OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
+      if dl_with_mirror "$OC_URL" "$OC_PKG"; then
         if [ "$PKG_MGR" = "opkg" ]; then
-          opkg install /tmp/luci-app-openclash.ipk --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+          opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
         else
-          apk add --allow-untrusted --force-reinstall /tmp/luci-app-openclash.ipk 2>&1 | grep -v "^WARNING.*opening" || true
+          apk add --allow-untrusted --force-reinstall "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
         fi
-        rm -f /tmp/luci-app-openclash.ipk
+        rm -f "$OC_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
         nver=$(get_version "luci-app-openclash")
         if [ -n "$nver" ] && [ "$nver" = "$OC_LATEST_NUM" ]; then
