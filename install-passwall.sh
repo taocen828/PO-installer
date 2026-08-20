@@ -524,7 +524,7 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 
 # 添加 PassWall 源（装 PassWall/PassWall2/OpenClash 时都需要）
 # OpenClash 也需要 immortalwrt 源作为 GitHub 不可达时的降级通道
-# 源组合: SF 可用 → 加 SF + immortalwrt(补充); SF 不可用 → 仅 immortalwrt
+# 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     # 清旧声明（幂等）: 过滤 passwall/iw_ 行后重建文件 (避免 busybox sed -i 符号链接坑)
@@ -533,7 +533,12 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
       cat /tmp/customfeeds.tmp > /etc/opkg/customfeeds.conf 2>/dev/null
       rm -f /tmp/customfeeds.tmp
     fi
-    # 1) SF 源（可用时）
+    # 1) 国内 immortalwrt 源（探测到即可用，优先写入，opkg/下载 URL 均先走国内）
+    if [ "$IW_OK" = "1" ]; then
+      echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
+      echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
+    fi
+    # 2) SF 源（可用时保留作缺包/最新版兜底，尤其 passwall2）
     if [ "$SF_OK" = "1" ]; then
       wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
       opkg-key add /tmp/ipk.pub 2>/dev/null || true
@@ -541,16 +546,13 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
     fi
-    # 2) immortalwrt 补充源（探测到即可用, SF 残缺时兜底）
-    if [ "$IW_OK" = "1" ]; then
-      echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
-      echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
-    fi
     opkg update >/dev/null 2>&1 || true
-    if [ "$SF_OK" = "1" ]; then
-      ok "源配置完成 (SourceForge + immortalwrt 补充)"
+    if [ "$IW_OK" = "1" ] && [ "$SF_OK" = "1" ]; then
+      ok "源配置完成 (速度优先: immortalwrt 国内源 + SourceForge 兜底)"
     elif [ "$IW_OK" = "1" ]; then
       ok "源配置完成 (immortalwrt $IW_VER)"
+    elif [ "$SF_OK" = "1" ]; then
+      ok "源配置完成 (SourceForge)"
     else
       err "PassWall 源不可用：SourceForge 与国内镜像均无法连接，PassWall 无法安装（OpenClash 不受影响）"
     fi
@@ -598,9 +600,9 @@ check_installed() {
 get_repo_version() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
-    # 多源时 opkg list 按源顺序输出, 取最高版本 (PassWall 源通常最新)
-    # 注意: 版本多为日期戳 (202608082221.1), 用字典序排序 (sort -V 数值比较会把长日期当大数, 排序错误)
-    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | awk '{print $3}' | sort | tail -1
+    # 速度优先: opkg list 通常按源顺序输出；customfeeds 已把国内源放前面，因此取第一个可用版本
+    # 不再取最高版本，避免国内源可用时仍被 SF 最新版牵引到慢下载
+    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | head -1 | awk '{print $3}'
   else
     apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
   fi
@@ -611,8 +613,8 @@ get_repo_version() {
 # 注意: 索引文件名可能带 .gz 后缀或 feed 名不同, 兼容多种命名
 find_pkg_url() {
   local pkg="$1" fn="" feed="" url=""
-  # 优先 PassWall 源索引 (版本最新), 再扫其他源
-  for idx in /var/opkg-lists/passwall* /var/opkg-lists/*; do
+  # 速度优先: 优先国内 immortalwrt 索引；找不到再扫 SourceForge/passwall 与系统源
+  for idx in /var/opkg-lists/iw_* /var/opkg-lists/*; do
     [ -f "$idx" ] || continue
     fn=$(awk -v p="$pkg" '
       $1=="Package:" && $2==p {f=1; next}
