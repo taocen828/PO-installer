@@ -596,39 +596,50 @@ check_installed() {
   return 1
 }
 
-# 获取源中的最新版本
+# 从 opkg 索引找包元数据（速度优先）
+# 索引在 /var/opkg-lists/<feed>（opkg update 后的解压文本）。
+# 关键: 不用 `opkg list` 的最高版本，直接按索引优先级选包；国内 iw_* 在前，SF 仅兜底。
+find_pkg_meta() {
+  local pkg="$1" want="$2" idx="" feed="" fn="" ver="" url=""
+  for idx in /var/opkg-lists/iw_* /var/opkg-lists/*; do
+    [ -f "$idx" ] || continue
+    fn=$(awk -v p="$pkg" '
+      $1=="Package:" && $2==p {f=1; next}
+      f && $1=="Filename:" {print $2; exit}
+      f && $1=="Package:" {f=0}
+    ' "$idx" 2>/dev/null)
+    [ -z "$fn" ] && continue
+    ver=$(awk -v p="$pkg" '
+      $1=="Package:" && $2==p {f=1; next}
+      f && $1=="Version:" {print $2; exit}
+      f && $1=="Package:" {f=0}
+    ' "$idx" 2>/dev/null)
+    feed=$(basename "$idx"); feed=${feed%.gz}
+    url=$(grep -h "^src/gz $feed \|^src $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
+    [ -n "$url" ] || continue
+    case "$want" in
+      version) echo "$ver" ;;
+      feed) echo "$feed" ;;
+      url|*) echo "$url/$fn" ;;
+    esac
+    return
+  done
+  echo ""
+}
+
+# 获取源中按速度优先选中的版本（国内源优先，不再被 SourceForge 最新版牵引）
 get_repo_version() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
-    # 速度优先: opkg list 通常按源顺序输出；customfeeds 已把国内源放前面，因此取第一个可用版本
-    # 不再取最高版本，避免国内源可用时仍被 SF 最新版牵引到慢下载
-    opkg list "$pkg" 2>/dev/null | grep "^$pkg " | head -1 | awk '{print $3}'
+    find_pkg_meta "$pkg" version
   else
     apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
   fi
 }
 
 # 从 opkg 索引找包下载 URL（用于带进度下载）
-# 索引在 /var/opkg-lists/<feed>（opkg update 后的解压文本）
-# 注意: 索引文件名可能带 .gz 后缀或 feed 名不同, 兼容多种命名
 find_pkg_url() {
-  local pkg="$1" fn="" feed="" url=""
-  # 速度优先: 优先国内 immortalwrt 索引；找不到再扫 SourceForge/passwall 与系统源
-  for idx in /var/opkg-lists/iw_* /var/opkg-lists/*; do
-    [ -f "$idx" ] || continue
-    fn=$(awk -v p="$pkg" '
-      $1=="Package:" && $2==p {f=1; next}
-      f && $1=="Filename:" {print $2; exit}
-    ' "$idx" 2>/dev/null)
-    [ -n "$fn" ] && { feed=$(basename "$idx"); break; }
-  done
-  [ -z "$fn" ] && { echo ""; return; }
-  # feed 名可能带 .gz 后缀, 去掉
-  feed=${feed%.gz}
-  # 从 distfeeds/customfeeds 找该 feed 的 URL (兼容 src/gz 和 src 格式)
-  url=$(grep -h "^src/gz $feed \|^src $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
-  [ -z "$url" ] && { echo ""; return; }
-  echo "$url/$fn"
+  find_pkg_meta "$1" url
 }
 
 # 包安装/升级
@@ -644,10 +655,21 @@ apk_install() {
     [ "$total" = "0" ] && total=1
     cur=0
     # 逐个安装显示进度 (opkg 会跳过已装依赖, 只装缺的)
+    # 先尝试按速度优先索引下载本地 ipk，避免依赖包被 opkg 默认挑到 SourceForge。
     for dep in $deps; do
       cur=$((cur + 1))
       printf "\r  [%s/%s] 安装 %s...  " "$cur" "$total" "$dep"
-      opkg install "$dep" --force-downgrade --force-overwrite --force-depends > /tmp/opkg_dep.log 2>&1
+      dep_url=$(find_pkg_url "$dep")
+      if [ -n "$dep_url" ]; then
+        if curl -fL -sS -o "/tmp/pkg_$dep.ipk" "$dep_url" 2>/tmp/opkg_dep.log; then
+          opkg install "/tmp/pkg_$dep.ipk" --force-downgrade --force-overwrite --force-depends > /tmp/opkg_dep.log 2>&1 || true
+          rm -f "/tmp/pkg_$dep.ipk"
+        else
+          opkg install "$dep" --force-downgrade --force-overwrite --force-depends > /tmp/opkg_dep.log 2>&1 || true
+        fi
+      else
+        opkg install "$dep" --force-downgrade --force-overwrite --force-depends > /tmp/opkg_dep.log 2>&1 || true
+      fi
       rm -f /tmp/opkg_dep.log
     done
     printf "\r  [%s/%s] 完成             \n" "$total" "$total"
@@ -658,7 +680,8 @@ apk_install() {
     if [ -n "$url" ]; then
       # 验证 URL 文件名版本 = 目标版本 (多源时 find_pkg_url 可能拿到旧源 URL, 下载旧版无意义)
       if [ -n "$repo_ver" ] && ! echo "$url" | grep -Fq "$repo_ver"; then
-        info "索引版本不匹配 (期望 $repo_ver)，直接 opkg install..."
+        info "索引版本不匹配 (期望 $repo_ver)，使用速度优先源安装..."
+        # 保底仍调用 opkg，但前面的源顺序已是国内优先；正常路径不会走到这里。
         opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
         rc=$?
         grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
@@ -684,8 +707,8 @@ apk_install() {
         fi
       fi
     else
-      # find_pkg_url 找不到 URL → 再试 opkg download 预下载 (输出到 TTY 可见)
-      info "下载 $pkg (opkg download)..."
+      # find_pkg_url 找不到 URL → 再试 opkg download 预下载 (输出到 TTY 可见；仅作为兜底)
+      info "未在速度优先索引找到 $pkg，下载 $pkg (opkg download 兜底)..."
       if (cd /tmp && opkg download "$pkg") 2>&1; then
         # 找到下载的 ipk 并本地安装; 验证文件名版本 = 目标版本, 否则弃用直装
         local dl_ipk
