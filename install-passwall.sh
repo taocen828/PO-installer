@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.3 (SourceForge 多镜像测速 + SF_MIRROR 手动指定 + 文件URL级 mirror query)
+# VERSION: 20260816.4 (check_url 把 SourceForge 301/302 跳转视为可达)
 #==============================================
-VERSION="20260816.3"
+VERSION="20260816.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -23,7 +23,10 @@ check_url() {
     echo "  [探测] 无 curl/wget 可用!" >&2
     echo "000"; return
   fi
-  [ "$code" = "206" ] && code="200"
+  # 206=Range 成功；SourceForge 常返回 301/302/303/307/308 跳转，也算可达
+  case "$code" in
+    206|301|302|303|307|308) code="200" ;;
+  esac
   if [ "$code" != "200" ]; then
     if [ -z "$code" ]; then
       echo "  [探测] $url → 无响应(可能无curl或超时)" >&2
