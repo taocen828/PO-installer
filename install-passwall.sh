@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.2 (修复 apk aarch64 源架构映射 + OpenClash apk 下载校验)
+# VERSION: 20260816.3 (SourceForge 多镜像测速 + SF_MIRROR 手动指定 + 文件URL级 mirror query)
 #==============================================
-VERSION="20260816.2"
+VERSION="20260816.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -326,32 +326,52 @@ else
 fi
 
 # SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
-# 候选: master.dl(默认) / downloads(智能就近) / ghfast.top(国内代理)
+# 支持手动指定: SF_MIRROR=downloads/master/jaist/nchc/netix/netcologne/pilotfiber/phoenixnap/versaweb/ixpeering/astuteinternet
+# 说明: SourceForge 镜像参数必须放在完整文件路径后: .../file.ipk?use_mirror=jaist
 sf_pick_node() {
-  local spath="$1" best="" best_spd=0 prefix spd url
-  for prefix in \
-    "https://master.dl.sourceforge.net/project/openwrt-passwall-build" \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build" \
-    "https://ghfast.top/https://master.dl.sourceforge.net/project/openwrt-passwall-build"; do
-    url="$prefix/$spath"
-    spd=$(curl -sL --max-time 5 -r 0-524287 -o /dev/null -w "%{speed_download}" "$url" 2>/dev/null)
+  local spath="$1" best="" best_spd=0 prefix spd url mirror
+  if [ -n "$SF_MIRROR" ]; then
+    case "$SF_MIRROR" in
+      downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads"; return ;;
+      master)    echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master"; return ;;
+      *)         echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$SF_MIRROR|$SF_MIRROR"; return ;;
+    esac
+  fi
+  for mirror in downloads master jaist nchc netix netcologne pilotfiber phoenixnap versaweb ixpeering astuteinternet ghfast; do
+    case "$mirror" in
+      downloads) prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
+      master)    prefix="https://master.dl.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
+      ghfast)    prefix="https://ghfast.top/https://master.dl.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
+      *)         prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath?use_mirror=$mirror" ;;
+    esac
+    spd=$(curl -sL --max-time 6 -r 0-262143 -o /dev/null -w "%{speed_download}" "$url" 2>/dev/null)
     [ -z "$spd" ] && continue
     if awk "BEGIN{exit !($spd > $best_spd)}" 2>/dev/null; then
-      best_spd=$spd; best="$prefix"
+      best_spd=$spd; best="$mirror"
     fi
   done
-  [ -n "$best" ] && echo "$best" || echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build"
+  case "$best" in
+    ""|downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads" ;;
+    master)       echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master" ;;
+    ghfast)       echo "https://ghfast.top/https://master.dl.sourceforge.net/project/openwrt-passwall-build||ghfast" ;;
+    *)            echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$best|$best" ;;
+  esac
 }
 
 SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
 SF_TEST="$SF_PREFIX/$SF_PATH/passwall_luci/Packages.gz"
 [ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_PREFIX/$SF_PATH/passwall_luci/packages.adb"
+SF_MIRROR_QUERY=""; SF_MIRROR_LABEL="default"
 if [ "$(check_url $SF_TEST)" = "200" ]; then
   SF_OK=1
   ok "PassWall 源 ✓ (SourceForge)"
   info "SF 多节点测速，选最快下载节点..."
-  SF_PREFIX=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
-  ok "PassWall 下载节点: $SF_PREFIX"
+  SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
+  SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
+  SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
+  SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
+  [ -z "$SF_PREFIX" ] && SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
+  ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
 else
   SF_OK=0
   err "PassWall 源不可用（SourceForge 国外直连失败）"
@@ -620,7 +640,13 @@ find_pkg_meta() {
     case "$want" in
       version) echo "$ver" ;;
       feed) echo "$feed" ;;
-      url|*) echo "$url/$fn" ;;
+      url|*)
+        # SourceForge mirror 参数只能加在具体文件 URL 末尾，不能写进 opkg feed URL
+        case "$url" in
+          *sourceforge.net*/openwrt-passwall-build*) echo "$url/$fn$SF_MIRROR_QUERY" ;;
+          *) echo "$url/$fn" ;;
+        esac
+        ;;
     esac
     return
   done
