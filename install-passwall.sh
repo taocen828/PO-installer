@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.5 (APK 源文件路径兼容 + apk-tools 2.12 不支持 --force-reinstall 自动降级)
+# VERSION: 20260816.6 (优先 opkg；拦截 Alpine/旧 apk-tools 2.x 避免 packages.adb 被当目录)
 #==============================================
-VERSION="20260816.5"
+VERSION="20260816.6"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -89,10 +89,20 @@ WGETEOF
   fi
 fi
 PKG_MGR=""
-if command -v apk >/dev/null 2>&1; then
-  PKG_MGR="apk"; ok "包管理器: APK (OpenWrt 25.12+)"
-elif command -v opkg >/dev/null 2>&1; then
-  PKG_MGR="opkg"; ok "包管理器: OPKG (OpenWrt 24.10 及以下)"
+# 优先 OPKG：部分第三方固件/环境同时存在 apk-tools 2.x (Alpine 风格) 和 opkg，
+# Alpine apk 不支持 OpenWrt packages.adb，会把 packages.adb 当目录拼 APKINDEX.tar.gz。
+# 因此只要 opkg 存在就优先用 opkg；只有无 opkg 时才走 OpenWrt APK。
+if command -v opkg >/dev/null 2>&1; then
+  PKG_MGR="opkg"; ok "包管理器: OPKG"
+elif command -v apk >/dev/null 2>&1; then
+  APK_VER_LINE=$(apk --version 2>/dev/null | head -1)
+  # OpenWrt 新版 apk 支持 packages.adb；Alpine/旧 apk-tools 2.x 不支持，直接拦截
+  if echo "$APK_VER_LINE" | grep -qE 'apk-tools 2\.'; then
+    err "检测到 Alpine/旧版 apk-tools ($APK_VER_LINE)，不支持 OpenWrt packages.adb 源"
+    err "该系统未发现 opkg，无法安全安装 PassWall/OpenClash"
+    exit 1
+  fi
+  PKG_MGR="apk"; ok "包管理器: APK (OpenWrt packages.adb)"
 else
   err "无法识别包管理器"; exit 1
 fi
