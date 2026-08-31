@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.6 (优先 opkg；拦截 Alpine/旧 apk-tools 2.x 避免 packages.adb 被当目录)
+# VERSION: 20260816.7 (opkg 多源取最高版本，避免 immortalwrt 低版本遮住 SourceForge 新版本)
 #==============================================
-VERSION="20260816.6"
+VERSION="20260816.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -646,11 +646,11 @@ check_installed() {
   return 1
 }
 
-# 从 opkg 索引找包元数据（速度优先）
-# 索引在 /var/opkg-lists/<feed>（opkg update 后的解压文本）。
-# 关键: 不用 `opkg list` 的最高版本，直接按索引优先级选包；国内 iw_* 在前，SF 仅兜底。
+# 从 opkg 索引找包元数据
+# version/url: 扫所有源取最高版本，避免国内 immortalwrt 低版本遮住 SourceForge 新版本
+# 下载 URL 返回最高版本对应源；SourceForge mirror query 只追加到具体文件 URL 末尾
 find_pkg_meta() {
-  local pkg="$1" want="$2" idx="" feed="" fn="" ver="" url=""
+  local pkg="$1" want="$2" idx="" feed="" fn="" ver="" url="" best_ver="" best_feed="" best_fn="" best_url=""
   for idx in /var/opkg-lists/iw_* /var/opkg-lists/*; do
     [ -f "$idx" ] || continue
     fn=$(awk -v p="$pkg" '
@@ -664,26 +664,28 @@ find_pkg_meta() {
       f && $1=="Version:" {print $2; exit}
       f && $1=="Package:" {f=0}
     ' "$idx" 2>/dev/null)
+    [ -z "$ver" ] && continue
     feed=$(basename "$idx"); feed=${feed%.gz}
     url=$(grep -h "^src/gz $feed \|^src $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
     [ -n "$url" ] || continue
-    case "$want" in
-      version) echo "$ver" ;;
-      feed) echo "$feed" ;;
-      url|*)
-        # SourceForge mirror 参数只能加在具体文件 URL 末尾，不能写进 opkg feed URL
-        case "$url" in
-          *sourceforge.net*/openwrt-passwall-build*) echo "$url/$fn$SF_MIRROR_QUERY" ;;
-          *) echo "$url/$fn" ;;
-        esac
-        ;;
-    esac
-    return
+    if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort | tail -1)" = "$ver" ]; then
+      best_ver="$ver"; best_feed="$feed"; best_fn="$fn"; best_url="$url"
+    fi
   done
-  echo ""
+  [ -z "$best_ver" ] && { echo ""; return; }
+  case "$want" in
+    version) echo "$best_ver" ;;
+    feed) echo "$best_feed" ;;
+    url|*)
+      case "$best_url" in
+        *sourceforge.net*/openwrt-passwall-build*) echo "$best_url/$best_fn$SF_MIRROR_QUERY" ;;
+        *) echo "$best_url/$best_fn" ;;
+      esac
+      ;;
+  esac
 }
 
-# 获取源中按速度优先选中的版本（国内源优先，不再被 SourceForge 最新版牵引）
+# 获取所有源中的最高版本（国内源低版本不会遮住 SourceForge 新版本）
 get_repo_version() {
   local pkg="$1"
   if [ "$PKG_MGR" = "opkg" ]; then
