@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.4 (check_url 把 SourceForge 301/302 跳转视为可达)
+# VERSION: 20260816.5 (APK 源文件路径兼容 + apk-tools 2.12 不支持 --force-reinstall 自动降级)
 #==============================================
-VERSION="20260816.4"
+VERSION="20260816.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -95,6 +95,22 @@ elif command -v opkg >/dev/null 2>&1; then
   PKG_MGR="opkg"; ok "包管理器: OPKG (OpenWrt 24.10 及以下)"
 else
   err "无法识别包管理器"; exit 1
+fi
+
+# APK 源文件路径兼容：部分 OpenWrt APK 系统没有 /etc/apk/repositories.d
+APK_REPO_FILE="/etc/apk/repositories"
+if [ "$PKG_MGR" = "apk" ]; then
+  if [ -d /etc/apk/repositories.d ] || mkdir -p /etc/apk/repositories.d 2>/dev/null; then
+    APK_REPO_FILE="/etc/apk/repositories.d/customfeeds.list"
+  else
+    APK_REPO_FILE="/etc/apk/repositories"
+    touch "$APK_REPO_FILE" 2>/dev/null || true
+  fi
+fi
+# OpenWrt 精简 apk-tools 2.12.x 不支持 --force-reinstall，支持才启用
+APK_FORCE_REINSTALL_OPT=""
+if [ "$PKG_MGR" = "apk" ] && apk add --help 2>&1 | grep -q -- '--force-reinstall'; then
+  APK_FORCE_REINSTALL_OPT="--force-reinstall"
 fi
 
 SYS_ARCH=""
@@ -517,8 +533,9 @@ else
     fi
   else
     if [ -n "$OW_USE" ]; then
-      cp /etc/apk/repositories.d/distfeeds.list /tmp/distfeeds.list.bak 2>/dev/null
+      [ -f /etc/apk/repositories.d/distfeeds.list ] && cp /etc/apk/repositories.d/distfeeds.list /tmp/distfeeds.list.bak 2>/dev/null
       [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^/#/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
+      [ -f /etc/apk/repositories ] && cp /etc/apk/repositories /tmp/apk.repositories.bak 2>/dev/null
       { echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/luci/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
@@ -527,7 +544,7 @@ else
         if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
           echo "$OW_USE/targets/$SYS_TARGET/packages/packages.adb"
         fi
-      } > /etc/apk/repositories.d/customfeeds.list
+      } > "$APK_REPO_FILE"
       ok "已配置 OpenWrt 镜像源 ($OW_USE)"
     else
       err "无可用镜像源，系统源保持不动（未修改）"
@@ -582,9 +599,9 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
   else
     # APK 系统: 仅 SF (immortalwrt 是 opkg 体系)
     if [ "$SF_OK" = "1" ]; then
-      sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' /etc/apk/repositories.d/customfeeds.list 2>/dev/null || true
+      sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' "$APK_REPO_FILE" 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
-        echo "$SF_BASE/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+        echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
       done
       apk update >/dev/null 2>&1 || true
       ok "源配置完成 (SourceForge)"
@@ -766,7 +783,7 @@ apk_install() {
   local log=/tmp/apk_add.log
   # --force-reinstall: 修复假安装(数据库有元数据但文件缺失)时 apk add 跳过解压的问题
   # 之前的 SourceForge 重定向失败可能留下只注册元数据无文件的"假安装", apk add 认为已装直接 OK
-  apk add --allow-untrusted --force-broken-world --force-reinstall "$pkg" > "$log" 2>&1
+  apk add --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
   rc=$?
   grep -v "^WARNING.*opening" "$log" || true
   rm -f "$log"
@@ -926,7 +943,7 @@ if [ "$INSTALL_OC" = "1" ]; then
         if [ "$PKG_MGR" = "opkg" ]; then
           opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
         else
-          apk add --allow-untrusted --force-reinstall "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
+          apk add --allow-untrusted $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
         fi
         rm -f "$OC_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
