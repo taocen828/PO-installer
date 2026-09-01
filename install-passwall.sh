@@ -727,6 +727,19 @@ get_repo_version() {
   fi
 }
 
+# 版本比较：仅当 $1 明确大于 $2 时返回 0。
+# 避免把本机 sing-box 1.14.0 误判成可“升级”到源里的 1.13.21-r1。
+version_newer() {
+  local a="$1" b="$2" top
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "$a" = "$b" ] && return 1
+  if printf '%s\n%s\n' "$a" "$b" | sort -V >/dev/null 2>&1; then
+    top=$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)
+    [ "$top" = "$a" ] && return 0 || return 1
+  fi
+  return 0
+}
+
 # 从 opkg 索引找包下载 URL（用于带进度下载）
 find_pkg_url() {
   find_pkg_meta "$1" url
@@ -915,7 +928,7 @@ pkginstall() {
   if check_installed "$pkg"; then
     local ver=$(get_version "$pkg")
     local repo_ver=$(get_repo_version "$pkg")
-    if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+    if version_newer "$repo_ver" "$ver"; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
       pkg_update "$pkg" "$repo_ver"
       local rc=$?
@@ -952,7 +965,7 @@ pkgupgrade() {
   if check_installed "$pkg"; then
     local ver=$(get_version "$pkg")
     local repo_ver=$(get_repo_version "$pkg")
-    if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+    if version_newer "$repo_ver" "$ver"; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
       pkg_update "$pkg" "$repo_ver"
       local rc=$?
@@ -1252,6 +1265,22 @@ opt_version() {
     *) "$bin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
   esac
 }
+opt_pkginstall() {
+  local pkg="$1" desc="$2"
+  if opt_installed "$pkg" && ! check_installed "$pkg"; then
+    local ver repo_ver
+    ver=$(opt_version "$pkg")
+    repo_ver=$(get_repo_version "$pkg")
+    if [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
+      info "$desc 已安装二进制 ($ver)，源中有新版本 ($repo_ver)，尝试安装包管理器版本..."
+      pkginstall "$pkg" "$desc"
+    else
+      ok "$desc 已存在二进制 ($ver)，跳过安装"
+    fi
+    return
+  fi
+  pkginstall "$pkg" "$desc"
+}
 
 #==============================================
 # 7. 可选组件（一次性列出，用户输入序号）
@@ -1267,7 +1296,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     if opt_installed "$comp"; then
       ver=$(opt_version "$comp")
       repo_ver=$(get_repo_version "$comp")
-      if [ -n "$repo_ver" ] && [ -n "$ver" ] && [ "$ver" != "$repo_ver" ]; then
+      if [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
         echo "  $i) $desc ($ver → 可升级 $repo_ver) ⬆"
       elif [ -n "$repo_ver" ] && [ -z "$ver" ]; then
         echo "  $i) $desc (已安装，版本未知 → 源版本 $repo_ver) ✓"
@@ -1291,7 +1320,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     [ -z "$idx" ] && continue
     eval "comp=\"\$OPT_COMP_$idx\""
     eval "desc=\"\$OPT_DESC_$idx\""
-    [ -n "$comp" ] && pkginstall "$comp" "$desc"
+    [ -n "$comp" ] && opt_pkginstall "$comp" "$desc"
   done
 fi
 
