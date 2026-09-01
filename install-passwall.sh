@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.9 (APK 更新使用 --upgrade，修复检测到新版本但仍保留旧版)
+# VERSION: 20260816.10 (APK 已装包更新改用 apk upgrade，修复检测到新版本但未实际替换)
 #==============================================
-VERSION="20260816.9"
+VERSION="20260816.10"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -805,6 +805,20 @@ apk_install() {
   return $rc
 }
 
+# 已安装包升级：APK 必须使用 apk upgrade；apk add --upgrade 在部分 OpenWrt apk-tools 中不会真正替换旧版
+pkg_update() {
+  local pkg="$1"
+  if [ "$PKG_MGR" = "apk" ]; then
+    local log=/tmp/apk_upgrade.log
+    apk upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+    local rc=$?
+    grep -v "^WARNING.*opening" "$log" || true
+    rm -f "$log"
+    return $rc
+  fi
+  apk_install "$pkg"
+}
+
 # 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
@@ -813,7 +827,7 @@ pkginstall() {
     local repo_ver=$(get_repo_version "$pkg")
     if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
-      apk_install "$pkg"
+      pkg_update "$pkg"
       local rc=$?
       if [ "$rc" = "2" ]; then
         err "$desc 升级失败: 新版缺少依赖 (coreutils-timeout/lyaml 等), 保留旧版 $ver"
@@ -840,7 +854,7 @@ pkgupgrade() {
     local repo_ver=$(get_repo_version "$pkg")
     if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
-      apk_install "$pkg"
+      pkg_update "$pkg"
       local rc=$?
       if [ "$rc" = "2" ]; then
         err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
