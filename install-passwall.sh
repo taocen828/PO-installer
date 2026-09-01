@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.12 (彻底移除 APK --force-reinstall，兼容不同 apk-tools)
+# VERSION: 20260901.18 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260816.12"
+VERSION="20260901.18"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
