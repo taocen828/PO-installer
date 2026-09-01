@@ -1173,6 +1173,38 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   done
 fi
 
+# 可选组件检测：opkg/apk 元数据 + 二进制兜底。
+# 有些固件把 sing-box/naiveproxy 作为内置或不同包名提供，包管理器查不到但命令实际存在。
+opt_bin() {
+  case "$1" in
+    sing-box) echo "sing-box" ;;
+    naiveproxy) echo "naive" ;;
+    v2ray-plugin) echo "v2ray-plugin" ;;
+    ipt2socks) echo "ipt2socks" ;;
+    hysteria) echo "hysteria" ;;
+    *) echo "$1" ;;
+  esac
+}
+opt_installed() {
+  local pkg="$1" bin
+  check_installed "$pkg" && return 0
+  bin=$(opt_bin "$pkg")
+  command -v "$bin" >/dev/null 2>&1 && return 0
+  return 1
+}
+opt_version() {
+  local pkg="$1" bin ver
+  ver=$(get_version "$pkg")
+  [ -n "$ver" ] && { echo "$ver"; return; }
+  bin=$(opt_bin "$pkg")
+  command -v "$bin" >/dev/null 2>&1 || { echo ""; return; }
+  case "$pkg" in
+    sing-box) "$bin" version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
+    naiveproxy) "$bin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?|[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
+    *) "$bin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
+  esac
+}
+
 #==============================================
 # 7. 可选组件（一次性列出，用户输入序号）
 #==============================================
@@ -1184,11 +1216,13 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
     comp="${comp_desc%%:*}"
     desc="${comp_desc##*:}"
-    if check_installed "$comp"; then
-      ver=$(get_version "$comp")
+    if opt_installed "$comp"; then
+      ver=$(opt_version "$comp")
       repo_ver=$(get_repo_version "$comp")
-      if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
+      if [ -n "$repo_ver" ] && [ -n "$ver" ] && [ "$ver" != "$repo_ver" ]; then
         echo "  $i) $desc ($ver → 可升级 $repo_ver) ⬆"
+      elif [ -n "$repo_ver" ] && [ -z "$ver" ]; then
+        echo "  $i) $desc (已安装，版本未知 → 源版本 $repo_ver) ✓"
       else
         echo "  $i) $desc ($ver) ✓"
       fi
