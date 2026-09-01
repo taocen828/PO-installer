@@ -1266,23 +1266,31 @@ opt_bin() {
     *) echo "$1" ;;
   esac
 }
+opt_bin_path() {
+  local bin="$1" p
+  p=$(command -v "$bin" 2>/dev/null) && [ -n "$p" ] && { echo "$p"; return; }
+  for p in /usr/bin/$bin /usr/sbin/$bin /bin/$bin /sbin/$bin; do
+    [ -x "$p" ] && { echo "$p"; return; }
+  done
+}
 opt_installed() {
   local pkg="$1" bin
   check_installed "$pkg" && return 0
   bin=$(opt_bin "$pkg")
-  command -v "$bin" >/dev/null 2>&1 && return 0
+  [ -n "$(opt_bin_path "$bin")" ] && return 0
   return 1
 }
 opt_version() {
-  local pkg="$1" bin ver
+  local pkg="$1" bin path ver
   ver=$(get_version "$pkg")
   [ -n "$ver" ] && { echo "$ver"; return; }
   bin=$(opt_bin "$pkg")
-  command -v "$bin" >/dev/null 2>&1 || { echo ""; return; }
+  path=$(opt_bin_path "$bin")
+  [ -n "$path" ] || { echo ""; return; }
   case "$pkg" in
-    sing-box) "$bin" version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
-    naiveproxy) "$bin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?|[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
-    *) "$bin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
+    sing-box) "$path" version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
+    naiveproxy) "$path" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?|[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
+    *) "$path" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
   esac
 }
 opt_pkginstall() {
