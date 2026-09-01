@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.10 (APK 已装包更新改用 apk upgrade，修复检测到新版本但未实际替换)
+# VERSION: 20260816.11 (apk upgrade 不传 --force-reinstall，修复旧版 apk-tools 报错)
 #==============================================
-VERSION="20260816.10"
+VERSION="20260816.11"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -810,7 +810,8 @@ pkg_update() {
   local pkg="$1"
   if [ "$PKG_MGR" = "apk" ]; then
     local log=/tmp/apk_upgrade.log
-    apk upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+    # apk upgrade 不接受 --force-reinstall；升级旧包只需 --upgrade 行为
+    apk upgrade --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
     local rc=$?
     grep -v "^WARNING.*opening" "$log" || true
     rm -f "$log"
