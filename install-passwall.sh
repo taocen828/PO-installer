@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.11 (apk upgrade 不传 --force-reinstall，修复旧版 apk-tools 报错)
+# VERSION: 20260816.12 (彻底移除 APK --force-reinstall，兼容不同 apk-tools)
 #==============================================
-VERSION="20260816.11"
+VERSION="20260816.12"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -117,11 +117,9 @@ if [ "$PKG_MGR" = "apk" ]; then
     touch "$APK_REPO_FILE" 2>/dev/null || true
   fi
 fi
-# OpenWrt 精简 apk-tools 2.12.x 不支持 --force-reinstall，支持才启用
+# APK 兼容性：不使用 --force-reinstall
+# 不同 OpenWrt/apk-tools 版本对该参数支持不一致，普通 add/upgrade 已足够。
 APK_FORCE_REINSTALL_OPT=""
-if [ "$PKG_MGR" = "apk" ] && apk add --help 2>&1 | grep -q -- '--force-reinstall'; then
-  APK_FORCE_REINSTALL_OPT="--force-reinstall"
-fi
 
 SYS_ARCH=""
 if [ "$PKG_MGR" = "opkg" ]; then
