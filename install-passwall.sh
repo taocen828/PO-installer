@@ -629,7 +629,9 @@ get_version() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep "^$pkg " | awk '{print $3}'
   else
-    apk info "$pkg" 2>/dev/null | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
+    # APK: apk info 会按包名前缀列出多个匹配项，head -1 可能读到旧 ABI/残留项。
+    # apk list --installed 才是当前已安装版本；取最高版本避免同名/ABI 过渡残留误判。
+    apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort | tail -1
   fi
 }
 check_installed() {
@@ -810,11 +812,19 @@ pkg_update() {
   if [ "$PKG_MGR" = "apk" ]; then
     local log=/tmp/apk_upgrade.log
     if [ -n "$want_ver" ]; then
-      apk add --upgrade --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
+      # --latest: 不沿用 world/已装包的旧版本启发式，明确选择仓库最新/指定版本
+      # --available: 允许从当前仓库重新选择，解决部分核心包只输出 OK 但不替换的问题
+      apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
+      local rc=$?
+      # 如果 add 只更新约束但没替换，再用 upgrade -a 强制按当前仓库重选该包
+      if ! apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$want_ver"; then
+        apk upgrade --available --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
+        rc=$?
+      fi
     else
-      apk add --upgrade --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+      apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+      local rc=$?
     fi
-    local rc=$?
     grep -v "^WARNING.*opening" "$log" || true
     rm -f "$log"
     return $rc
