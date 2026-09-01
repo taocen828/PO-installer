@@ -594,8 +594,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
     fi
-    opkg update >/dev/null 2>&1 || true
-    if [ "$IW_OK" = "1" ] && [ "$SF_OK" = "1" ]; then
+    # 强制刷新 PassWall 相关索引；否则 24.10/opkg 可能继续使用旧 /var/opkg-lists 缓存，导致检测不到 SF 新版本。
+    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* 2>/dev/null || true
+    opkg update > /tmp/po_opkg_update.log 2>&1 || true
+    # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
+    PW_INDEX_OK=0
+    grep -q "^Package: luci-app-passwall$" /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci 2>/dev/null && PW_INDEX_OK=1
+    if [ "$PW_INDEX_OK" != "1" ]; then
+      err "PassWall 源索引刷新失败（可能仍在使用旧缓存/源下载失败）"
+      grep -E "passwall|Failed|Signature|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
+    elif [ "$IW_OK" = "1" ] && [ "$SF_OK" = "1" ]; then
       ok "源配置完成 (速度优先: immortalwrt 国内源 + SourceForge 兜底)"
     elif [ "$IW_OK" = "1" ]; then
       ok "源配置完成 (immortalwrt $IW_VER)"
@@ -604,6 +612,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
     else
       err "PassWall 源不可用：SourceForge 与国内镜像均无法连接，PassWall 无法安装（OpenClash 不受影响）"
     fi
+    rm -f /tmp/po_opkg_update.log 2>/dev/null || true
   else
     # APK 系统: 仅 SF (immortalwrt 是 opkg 体系)
     if [ "$SF_OK" = "1" ]; then
@@ -667,10 +676,28 @@ find_pkg_meta() {
     feed=$(basename "$idx"); feed=${feed%.gz}
     url=$(grep -h "^src/gz $feed \|^src $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
     [ -n "$url" ] || continue
-    if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort | tail -1)" = "$ver" ]; then
+    if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort -V | tail -1)" = "$ver" ]; then
       best_ver="$ver"; best_feed="$feed"; best_fn="$fn"; best_url="$url"
     fi
   done
+  # 24.10/opkg 有时 opkg update 未刷新 SF 索引但本地旧索引仍存在；直接读 SF Packages.gz 参与比较。
+  if [ -n "$SF_BASE" ]; then
+    local sf_feed sf_meta sf_ver sf_fn
+    for sf_feed in passwall_luci passwall_packages passwall2; do
+      sf_meta=$(curl -sL --max-time 10 "$SF_BASE/$sf_feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pkg" '
+        $1=="Package:" && $2==p {f=1; next}
+        f && $1=="Version:" {ver=$2}
+        f && $1=="Filename:" {fn=$2}
+        f && ver && fn {print ver "|" fn; exit}
+        f && $1=="Package:" {f=0}
+      ')
+      [ -z "$sf_meta" ] && continue
+      sf_ver=${sf_meta%%|*}; sf_fn=${sf_meta#*|}
+      if [ -n "$sf_ver" ] && { [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$sf_ver" | sort -V | tail -1)" = "$sf_ver" ]; }; then
+        best_ver="$sf_ver"; best_feed="$sf_feed"; best_fn="$sf_fn"; best_url="$SF_BASE/$sf_feed"
+      fi
+    done
+  fi
   [ -z "$best_ver" ] && { echo ""; return; }
   case "$want" in
     version) echo "$best_ver" ;;
