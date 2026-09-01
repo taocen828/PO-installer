@@ -831,9 +831,19 @@ pkginstall() {
       if [ "$rc" = "2" ]; then
         err "$desc 升级失败: 新版缺少依赖 (coreutils-timeout/lyaml 等), 保留旧版 $ver"
         return 1
+      elif [ "$rc" != "0" ]; then
+        err "$desc 升级失败: opkg/apk 返回错误码 $rc，保留旧版 $ver"
+        return 1
       fi
       local nver=$(get_version "$pkg")
-      [ "$ver" != "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"
+      if [ "$nver" = "$repo_ver" ]; then
+        ok "$desc: $ver → $nver ✓"
+      elif [ "$nver" != "$ver" ] && [ -n "$nver" ]; then
+        ok "$desc: $ver → $nver ✓ (源版本 $repo_ver 未完全匹配)"
+      else
+        err "$desc 未升级: 当前仍为 $ver，源中版本 $repo_ver"
+        return 1
+      fi
     else
       ok "$desc ($ver) ✓"
     fi
@@ -858,9 +868,19 @@ pkgupgrade() {
       if [ "$rc" = "2" ]; then
         err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
         return 1
+      elif [ "$rc" != "0" ]; then
+        err "$desc 升级失败: opkg/apk 返回错误码 $rc，保留旧版 $ver"
+        return 1
       fi
       local nver=$(get_version "$pkg")
-      [ "$ver" != "$nver" ] && [ -n "$nver" ] && ok "$desc: $ver → $nver ✓" || ok "$desc ($nver) ✓"
+      if [ "$nver" = "$repo_ver" ]; then
+        ok "$desc: $ver → $nver ✓"
+      elif [ "$nver" != "$ver" ] && [ -n "$nver" ]; then
+        ok "$desc: $ver → $nver ✓ (源版本 $repo_ver 未完全匹配)"
+      else
+        err "$desc 未升级: 当前仍为 $ver，源中版本 $repo_ver"
+        return 1
+      fi
     else
       ok "$desc ($ver) ✓"
     fi
