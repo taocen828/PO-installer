@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.8 (APK get_repo_version 取最高版本，修复 apk list 先输出已装旧版导致不提示更新)
+# VERSION: 20260816.9 (APK 更新使用 --upgrade，修复检测到新版本但仍保留旧版)
 #==============================================
-VERSION="20260816.8"
+VERSION="20260816.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -797,7 +797,8 @@ apk_install() {
   local log=/tmp/apk_add.log
   # --force-reinstall: 修复假安装(数据库有元数据但文件缺失)时 apk add 跳过解压的问题
   # 之前的 SourceForge 重定向失败可能留下只注册元数据无文件的"假安装", apk add 认为已装直接 OK
-  apk add --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+  # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本
+  apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
   rc=$?
   grep -v "^WARNING.*opening" "$log" || true
   rm -f "$log"
@@ -957,7 +958,7 @@ if [ "$INSTALL_OC" = "1" ]; then
         if [ "$PKG_MGR" = "opkg" ]; then
           opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
         else
-          apk add --allow-untrusted $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
+          apk add --upgrade --allow-untrusted $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
         fi
         rm -f "$OC_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
