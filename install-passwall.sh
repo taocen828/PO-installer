@@ -639,9 +639,8 @@ check_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
   else
-    # APK 模式: 元数据判断 (实测 apk info -L 在部分 APK 系统返回空, 即使文件已装)
-    # 假安装问题已由 wget 包装器根治 (SourceForge 重定向), 元数据存在=包已装
-    apk info "$pkg" 2>/dev/null | grep -q "^$pkg-" && return 0
+    # APK: 只能用已安装列表判断。apk info 在 OpenWrt APK 上可能匹配仓库/旧元数据，导致未安装包被当成已安装。
+    apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-" && return 0
   fi
   return 1
 }
@@ -810,22 +809,25 @@ pkg_update() {
   local pkg="$1"
   local want_ver="$2"
   if [ "$PKG_MGR" = "apk" ]; then
-    local log=/tmp/apk_upgrade.log
+    local log=/tmp/apk_upgrade.log rc=0
     if [ -n "$want_ver" ]; then
-      # --latest: 不沿用 world/已装包的旧版本启发式，明确选择仓库最新/指定版本
-      # --available: 允许从当前仓库重新选择，解决部分核心包只输出 OK 但不替换的问题
+      # 先指定精确版本升级。若 apk 只改 world 约束但没替换，再用 --available 重选。
       apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
-      local rc=$?
-      # 如果 add 只更新约束但没替换，再用 upgrade -a 强制按当前仓库重选该包
+      rc=$?
       if ! apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$want_ver"; then
         apk upgrade --available --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
         rc=$?
       fi
     else
       apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
-      local rc=$?
+      rc=$?
     fi
-    grep -v "^WARNING.*opening" "$log" || true
+    # apk upgrade --available 可能为满足 world 约束安装/卸载无关包；如果目标包没实际变更，避免刷出误导性 Purging/Installing 噪音。
+    if [ -n "$want_ver" ] && ! apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$want_ver"; then
+      grep -E "ERROR|WARNING|conflict|breaks|unable|failed|permission|No such|not found" "$log" || true
+    else
+      grep -v "^WARNING.*opening" "$log" || true
+    fi
     rm -f "$log"
     return $rc
   fi
