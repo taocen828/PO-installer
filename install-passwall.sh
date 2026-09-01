@@ -588,8 +588,11 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
     fi
     # 2) SF 源（可用时保留作缺包/最新版兜底，尤其 passwall2）
     if [ "$SF_OK" = "1" ]; then
-      wget -q --no-check-certificate -O /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
-      opkg-key add /tmp/ipk.pub 2>/dev/null || true
+      # SourceForge key 也按当前最快节点下载；固定 master 在部分网络下会失败，导致 opkg update 签名失败。
+      curl -fsL --max-time 20 -o /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
+        wget -q --no-check-certificate -O /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
+        curl -fsL --max-time 20 -o /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
+      [ -s /tmp/ipk.pub ] && opkg-key add /tmp/ipk.pub 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
@@ -602,6 +605,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
     for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
       [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
     done
+    if [ "$PW_INDEX_OK" != "1" ] && [ "$SF_OK" = "1" ]; then
+      # 某些 24.10/opkg 固件会因第三方源签名失败导致索引未落盘；SF 已探测可用时，手动拉取索引兜底。
+      for feed in passwall_luci passwall_packages passwall2; do
+        curl -fsL --max-time 20 "$SF_BASE/$feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "/var/opkg-lists/$feed" 2>/dev/null || rm -f "/var/opkg-lists/$feed"
+      done
+      for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
+        [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
+      done
+      [ "$PW_INDEX_OK" = "1" ] && info "opkg 签名/部分源刷新失败已忽略，已用 SourceForge 索引兜底"
+    fi
     if [ "$PW_INDEX_OK" != "1" ]; then
       err "PassWall 源索引刷新失败（可能仍在使用旧缓存/源下载失败）"
       grep -E "Failed|Signature check failed|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
