@@ -508,11 +508,18 @@ info "预计需要: ${REQUIRED_SPACE_MB}MB"
 # 4. 配置源
 #==============================================
 hdr "软件源配置"
-info "检测系统默认源..."
+info "快速检测系统默认源..."
 SYS_SOURCE_OK=0
 if [ "$PKG_MGR" = "opkg" ]; then
-  opkg update >/dev/null 2>&1 && SYS_SOURCE_OK=1
+  # 不跑完整 opkg update 做“检测”：24.10 上会下载/验签所有源，慢则几分钟。
+  # 只抽样检测 distfeeds/customfeeds 里的 base/luci Packages.gz URL，真正 update 后面添加 PassWall 源后只跑一次。
+  for src in $(awk '/^src\/gz / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -E '/(base|luci)$' | head -2); do
+    [ "$(check_url "$src/Packages.gz")" = "200" ] && SYS_SOURCE_OK=1 && break
+  done
+  # 如果本机源文件格式特殊但前面已探测到官方镜像可用，也视为系统源可用，避免阻塞。
+  [ "$SYS_SOURCE_OK" = "0" ] && [ "$OW_OK" = "1" ] && SYS_SOURCE_OK=1
 else
+  # APK update 相对较快；保留真实验证。
   apk update >/dev/null 2>&1 && SYS_SOURCE_OK=1
 fi
 
