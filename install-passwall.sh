@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260816.7 (opkg 多源取最高版本，避免 immortalwrt 低版本遮住 SourceForge 新版本)
+# VERSION: 20260816.8 (APK get_repo_version 取最高版本，修复 apk list 先输出已装旧版导致不提示更新)
 #==============================================
-VERSION="20260816.7"
+VERSION="20260816.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -691,7 +691,9 @@ get_repo_version() {
   if [ "$PKG_MGR" = "opkg" ]; then
     find_pkg_meta "$pkg" version
   else
-    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | head -1 | awk '{print $1}' | sed "s/^$pkg-//"
+    # APK: apk list 可能先输出已装旧版，再输出 [upgradable] 新版；不能 head -1
+    # 例: luci-app-passwall-26.7.24-r1 [installed] / luci-app-passwall-26.8.26-r1 [upgradable]
+    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort | tail -1
   fi
 }
 
