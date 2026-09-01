@@ -599,10 +599,14 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
     PW_INDEX_OK=0
-    grep -q "^Package: luci-app-passwall$" /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci 2>/dev/null && PW_INDEX_OK=1
+    for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
+      [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
+    done
     if [ "$PW_INDEX_OK" != "1" ]; then
       err "PassWall 源索引刷新失败（可能仍在使用旧缓存/源下载失败）"
-      grep -E "passwall|Failed|Signature|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
+      grep -E "Failed|Signature check failed|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
+    elif grep -qE "Signature check failed|Failed to download|wget returned|curl.*error|Permission denied" /tmp/po_opkg_update.log 2>/dev/null; then
+      info "部分系统源刷新失败已忽略，PassWall 源索引正常"
     elif [ "$IW_OK" = "1" ] && [ "$SF_OK" = "1" ]; then
       ok "源配置完成 (速度优先: immortalwrt 国内源 + SourceForge 兜底)"
     elif [ "$IW_OK" = "1" ]; then
@@ -771,7 +775,7 @@ apk_install() {
         opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
         rc=$?
         grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-        grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+        grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
         rm -f "$log"
       else
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
@@ -781,14 +785,14 @@ apk_install() {
           rc=$?
           # 新版依赖缺失 (pkg_hash_check_unresolved) → 返回2, 上层保留旧版
           grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
         else
           err "下载 $pkg 失败，回退 opkg 直接安装..."
           opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
           rc=$?
           grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           rm -f "$log"
         fi
       fi
@@ -815,7 +819,7 @@ apk_install() {
         rc=$?
       fi
       grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-      grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+      grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
       rm -f "$log"
     fi
     return $rc
@@ -1008,7 +1012,7 @@ if [ "$INSTALL_OC" = "1" ]; then
   if [ -z "$OC_LATEST_NUM" ]; then
     info "GitHub API 不可达（直连+代理均失败），尝试 immortalwrt 源安装/升级..."
     if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-      opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+      opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
       nver=$(get_version "luci-app-openclash")
       if [ -n "$nver" ] && [ "$nver" != "$OC_VER" ]; then
         ok "OpenClash $nver ✓ (immortalwrt 源升级)"
@@ -1032,7 +1036,7 @@ if [ "$INSTALL_OC" = "1" ]; then
       OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
       if dl_with_mirror "$OC_URL" "$OC_PKG"; then
         if [ "$PKG_MGR" = "opkg" ]; then
-          opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+          opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
         else
           apk add --upgrade --allow-untrusted $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
         fi
@@ -1051,7 +1055,7 @@ if [ "$INSTALL_OC" = "1" ]; then
       else
         err "GitHub 全部通道失败或下载内容无效，降级尝试 immortalwrt 源..."
         if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-          opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" || true
+          opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
           # 验证降级源是否真的提供了新版本 (immortalwrt 源可能滞后, 只有旧版 → 不算成功)
           nver=$(get_version "luci-app-openclash")
           if [ -n "$nver" ] && [ "$nver" != "$OC_VER" ]; then
