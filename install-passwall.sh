@@ -732,6 +732,19 @@ find_pkg_url() {
   find_pkg_meta "$1" url
 }
 
+# APK 主包也走 curl 预下载，这样和 IPK 一样能显示 100% 进度条。
+# SourceForge APK 文件名格式: 包名-版本.apk，例如 sing-box-1.13.21-r1.apk
+find_apk_url() {
+  local pkg="$1" ver="$2" feed url
+  [ -n "$SF_BASE" ] || return
+  [ -n "$ver" ] || ver=$(get_repo_version "$pkg")
+  [ -n "$ver" ] || return
+  for feed in passwall_luci passwall_packages passwall2; do
+    url="$SF_BASE/$feed/$pkg-$ver.apk$SF_MIRROR_QUERY"
+    [ "$(check_url "$url")" = "200" ] && { echo "$url"; return; }
+  done
+}
+
 # 包安装/升级
 # 主包走 curl 带进度下载（百分比），依赖包逐个显示 [N/总数] 包名级进度
 # 过滤已知无害的 opkg 噪音: Configuring 进度、remove_obsolesced_files(旧文件已删)、opkg.lock 警告
@@ -824,12 +837,28 @@ apk_install() {
     fi
     return $rc
   fi
-  local log=/tmp/apk_add.log
+  local log=/tmp/apk_add.log url prog repo_ver
   # --force-reinstall: 修复假安装(数据库有元数据但文件缺失)时 apk add 跳过解压的问题
   # 之前的 SourceForge 重定向失败可能留下只注册元数据无文件的"假安装", apk add 认为已装直接 OK
   # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本
-  apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
-  rc=$?
+  repo_ver=$(get_repo_version "$pkg")
+  url=$(find_apk_url "$pkg" "$repo_ver")
+  if [ -n "$url" ]; then
+    prog="-sS"; [ -t 1 ] && prog="--progress-bar"
+    info "下载 $pkg (带进度)..."
+    if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
+      apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" > "$log" 2>&1
+      rc=$?
+      rm -f "/tmp/pkg_$pkg.apk"
+    else
+      err "下载 $pkg 失败，回退 apk 直接安装..."
+      apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+      rc=$?
+    fi
+  else
+    apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+    rc=$?
+  fi
   grep -v "^WARNING.*opening" "$log" || true
   rm -f "$log"
   return $rc
@@ -840,11 +869,26 @@ pkg_update() {
   local pkg="$1"
   local want_ver="$2"
   if [ "$PKG_MGR" = "apk" ]; then
-    local log=/tmp/apk_upgrade.log rc=0
+    local log=/tmp/apk_upgrade.log rc=0 url prog
     if [ -n "$want_ver" ]; then
       # 先指定精确版本升级。若 apk 只改 world 约束但没替换，再用 --available 重选。
-      apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
-      rc=$?
+      url=$(find_apk_url "$pkg" "$want_ver")
+      if [ -n "$url" ]; then
+        prog="-sS"; [ -t 1 ] && prog="--progress-bar"
+        info "下载 $pkg (带进度)..."
+        if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
+          apk add --upgrade --latest --allow-untrusted --force-broken-world "/tmp/pkg_$pkg.apk" > "$log" 2>&1
+          rc=$?
+          rm -f "/tmp/pkg_$pkg.apk"
+        else
+          err "下载 $pkg 失败，回退 apk 直接升级..."
+          apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
+          rc=$?
+        fi
+      else
+        apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
+        rc=$?
+      fi
       if ! apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$want_ver"; then
         apk upgrade --available --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
         rc=$?
