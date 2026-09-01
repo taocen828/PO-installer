@@ -803,13 +803,17 @@ apk_install() {
   return $rc
 }
 
-# 已安装包升级：APK 必须使用 apk upgrade；apk add --upgrade 在部分 OpenWrt apk-tools 中不会真正替换旧版
+# 已安装包升级：APK 必须指定精确版本；只写包名时部分 OpenWrt apk-tools 只输出 OK 但不替换旧版
 pkg_update() {
   local pkg="$1"
+  local want_ver="$2"
   if [ "$PKG_MGR" = "apk" ]; then
     local log=/tmp/apk_upgrade.log
-    # apk upgrade 不接受 --force-reinstall；升级旧包只需 --upgrade 行为
-    apk upgrade --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+    if [ -n "$want_ver" ]; then
+      apk add --upgrade --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
+    else
+      apk add --upgrade --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+    fi
     local rc=$?
     grep -v "^WARNING.*opening" "$log" || true
     rm -f "$log"
@@ -826,7 +830,7 @@ pkginstall() {
     local repo_ver=$(get_repo_version "$pkg")
     if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
-      pkg_update "$pkg"
+      pkg_update "$pkg" "$repo_ver"
       local rc=$?
       if [ "$rc" = "2" ]; then
         err "$desc 升级失败: 新版缺少依赖 (coreutils-timeout/lyaml 等), 保留旧版 $ver"
@@ -863,7 +867,7 @@ pkgupgrade() {
     local repo_ver=$(get_repo_version "$pkg")
     if [ -n "$repo_ver" ] && [ "$ver" != "$repo_ver" ]; then
       info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
-      pkg_update "$pkg"
+      pkg_update "$pkg" "$repo_ver"
       local rc=$?
       if [ "$rc" = "2" ]; then
         err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
