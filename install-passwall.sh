@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260901.18 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260902.1 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260901.18"
+VERSION="20260902.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -227,14 +227,14 @@ case "$KERNEL_VER" in
   6.*)    SERIES_CHAIN="24.10 snapshots" ;;
   *)      SERIES_CHAIN="snapshots" ;;
 esac
-# opkg 系统: 官方 snapshots(master) 已切 apk (无 Packages.gz), 但 25.12 release 仍有 opkg 索引
-# 只过滤 snapshots, 保留 25.12 (Kwrt/iStoreOS 等 25.12-SNAPSHOT opkg 固件可用官方 25.12 源)
+# opkg 系统: 官方 25.12/snapshots 已切 APK 索引(packages.adb), 无 Packages.gz
+# 第三方 25.12-SNAPSHOT 仍带 opkg 的固件只能用 24.10 opkg 源作 best-effort 普通包源
 if [ "$PKG_MGR" = "opkg" ]; then
-  SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(snapshots)$' | tr '\n' ' ')
+  SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(25\.12|snapshots)$' | tr '\n' ' ')
   [ -z "$SERIES_CHAIN" ] && SERIES_CHAIN="24.10"
   # 去尾随空格 (tr 换行→空格会产生)
   SERIES_CHAIN=${SERIES_CHAIN% }
-  info "opkg 系统: 官方 snapshots 为 apk 格式，源链过滤 snapshots → $SERIES_CHAIN"
+  info "opkg 系统: 官方 25.12/snapshots 为 apk 格式，源链过滤为 opkg 可用系列 → $SERIES_CHAIN"
 fi
 
 #==============================================
@@ -285,7 +285,7 @@ probe_ow_ver() {
 
 # 候选 OpenWrt 镜像（阿里云 → 清华 → 官方），依次探测直到找到匹配的镜像+版本
 # 注意: 阿里云可能滞后（如 25.12 系列未同步完整），自动切到有完整版本的镜像
-# 索引文件类型按包管理器判断：opkg→Packages.gz（含 24.10），apk→packages.adb
+# 索引文件类型按包管理器判断：opkg→Packages.gz（24.10及以下），apk→packages.adb（25.12/snapshots）
 PKG_FILE="Packages.gz"
 [ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
 MIR_BASES="https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.openwrt.org https://downloads.immortalwrt.org"
