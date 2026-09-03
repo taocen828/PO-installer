@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.2 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.3 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.2"
+VERSION="20260903.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1261,23 +1261,16 @@ if [ "$INSTALL_OC" = "1" ]; then
     fi
     # 获取最新版本用于对比 (直连 → ghfast → ghproxy)
     MIHOMO_VER=$(get_mihomo_latest_ver)
-    # 版本可解析且落后于最新 → 询问升级
+    # 版本可解析且落后于最新 → 自动升级，不再询问
     if [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ] && [ "$INSTALLED_MIHOMO" != "$MIHOMO_VER" ]; then
-      echo -n "  升级 Clash 内核 ($INSTALLED_MIHOMO → $MIHOMO_VER)？[Y/n]: "
-      read -r CORE_UP
-      case "$CORE_UP" in n|N|no|NO) info "跳过升级" ;; *)
-        install_mihomo_core "$CORE_FILE"
-      ;; esac
+      info "Clash 内核自动升级: $INSTALLED_MIHOMO → $MIHOMO_VER"
+      install_mihomo_core "$CORE_FILE"
     elif [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ]; then
       ok "Clash 内核已是最新 ($MIHOMO_VER)"
     fi
   else
-    # 无内核 → 询问下载
-    echo -n "  下载 Clash 运行内核？[Y/n]: "
-    read -r CORE_ANS
-    case "$CORE_ANS" in n|N|no|NO) info "跳过 Clash 内核" ;; *)
-      install_mihomo_core /etc/openclash/core/clash_meta
-    ;; esac
+    # 无内核 → 自动下载，不再询问
+    install_mihomo_core /etc/openclash/core/clash_meta
   fi
 fi
 
