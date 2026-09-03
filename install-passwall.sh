@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.1 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.1"
+VERSION="20260903.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -392,13 +392,28 @@ SF_MIRROR_QUERY=""; SF_MIRROR_LABEL="default"
 if [ "$(check_url $SF_TEST)" = "200" ]; then
   SF_OK=1
   ok "PassWall 源 ✓ (SourceForge)"
-  info "SF 多节点测速，选最快下载节点..."
-  SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
-  SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
-  SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
-  SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
-  [ -z "$SF_PREFIX" ] && SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
-  ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
+  if [ -n "$SF_MIRROR" ]; then
+    info "使用手动指定 SourceForge 节点: $SF_MIRROR"
+    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
+    SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
+    SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
+    SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
+    ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
+  elif [ -n "$http_proxy$https_proxy$HTTP_PROXY$HTTPS_PROXY" ]; then
+    info "检测到代理环境，跳过 SF 多节点测速，直接使用默认下载节点"
+    SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
+    SF_MIRROR_QUERY=""
+    SF_MIRROR_LABEL="downloads"
+    ok "PassWall 下载节点: downloads ($SF_PREFIX)"
+  else
+    info "SF 多节点测速，选最快下载节点..."
+    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
+    SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
+    SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
+    SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
+    [ -z "$SF_PREFIX" ] && SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
+    ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
+  fi
 else
   SF_OK=0
   err "PassWall 源不可用（SourceForge 国外直连失败）"
