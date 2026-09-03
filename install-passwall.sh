@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.8 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.9 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.8"
+VERSION="20260903.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -788,6 +788,24 @@ find_pkg_meta() {
         best_ver="$sf_ver"; best_feed="$sf_feed"; best_fn="$sf_fn"; best_url="$SF_BASE/$sf_feed"
       fi
     done
+  fi
+  # SSR Plus: openwrt.ai/kiddin9 源可能未签名，opkg update 不一定把索引落盘；
+  # 直接读取远端 Packages.gz 参与 version/url 解析，确保 dns2tcp/lua-neturl/ssr-plus 等能走 curl 预下载安装。
+  if [ -n "$SSR_BASE" ]; then
+    local ssr_meta ssr_ver ssr_fn
+    ssr_meta=$(curl -sL --max-time 10 "$SSR_BASE/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pkg" '
+      $1=="Package:" && $2==p {f=1; next}
+      f && $1=="Version:" {ver=$2}
+      f && $1=="Filename:" {fn=$2}
+      f && ver && fn {print ver "|" fn; exit}
+      f && $1=="Package:" {f=0}
+    ')
+    if [ -n "$ssr_meta" ]; then
+      ssr_ver=${ssr_meta%%|*}; ssr_fn=${ssr_meta#*|}
+      if [ -n "$ssr_ver" ] && { [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ssr_ver" | sort -V | tail -1)" = "$ssr_ver" ]; }; then
+        best_ver="$ssr_ver"; best_feed="openwrt_ai_kiddin9"; best_fn="$ssr_fn"; best_url="$SSR_BASE"
+      fi
+    fi
   fi
   [ -z "$best_ver" ] && { echo ""; return; }
   case "$want" in
