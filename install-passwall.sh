@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.3 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.4 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.3"
+VERSION="20260903.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -623,7 +623,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
     rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* 2>/dev/null || true
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
-    PW_INDEX_OK=0
+    PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
     for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
       [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
     done
@@ -633,15 +633,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
         curl -fsL --max-time 20 "$SF_BASE/$feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "/var/opkg-lists/$feed" 2>/dev/null || rm -f "/var/opkg-lists/$feed"
       done
       for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
-        [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
+        [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1 && PW_INDEX_FALLBACK=1
       done
-      [ "$PW_INDEX_OK" = "1" ] && info "opkg 签名/部分源刷新失败已忽略，已用 SourceForge 索引兜底"
     fi
     if [ "$PW_INDEX_OK" != "1" ]; then
       err "PassWall 源索引刷新失败（可能仍在使用旧缓存/源下载失败）"
       grep -E "Failed|Signature check failed|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
+    elif [ "$PW_INDEX_FALLBACK" = "1" ]; then
+      ok "PassWall 源索引正常（已自动兜底处理 opkg 刷新警告）"
     elif grep -qE "Signature check failed|Failed to download|wget returned|curl.*error|Permission denied" /tmp/po_opkg_update.log 2>/dev/null; then
-      info "部分系统源刷新失败已忽略，PassWall 源索引正常"
+      ok "PassWall 源索引正常（已忽略无关系统源刷新警告）"
     elif [ "$IW_OK" = "1" ] && [ "$SF_OK" = "1" ]; then
       ok "源配置完成 (速度优先: immortalwrt 国内源 + SourceForge 兜底)"
     elif [ "$IW_OK" = "1" ]; then
