@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.5 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.7 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.5"
+VERSION="20260903.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -105,6 +105,14 @@ elif command -v apk >/dev/null 2>&1; then
   PKG_MGR="apk"; ok "包管理器: APK (OpenWrt packages.adb)"
 else
   err "无法识别包管理器"; exit 1
+fi
+
+# 早期清理上次运行追加的 PO-managed 源。
+# 必须放在第一次 opkg print-architecture 之前，否则历史 customfeeds 与 distfeeds 重复时，opkg 自身会先刷 Duplicate src declaration。
+if [ "$PKG_MGR" = "opkg" ] && [ -f /etc/opkg/customfeeds.conf ]; then
+  grep -v -e "passwall" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-clean 2>/dev/null || true
+  cat /tmp/customfeeds.po-clean > /etc/opkg/customfeeds.conf 2>/dev/null
+  rm -f /tmp/customfeeds.po-clean
 fi
 
 # APK 源文件路径兼容：部分 OpenWrt APK 系统没有 /etc/apk/repositories.d
@@ -603,16 +611,24 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
       cat /tmp/customfeeds.tmp > /etc/opkg/customfeeds.conf 2>/dev/null
       rm -f /tmp/customfeeds.tmp
     fi
-    # 0) OpenWrt 官方/镜像 packages 源：即使系统默认源“看起来可用”，也追加一组已探测匹配的 base/luci/packages/routing/telephony
+    add_opkg_feed_once() {
+      local name="$1" url="$2"
+      [ -n "$name" ] && [ -n "$url" ] || return 0
+      # 如果 distfeeds/customfeeds 已有同名或同 URL 源，不再重复追加，避免 opkg Duplicate src declaration 刷屏。
+      grep -hE "^src/gz[[:space:]]+$name[[:space:]]|^src[[:space:]]+$name[[:space:]]" /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -q . && return 0
+      awk '/^src\/gz |^src / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -Fxq "$url" && return 0
+      echo "src/gz $name $url" >> /etc/opkg/customfeeds.conf
+    }
+    # 0) OpenWrt 官方/镜像 packages 源：即使系统默认源“看起来可用”，也补充一组已探测匹配的 base/luci/packages/routing/telephony
     #    R3S/第三方固件常见问题是默认源缺 coreutils-base64/ruby/chinadns-ng 等依赖；只加 PassWall 源会导致主包下载成功但依赖解析失败。
     #    不覆盖原 distfeeds，仅补充普通 packages 源；targets(kmod) 只有精确存在时才加，避免内核模块不匹配。
     if [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
-      [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages" >> /etc/opkg/customfeeds.conf
-      echo "src/gz openwrt_base $OW_USE/packages/$SYS_ARCH/base" >> /etc/opkg/customfeeds.conf
-      echo "src/gz openwrt_luci $OW_USE/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
-      echo "src/gz openwrt_packages $OW_USE/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
-      echo "src/gz openwrt_routing $OW_USE/packages/$SYS_ARCH/routing" >> /etc/opkg/customfeeds.conf
-      echo "src/gz openwrt_telephony $OW_USE/packages/$SYS_ARCH/telephony" >> /etc/opkg/customfeeds.conf
+      [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && add_opkg_feed_once "openwrt_core" "$OW_USE/targets/$SYS_TARGET/packages"
+      add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
+      add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
+      add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
+      add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
+      add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "已追加匹配的 OpenWrt 依赖源 ($OW_USE / $SYS_ARCH)"
     else
       info "未追加 OpenWrt 依赖源：未探测到匹配版本；将仅使用系统默认源"
