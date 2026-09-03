@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.7 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.8 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.7"
+VERSION="20260903.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -110,7 +110,7 @@ fi
 # 早期清理上次运行追加的 PO-managed 源。
 # 必须放在第一次 opkg print-architecture 之前，否则历史 customfeeds 与 distfeeds 重复时，opkg 自身会先刷 Duplicate src declaration。
 if [ "$PKG_MGR" = "opkg" ] && [ -f /etc/opkg/customfeeds.conf ]; then
-  grep -v -e "passwall" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-clean 2>/dev/null || true
+  grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-clean 2>/dev/null || true
   cat /tmp/customfeeds.po-clean > /etc/opkg/customfeeds.conf 2>/dev/null
   rm -f /tmp/customfeeds.po-clean
 fi
@@ -490,9 +490,10 @@ echo ""
 echo "  1) PassWall (经典版，推荐)"
 echo "  2) PassWall2 (新版，可与 PassWall 共存)"
 echo "  3) OpenClash (Clash 内核)"
-echo "  4) 全部安装"
+echo "  4) SSR Plus (ShadowSocksR Plus+)"
+echo "  5) 全部安装"
 echo ""
-printf "请输入选项 (1/2/3/4): "
+printf "请输入选项 (1/2/3/4/5): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -501,15 +502,16 @@ while :; do
     break
   fi
   case "$MAIN_CHOICE" in
-    1|2|3|4) break ;;
-    *) printf "  无效输入，请重新选择 (1/2/3/4): " ;;
+    1|2|3|4|5) break ;;
+    *) printf "  无效输入，请重新选择 (1/2/3/4/5): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
-  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; ok "选择: PassWall" ;;
-  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; ok "选择: PassWall2" ;;
-  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; ok "选择: OpenClash" ;;
-  4) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; ok "选择: 全部安装" ;;
+  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; ok "选择: PassWall" ;;
+  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; ok "选择: PassWall2" ;;
+  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; ok "选择: OpenClash" ;;
+  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; ok "选择: SSR Plus" ;;
+  5) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; ok "选择: 全部安装" ;;
 esac
 
 #==============================================
@@ -520,6 +522,7 @@ REQUIRED_SPACE_MB=30
 [ "$INSTALL_PW" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
 [ "$INSTALL_PW2" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
 [ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
+[ "$INSTALL_SSR" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 60))
 OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
@@ -603,11 +606,11 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 # 添加 PassWall 源（装 PassWall/PassWall2/OpenClash 时都需要）
 # OpenClash 也需要 immortalwrt 源作为 GitHub 不可达时的降级通道
 # 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
+if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     # 清旧声明（幂等）: 过滤 passwall/iw_/openwrt_ 行后重建文件 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
-      grep -v -e "passwall" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
+      grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
       cat /tmp/customfeeds.tmp > /etc/opkg/customfeeds.conf 2>/dev/null
       rm -f /tmp/customfeeds.tmp
     fi
@@ -649,8 +652,22 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
         echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
       done
     fi
-    # 强制刷新 PassWall 相关索引；否则 24.10/opkg 可能继续使用旧 /var/opkg-lists 缓存，导致检测不到 SF 新版本。
-    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* 2>/dev/null || true
+    # 3) SSR Plus 源：使用 openwrt.ai/kiddin9 预编译源（R3S aarch64_generic/24.10 等有现成包）
+    SSR_OK=0; SSR_BASE=""
+    if [ "$INSTALL_SSR" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+      SSR_VER="$SF_PW_VER"
+      [ -z "$SSR_VER" ] && SSR_VER="$PW_VER"
+      SSR_BASE="https://dl.openwrt.ai/packages-$SSR_VER/$SYS_ARCH/kiddin9"
+      if [ "$(check_url "$SSR_BASE/Packages.gz")" = "200" ] && curl -sL --max-time 12 "$SSR_BASE/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | grep -q "^Package: luci-app-ssr-plus$"; then
+        add_opkg_feed_once "openwrt_ai_kiddin9" "$SSR_BASE"
+        SSR_OK=1
+        ok "SSR Plus 源 ✓ (openwrt.ai packages-$SSR_VER / $SYS_ARCH)"
+      else
+        err "SSR Plus 源不可用或无 luci-app-ssr-plus ($SSR_BASE)"
+      fi
+    fi
+    # 强制刷新相关索引；否则 24.10/opkg 可能继续使用旧 /var/opkg-lists 缓存，导致检测不到新版本。
+    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* /var/opkg-lists/openwrt_ai_kiddin9 2>/dev/null || true
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
     PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
@@ -666,21 +683,25 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
         [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1 && PW_INDEX_FALLBACK=1
       done
     fi
-    if [ "$PW_INDEX_OK" != "1" ]; then
+    if [ "$PW_INDEX_OK" != "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       err "PassWall 源索引刷新失败（可能仍在使用旧缓存/源下载失败）"
       grep -E "Failed|Signature check failed|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
     elif [ "$PW_INDEX_FALLBACK" = "1" ]; then
       ok "PassWall 源索引正常（已自动兜底处理 opkg 刷新警告）"
+    elif [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_SSR" = "1" ] && [ "$SSR_OK" = "1" ]; then
+      ok "源配置完成 (SSR Plus openwrt.ai/kiddin9)"
     elif grep -qE "Signature check failed|Failed to download|wget returned|curl.*error|Permission denied" /tmp/po_opkg_update.log 2>/dev/null; then
-      ok "PassWall 源索引正常（已忽略无关系统源刷新警告）"
+      ok "源索引正常（已忽略无关系统源刷新警告）"
     elif [ "$IW_OK" = "1" ] && [ "$SF_OK" = "1" ]; then
       ok "源配置完成 (速度优先: immortalwrt 国内源 + SourceForge 兜底)"
     elif [ "$IW_OK" = "1" ]; then
       ok "源配置完成 (immortalwrt $IW_VER)"
     elif [ "$SF_OK" = "1" ]; then
       ok "源配置完成 (SourceForge)"
+    elif [ "$SSR_OK" = "1" ]; then
+      ok "源配置完成 (SSR Plus openwrt.ai/kiddin9)"
     else
-      err "PassWall 源不可用：SourceForge 与国内镜像均无法连接，PassWall 无法安装（OpenClash 不受影响）"
+      err "代理插件源不可用：PassWall/SSR Plus 源均未成功配置（OpenClash 不受影响）"
     fi
     rm -f /tmp/po_opkg_update.log 2>/dev/null || true
   else
@@ -1073,6 +1094,41 @@ if [ "$INSTALL_PW2" = "1" ]; then
   else
     info "跳过 PassWall2: 当前 PassWall 源为国内 immortalwrt 镜像，不含 PassWall2 包（PassWall 经典版不受影响）"
     [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+  fi
+fi
+
+# SSR Plus
+# 使用 openwrt.ai/kiddin9 预编译源；主程序、中文包与常用协议/转发组件按 PassWall 同样逻辑逐个安装。
+if [ "$INSTALL_SSR" = "1" ]; then
+  if [ "$PKG_MGR" = "opkg" ]; then
+    hdr "SSR Plus 安装"
+    # 先装依赖/协议组件，最后装 LuCI 主程序，避免主程序先因依赖未解开而失败。
+    pkginstall "coreutils-base64" "Coreutils Base64"
+    pkginstall "dns2tcp" "DNS2TCP"
+    pkginstall "dnsmasq-full" "dnsmasq-full"
+    pkginstall "jq" "jq"
+    pkginstall "ip-full" "ip-full"
+    pkginstall "lua-neturl" "lua-neturl"
+    pkginstall "libuci-lua" "libuci-lua"
+    pkginstall "tcping" "TCPing"
+    pkginstall "resolveip" "ResolveIP"
+    pkginstall "nping" "Nping"
+    pkginstall "microsocks" "Microsocks"
+    pkginstall "dns2socks" "DNS2SOCKS"
+    pkginstall "mosdns" "MosDNS"
+    pkginstall "shadowsocksr-libev-ssr-check" "SSR Check"
+    pkginstall "shadowsocksr-libev-ssr-local" "SSR Local"
+    pkginstall "shadowsocksr-libev-ssr-redir" "SSR Redir"
+    pkginstall "shadowsocksr-libev-ssr-server" "SSR Server"
+    pkginstall "shadowsocks-rust-sslocal" "Shadowsocks Rust Local"
+    pkginstall "shadowsocks-rust-ssserver" "Shadowsocks Rust Server"
+    pkginstall "simple-obfs-client" "Simple-Obfs Client"
+    pkginstall "xray-core" "Xray 内核"
+    pkginstall "v2ray-geoip" "v2ray-geoip"
+    pkginstall "v2ray-geosite" "v2ray-geosite"
+    pkginstall "luci-app-ssr-plus" "SSR Plus"
+  else
+    info "跳过 SSR Plus: 当前为 APK 包管理器，暂未接入 SSR Plus APK 源"
   fi
 fi
 
