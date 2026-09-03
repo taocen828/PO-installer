@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.4 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260903.5 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.4"
+VERSION="20260903.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -597,11 +597,25 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 # 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
-    # 清旧声明（幂等）: 过滤 passwall/iw_ 行后重建文件 (避免 busybox sed -i 符号链接坑)
+    # 清旧声明（幂等）: 过滤 passwall/iw_/openwrt_ 行后重建文件 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
-      grep -v -e "passwall" -e "^src/gz iw_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
+      grep -v -e "passwall" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
       cat /tmp/customfeeds.tmp > /etc/opkg/customfeeds.conf 2>/dev/null
       rm -f /tmp/customfeeds.tmp
+    fi
+    # 0) OpenWrt 官方/镜像 packages 源：即使系统默认源“看起来可用”，也追加一组已探测匹配的 base/luci/packages/routing/telephony
+    #    R3S/第三方固件常见问题是默认源缺 coreutils-base64/ruby/chinadns-ng 等依赖；只加 PassWall 源会导致主包下载成功但依赖解析失败。
+    #    不覆盖原 distfeeds，仅补充普通 packages 源；targets(kmod) 只有精确存在时才加，避免内核模块不匹配。
+    if [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+      [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages" >> /etc/opkg/customfeeds.conf
+      echo "src/gz openwrt_base $OW_USE/packages/$SYS_ARCH/base" >> /etc/opkg/customfeeds.conf
+      echo "src/gz openwrt_luci $OW_USE/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
+      echo "src/gz openwrt_packages $OW_USE/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
+      echo "src/gz openwrt_routing $OW_USE/packages/$SYS_ARCH/routing" >> /etc/opkg/customfeeds.conf
+      echo "src/gz openwrt_telephony $OW_USE/packages/$SYS_ARCH/telephony" >> /etc/opkg/customfeeds.conf
+      info "已追加匹配的 OpenWrt 依赖源 ($OW_USE / $SYS_ARCH)"
+    else
+      info "未追加 OpenWrt 依赖源：未探测到匹配版本；将仅使用系统默认源"
     fi
     # 1) 国内 immortalwrt 源（探测到即可用，优先写入，opkg/下载 URL 均先走国内）
     if [ "$IW_OK" = "1" ]; then
@@ -620,7 +634,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" ]; then
       done
     fi
     # 强制刷新 PassWall 相关索引；否则 24.10/opkg 可能继续使用旧 /var/opkg-lists 缓存，导致检测不到 SF 新版本。
-    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* 2>/dev/null || true
+    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* 2>/dev/null || true
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
     PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
