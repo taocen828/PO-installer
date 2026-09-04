@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.10 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.11 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.10"
+VERSION="20260904.11"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1104,6 +1104,22 @@ clean_luci_cache() {
   rm -rf /tmp/luci-indexcache.* /tmp/luci-modulecache/ 2>/dev/null || true
   /etc/init.d/rpcd reload >/dev/null 2>&1 || true
 }
+clean_apk_broken_world() {
+  [ "$PKG_MGR" = "apk" ] || return 0
+  [ -f /etc/apk/world ] || return 0
+  cp /etc/apk/world /tmp/apk.world.po-bak 2>/dev/null || true
+  grep -v -e '^dns2tcp' \
+          -e '^lua-neturl' \
+          -e '^luci-app-ssr-plus' \
+          -e '^mosdns' \
+          -e '^naiveprox4' \
+          -e '^nping' \
+          -e '^sing-box' \
+          /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || true
+  cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
+  rm -f /tmp/apk.world.po-clean 2>/dev/null || true
+}
+
 remove_pkg_keep_config() {
   local pkg="$1" desc="$2" log="/tmp/po_remove.log" rc=0
   if ! check_installed "$pkg"; then
@@ -1116,8 +1132,16 @@ remove_pkg_keep_config() {
     rc=$?
     grep -v -e "^Removing package" -e "^Configuring" -e "^Collected errors:$" -e "opkg\.lock" "$log" || true
   else
+    # APK 的 world 里如果残留不存在的约束，apk del 任何包都会先解依赖失败；先清理已知 PO/SSR 残留再删。
+    clean_apk_broken_world
     apk del "$pkg" > "$log" 2>&1
     rc=$?
+    if [ "$rc" != "0" ] && grep -q "unable to select packages\|no such package\|required by: world" "$log" 2>/dev/null; then
+      info "APK world 存在残留约束，清理后重试..."
+      clean_apk_broken_world
+      apk del "$pkg" > "$log" 2>&1
+      rc=$?
+    fi
     grep -v "^WARNING.*opening" "$log" || true
   fi
   rm -f "$log"
