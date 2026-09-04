@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.1 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.1"
+VERSION="20260904.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -713,6 +713,8 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       done
       apk update >/dev/null 2>&1 || true
       ok "源配置完成 (SourceForge)"
+    elif [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_SSR" = "1" ]; then
+      ok "源配置完成 (SSR Plus 使用 fw876/helloworld GitHub Release 直装)"
     else
       err "PassWall 源不可用：SourceForge 无法连接"
     fi
@@ -731,7 +733,7 @@ get_version() {
   else
     # APK: apk info 会按包名前缀列出多个匹配项，head -1 可能读到旧 ABI/残留项。
     # apk list --installed 才是当前已安装版本；取最高版本避免同名/ABI 过渡残留误判。
-    apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort | tail -1
+    apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort -V | tail -1
   fi
 }
 check_installed() {
@@ -1142,8 +1144,110 @@ if [ "$INSTALL_PW2" = "1" ]; then
   fi
 fi
 
+# SSR Plus: fw876/helloworld 官方 release 直装。release 同时提供：
+#   luci-app-ssr-plus_196-r7_all.ipk (OPKG)
+#   luci-app-ssr-plus-196-r7.apk (APK)
+# opkg 下仍保留 openwrt.ai/kiddin9 作为依赖源；APK 下直接安装 release apk。
+get_ssr_latest_json() {
+  local api="https://api.github.com/repos/fw876/helloworld/releases/latest" u
+  for u in "$api" \
+           "https://ghfast.top/$api" \
+           "https://ghproxy.net/$api" \
+           "https://ghproxy.cc/$api"; do
+    curl -sL --max-time 12 "$u" 2>/dev/null | grep -q '"tag_name"' || continue
+    curl -sL --max-time 20 "$u" 2>/dev/null
+    return 0
+  done
+  return 1
+}
+get_ssr_asset_url() {
+  local ext="$1" json pat
+  json=$(get_ssr_latest_json) || return 1
+  if [ "$ext" = "apk" ]; then
+    pat='https://[^" ]*/luci-app-ssr-plus-[^" ]*\.apk'
+  else
+    pat='https://[^" ]*/luci-app-ssr-plus_[^" ]*_all\.ipk'
+  fi
+  printf '%s\n' "$json" | grep -oE "$pat" | head -1
+}
+ssr_ver_from_url() {
+  local url="$1" ext="$2"
+  if [ "$ext" = "apk" ]; then
+    basename "$url" | sed -n 's/^luci-app-ssr-plus-\(.*\)\.apk$/\1/p'
+  else
+    basename "$url" | sed -n 's/^luci-app-ssr-plus_\(.*\)_all\.ipk$/\1/p'
+  fi
+}
+download_ssr_release_pkg() {
+  local ext="$1" out="$2" url u magic
+  url=$(get_ssr_asset_url "$ext") || return 1
+  [ -n "$url" ] || return 1
+  SSR_RELEASE_URL="$url"
+  SSR_RELEASE_VER=$(ssr_ver_from_url "$url" "$ext")
+  for u in "$url" \
+           "https://ghfast.top/$url" \
+           "https://ghproxy.net/$url" \
+           "https://ghproxy.cc/$url" \
+           "https://gh.ddlc.top/$url"; do
+    curl -fL -# --max-time 90 -o "$out" "$u" 2>/dev/null
+    if [ -s "$out" ]; then
+      case "$ext" in
+        apk) magic=$(dd if="$out" bs=1 count=4 2>/dev/null); [ "$magic" = "ADBd" ] && return 0 ;;
+        ipk) magic=$(dd if="$out" bs=1 count=4 2>/dev/null); [ "$magic" = "!<ar" ] && return 0
+             magic=$(dd if="$out" bs=1 count=2 2>/dev/null); [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+      esac
+    fi
+    rm -f "$out"
+  done
+  return 1
+}
+install_ssr_release() {
+  local ext="$1" pkgfile="/tmp/luci-app-ssr-plus.$ext" oldver newver rc log="/tmp/ssr_release_install.log"
+  oldver=$(get_version "luci-app-ssr-plus")
+  info "获取 SSR Plus 官方 Release (fw876/helloworld)..."
+  if ! download_ssr_release_pkg "$ext" "$pkgfile"; then
+    err "SSR Plus Release 下载失败 (GitHub 直连+代理均失败)"
+    return 1
+  fi
+  info "安装 SSR Plus $SSR_RELEASE_VER ($ext)..."
+  : > "$log"
+  if [ "$ext" = "apk" ]; then
+    apk add --upgrade --allow-untrusted --force-broken-world "$pkgfile" >> "$log" 2>&1
+    rc=$?
+  else
+    opkg install "$pkgfile" --force-downgrade --force-overwrite --force-depends >> "$log" 2>&1
+    rc=$?
+    grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+  fi
+  rm -f "$pkgfile"
+  if [ "$rc" = "0" ]; then
+    grep -v -e "^Configuring" -e "^WARNING.*opening" -e "^\.\.\.$" -e "^Collected errors:$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+  else
+    grep -E "ERROR|WARNING|conflict|breaks|unable|failed|permission|No such|not found|pkg_hash_check_unresolved|cannot find dependency|incompatible" "$log" || true
+  fi
+  rm -f "$log"
+  newver=$(get_version "luci-app-ssr-plus")
+  if [ -n "$SSR_RELEASE_VER" ] && [ "$newver" = "$SSR_RELEASE_VER" ]; then
+    if [ -n "$oldver" ] && [ "$oldver" != "$newver" ]; then
+      ok "SSR Plus: $oldver → $newver ✓ (fw876/helloworld)"
+    else
+      ok "SSR Plus $newver ✓ (fw876/helloworld)"
+    fi
+    return 0
+  elif [ "$rc" = "0" ] && [ -n "$newver" ] && [ "$newver" != "$oldver" ]; then
+    ok "SSR Plus: $oldver → $newver ✓ (Release 版本 $SSR_RELEASE_VER)"
+    return 0
+  fi
+  if [ "$rc" = "2" ]; then
+    err "SSR Plus 安装失败: 缺少依赖；OPKG 系统请确认 OpenWrt/openwrt.ai 依赖源可用"
+  else
+    err "SSR Plus 安装失败: 当前版本 ${newver:-未安装}，Release 版本 ${SSR_RELEASE_VER:-未知}"
+  fi
+  return 1
+}
+
 # SSR Plus
-# 使用 openwrt.ai/kiddin9 预编译源；主程序、中文包与常用协议/转发组件按 PassWall 同样逻辑逐个安装。
+# 主程序来自 fw876/helloworld 官方 Release；OPKG 依赖源保留 openwrt.ai/kiddin9。
 if [ "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     hdr "SSR Plus 安装"
@@ -1171,9 +1275,10 @@ if [ "$INSTALL_SSR" = "1" ]; then
     pkginstall "xray-core" "Xray 内核"
     pkginstall "v2ray-geoip" "v2ray-geoip"
     pkginstall "v2ray-geosite" "v2ray-geosite"
-    pkginstall "luci-app-ssr-plus" "SSR Plus"
+    install_ssr_release "ipk"
   else
-    info "跳过 SSR Plus: 当前为 APK 包管理器，暂未接入 SSR Plus APK 源"
+    hdr "SSR Plus 安装"
+    install_ssr_release "apk"
   fi
 fi
 
