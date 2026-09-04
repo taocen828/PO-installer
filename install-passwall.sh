@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.8 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.9 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.8"
+VERSION="20260904.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1230,6 +1230,30 @@ download_ssr_release_pkg() {
   done
   return 1
 }
+ensure_lua_neturl_file() {
+  # SSR Plus client.lua uses `require "url"`; lua-neturl installs exactly /usr/lib/lua/url.lua.
+  # On APK 25.12, apk may print OK but not register/extract lua-neturl, so repair the single Lua module directly.
+  local dst="/usr/lib/lua/url.lua" url u
+  [ -s "$dst" ] && return 0
+  mkdir -p /usr/lib/lua 2>/dev/null || true
+  url="https://raw.githubusercontent.com/golgote/neturl/master/lib/net/url.lua"
+  for u in "$url" \
+           "https://ghfast.top/$url" \
+           "https://ghproxy.net/$url" \
+           "https://ghproxy.cc/$url"; do
+    curl -fsL --max-time 20 -o "$dst.tmp" "$u" 2>/dev/null || { rm -f "$dst.tmp"; continue; }
+    if grep -q 'return M' "$dst.tmp" 2>/dev/null && grep -q 'function M.parse' "$dst.tmp" 2>/dev/null; then
+      mv "$dst.tmp" "$dst"
+      chmod 644 "$dst" 2>/dev/null || true
+      ok "lua-neturl 模块已修复 (/usr/lib/lua/url.lua)"
+      return 0
+    fi
+    rm -f "$dst.tmp"
+  done
+  err "lua-neturl 模块修复失败：无法下载 url.lua"
+  return 1
+}
+
 ssr_dep_bin() {
   case "$1" in
     nping) echo "nping" ;;
@@ -1285,6 +1309,8 @@ install_ssr_dependencies() {
   ssr_depinstall "jq" "jq" 1
   ssr_depinstall "ip-full" "ip-full" 1
   ssr_depinstall "lua" "Lua" 1
+  ssr_depinstall "lua-neturl" "lua-neturl" 1
+  ensure_lua_neturl_file
   ssr_depinstall "libuci-lua" "libuci-lua" 1
   ssr_depinstall "luci-compat" "LuCI Compat" 1
   ssr_depinstall "resolveip" "ResolveIP" 1
@@ -1296,7 +1322,6 @@ install_ssr_dependencies() {
   ssr_depinstall "xray-core" "Xray 内核" 1
   # 以下为 SSR Plus 的协议/加速/规则更新可选组件；源中没有就跳过，不影响主程序页面安装。
   ssr_depinstall "dns2tcp" "DNS2TCP" 0
-  ssr_depinstall "lua-neturl" "lua-neturl" 0
   ssr_depinstall "tcping" "TCPing" 0
   ssr_depinstall "nping" "Nping" 0
   ssr_depinstall "lyaml" "lyaml" 0
@@ -1346,7 +1371,8 @@ install_ssr_manual_from_ipk() {
   [ -x /etc/uci-defaults/luci-ssr-plus ] && /etc/uci-defaults/luci-ssr-plus >> "$log" 2>&1 || true
   /etc/init.d/rpcd reload >/dev/null 2>&1 || true
   rm -rf /tmp/luci-indexcache.* /tmp/luci-modulecache/ 2>/dev/null || true
-  if [ "$rc" = "0" ] && ssr_files_installed; then
+  ensure_lua_neturl_file
+  if [ "$rc" = "0" ] && ssr_files_installed && [ -s /usr/lib/lua/url.lua ]; then
     ok "SSR Plus 文件已安装 ✓ (fw876/helloworld IPK 解包兜底，版本 $SSR_RELEASE_VER)"
     rm -rf "$work" "$ipk" "$log"
     return 0
@@ -1399,8 +1425,11 @@ install_ssr_release() {
     return 0
   fi
   if ssr_files_installed; then
-    ok "SSR Plus 文件已存在 ✓ (包管理器未返回版本，版本 $SSR_RELEASE_VER)"
-    return 0
+    ensure_lua_neturl_file
+    if [ -s /usr/lib/lua/url.lua ]; then
+      ok "SSR Plus 文件已存在 ✓ (包管理器未返回版本，版本 $SSR_RELEASE_VER)"
+      return 0
+    fi
   fi
   if install_ssr_manual_from_ipk; then
     return 0
