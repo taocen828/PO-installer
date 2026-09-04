@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.4 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.5 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.4"
+VERSION="20260904.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1263,7 +1263,11 @@ install_ssr_dependencies() {
 }
 
 install_ssr_release() {
-  local ext="$1" pkgfile="/tmp/luci-app-ssr-plus.$ext" oldver newver rc log="/tmp/ssr_release_install.log"
+  # ash/dash 在同一个 local 命令里不会让后续赋值看到前面的 ext，必须拆开；否则 pkgfile 会变成 /tmp/luci-app-ssr-plus.
+  local ext pkgfile oldver newver rc log
+  ext="$1"
+  pkgfile="/tmp/luci-app-ssr-plus.$ext"
+  log="/tmp/ssr_release_install.log"
   oldver=$(get_version "luci-app-ssr-plus")
   info "获取 SSR Plus 官方 Release (fw876/helloworld)..."
   if ! download_ssr_release_pkg "$ext" "$pkgfile"; then
