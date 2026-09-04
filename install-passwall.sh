@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.9 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.10 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.9"
+VERSION="20260904.10"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -512,6 +512,21 @@ case "$MAIN_CHOICE" in
   3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; ok "选择: OpenClash" ;;
   4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; ok "选择: SSR Plus" ;;
   5) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; ok "选择: 全部安装" ;;
+esac
+
+echo ""
+echo "安装模式："
+echo "  1) 直接安装/升级（默认）"
+echo "  2) 先卸载已选插件主程序，再重新安装（保留配置）"
+echo ""
+printf "请选择安装模式 (1/2，回车默认1): "
+if ! read -r INSTALL_MODE; then
+  echo ""
+  INSTALL_MODE="1"
+fi
+case "$INSTALL_MODE" in
+  2) FORCE_REINSTALL=1; ok "模式: 卸载后重装（保留配置）" ;;
+  *) FORCE_REINSTALL=0; ok "模式: 直接安装/升级" ;;
 esac
 
 #==============================================
@@ -1085,6 +1100,68 @@ pkg_update() {
   apk_install "$pkg"
 }
 
+clean_luci_cache() {
+  rm -rf /tmp/luci-indexcache.* /tmp/luci-modulecache/ 2>/dev/null || true
+  /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+}
+remove_pkg_keep_config() {
+  local pkg="$1" desc="$2" log="/tmp/po_remove.log" rc=0
+  if ! check_installed "$pkg"; then
+    info "$desc 未登记安装，跳过包管理器卸载"
+    return 0
+  fi
+  info "卸载 $desc（保留配置）..."
+  if [ "$PKG_MGR" = "opkg" ]; then
+    opkg remove "$pkg" > "$log" 2>&1
+    rc=$?
+    grep -v -e "^Removing package" -e "^Configuring" -e "^Collected errors:$" -e "opkg\.lock" "$log" || true
+  else
+    apk del "$pkg" > "$log" 2>&1
+    rc=$?
+    grep -v "^WARNING.*opening" "$log" || true
+  fi
+  rm -f "$log"
+  if [ "$rc" = "0" ] || ! check_installed "$pkg"; then
+    ok "$desc 已卸载"
+    return 0
+  fi
+  err "$desc 卸载失败: 包管理器返回 $rc，继续尝试安装覆盖"
+  return 1
+}
+remove_ssr_manual_files_keep_config() {
+  # 只清 SSR Plus 程序文件，保留 /etc/config/shadowsocksr 用户配置。
+  rm -f /usr/lib/lua/luci/controller/shadowsocksr.lua \
+        /usr/bin/ssr-monitor /usr/bin/ssr-rules /usr/bin/ssr-switch \
+        /etc/init.d/shadowsocksr /etc/hotplug.d/iface/99-ssrplus-pppoe \
+        /usr/share/rpcd/acl.d/luci-app-ssr-plus.json \
+        /usr/share/ucitrack/luci-app-ssr-plus.json \
+        /lib/upgrade/keep.d/luci-app-ssr-plus 2>/dev/null || true
+  rm -rf /usr/lib/lua/luci/model/cbi/shadowsocksr \
+         /usr/lib/lua/luci/view/shadowsocksr \
+         /usr/share/shadowsocksr 2>/dev/null || true
+}
+force_reinstall_selected() {
+  [ "$FORCE_REINSTALL" = "1" ] || return 0
+  hdr "卸载旧版主程序"
+  if [ "$INSTALL_PW" = "1" ]; then
+    remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
+    remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
+  fi
+  if [ "$INSTALL_PW2" = "1" ]; then
+    remove_pkg_keep_config "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
+    remove_pkg_keep_config "luci-app-passwall2" "PassWall2" || true
+  fi
+  if [ "$INSTALL_OC" = "1" ]; then
+    remove_pkg_keep_config "luci-app-openclash" "OpenClash" || true
+  fi
+  if [ "$INSTALL_SSR" = "1" ]; then
+    remove_pkg_keep_config "luci-app-ssr-plus" "SSR Plus" || true
+    remove_ssr_manual_files_keep_config
+    ok "SSR Plus 程序文件已清理（保留配置）"
+  fi
+  clean_luci_cache
+}
+
 # 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
@@ -1157,6 +1234,8 @@ pkgupgrade() {
     check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
   fi
 }
+
+force_reinstall_selected
 
 # PassWall
 [ "$INSTALL_PW" = "1" ] && pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" && pkginstall "xray-core" "Xray 内核"
