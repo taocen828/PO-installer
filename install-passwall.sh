@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.11 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.12 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.11"
+VERSION="20260904.12"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1108,14 +1108,11 @@ clean_apk_broken_world() {
   [ "$PKG_MGR" = "apk" ] || return 0
   [ -f /etc/apk/world ] || return 0
   cp /etc/apk/world /tmp/apk.world.po-bak 2>/dev/null || true
-  grep -v -e '^dns2tcp' \
-          -e '^lua-neturl' \
-          -e '^luci-app-ssr-plus' \
-          -e '^mosdns' \
-          -e '^naiveprox4' \
-          -e '^nping' \
-          -e '^sing-box' \
-          /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || true
+  # OpenWrt apk world 可带约束/校验后缀，如 luci-app-ssr-plus><Qxxx；按前缀清理。
+  awk '
+    $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|nping|sing-box)([<>=~].*)?$/ {next}
+    {print}
+  ' /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || cp /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null
   cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
   rm -f /tmp/apk.world.po-clean 2>/dev/null || true
 }
@@ -1134,12 +1131,12 @@ remove_pkg_keep_config() {
   else
     # APK 的 world 里如果残留不存在的约束，apk del 任何包都会先解依赖失败；先清理已知 PO/SSR 残留再删。
     clean_apk_broken_world
-    apk del "$pkg" > "$log" 2>&1
+    apk del --force-broken-world "$pkg" > "$log" 2>&1
     rc=$?
     if [ "$rc" != "0" ] && grep -q "unable to select packages\|no such package\|required by: world" "$log" 2>/dev/null; then
-      info "APK world 存在残留约束，清理后重试..."
+      info "APK world/依赖存在残留约束，清理后强制重试..."
       clean_apk_broken_world
-      apk del "$pkg" > "$log" 2>&1
+      apk del --force-broken-world "$pkg" > "$log" 2>&1
       rc=$?
     fi
     grep -v "^WARNING.*opening" "$log" || true
@@ -1167,6 +1164,7 @@ remove_ssr_manual_files_keep_config() {
 force_reinstall_selected() {
   [ "$FORCE_REINSTALL" = "1" ] || return 0
   hdr "卸载旧版主程序"
+  clean_apk_broken_world
   if [ "$INSTALL_PW" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
     remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
