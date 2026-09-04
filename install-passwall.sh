@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.7 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.8 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.7"
+VERSION="20260904.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -641,8 +641,8 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
       echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
     fi
-    # 2) SF 源（可用时保留作缺包/最新版兜底，尤其 passwall2）
-    if [ "$SF_OK" = "1" ]; then
+    # 2) SF 源（仅 PassWall/PassWall2 需要；SSR Plus 走 fw876/helloworld Release，OpenClash 走 GitHub）
+    if [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       # SourceForge key 也按当前最快节点下载；固定 master 在部分网络下会失败，导致 opkg update 签名失败。
       curl -fsL --max-time 20 -o /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
         wget -q --no-check-certificate -O /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
@@ -696,8 +696,10 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       ok "源配置完成 (速度优先: immortalwrt 国内源 + SourceForge 兜底)"
     elif [ "$IW_OK" = "1" ]; then
       ok "源配置完成 (immortalwrt $IW_VER)"
-    elif [ "$SF_OK" = "1" ]; then
+    elif [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       ok "源配置完成 (SourceForge)"
+    elif [ "$INSTALL_PW$INSTALL_PW2$INSTALL_OC" = "000" ] && [ "$INSTALL_SSR" = "1" ]; then
+      ok "源配置完成 (SSR Plus 使用 fw876/helloworld Release；OPKG 依赖走系统/openwrt.ai 源)"
     elif [ "$SSR_OK" = "1" ]; then
       ok "源配置完成 (SSR Plus openwrt.ai/kiddin9)"
     else
@@ -705,16 +707,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     fi
     rm -f /tmp/po_opkg_update.log 2>/dev/null || true
   else
-    # APK 系统: 仅 SF (immortalwrt 是 opkg 体系)
-    if [ "$SF_OK" = "1" ]; then
+    # APK 系统: PassWall/PassWall2 才需要 SF；SSR Plus 走 fw876/helloworld Release，不写 SF 源，避免多余 apk update/404 探测。
+    if [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_OC" = "0" ] && [ "$INSTALL_SSR" = "1" ]; then
+      ok "源配置完成 (SSR Plus 使用 fw876/helloworld GitHub Release 直装)"
+    elif [ "$SF_OK" = "1" ]; then
       sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' "$APK_REPO_FILE" 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
       done
       apk update >/dev/null 2>&1 || true
       ok "源配置完成 (SourceForge)"
-    elif [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_SSR" = "1" ]; then
-      ok "源配置完成 (SSR Plus 使用 fw876/helloworld GitHub Release 直装)"
     else
       err "PassWall 源不可用：SourceForge 无法连接"
     fi
@@ -1247,16 +1249,23 @@ ssr_dep_present() {
   return 1
 }
 ssr_depinstall() {
-  local pkg="$1" desc="$2" required="$3" rc=0 bin=""
+  local pkg="$1" desc="$2" required="$3" rc=0 ver=""
   if ssr_dep_present "$pkg"; then
-    ok "$desc ($(get_version "$pkg")) ✓"
+    ver=$(get_version "$pkg")
+    [ -n "$ver" ] && ok "$desc ($ver) ✓" || ok "$desc 已存在 ✓"
+    return 0
+  fi
+  # 可选依赖只在源里明确存在时才尝试，避免 APK 25.12 的空 OK/404 噪音。
+  if [ "$required" != "1" ] && [ -z "$(get_repo_version "$pkg")" ]; then
+    info "$desc: 可选组件源中未找到，跳过"
     return 0
   fi
   info "安装 $desc..."
   apk_install "$pkg"
   rc=$?
   if ssr_dep_present "$pkg"; then
-    ok "$desc ($(get_version "$pkg")) ✓"
+    ver=$(get_version "$pkg")
+    [ -n "$ver" ] && ok "$desc ($ver) ✓" || ok "$desc 已存在 ✓"
     return 0
   fi
   # OpenWrt APK 25.12 对本地/部分仓库包可能返回 OK 但不登记；SSR Plus 已有主程序兜底，依赖不在这里刷红。
@@ -1272,23 +1281,25 @@ ssr_depinstall() {
 install_ssr_dependencies() {
   ssr_depinstall "coreutils" "Coreutils" 1
   ssr_depinstall "coreutils-base64" "Coreutils Base64" 1
-  ssr_depinstall "dns2tcp" "DNS2TCP" 0
   ssr_depinstall "dnsmasq-full" "dnsmasq-full" 1
   ssr_depinstall "jq" "jq" 1
   ssr_depinstall "ip-full" "ip-full" 1
   ssr_depinstall "lua" "Lua" 1
-  ssr_depinstall "lua-neturl" "lua-neturl" 1
   ssr_depinstall "libuci-lua" "libuci-lua" 1
   ssr_depinstall "luci-compat" "LuCI Compat" 1
-  ssr_depinstall "tcping" "TCPing" 0
   ssr_depinstall "resolveip" "ResolveIP" 1
-  ssr_depinstall "nping" "Nping" 0
   ssr_depinstall "unzip" "Unzip" 1
   ssr_depinstall "xz" "XZ" 1
   ssr_depinstall "xz-utils" "XZ Utils" 1
-  ssr_depinstall "lyaml" "lyaml" 1
   ssr_depinstall "microsocks" "Microsocks" 1
   ssr_depinstall "ipt2socks" "IPT2SOCKS" 1
+  ssr_depinstall "xray-core" "Xray 内核" 1
+  # 以下为 SSR Plus 的协议/加速/规则更新可选组件；源中没有就跳过，不影响主程序页面安装。
+  ssr_depinstall "dns2tcp" "DNS2TCP" 0
+  ssr_depinstall "lua-neturl" "lua-neturl" 0
+  ssr_depinstall "tcping" "TCPing" 0
+  ssr_depinstall "nping" "Nping" 0
+  ssr_depinstall "lyaml" "lyaml" 0
   ssr_depinstall "dns2socks" "DNS2SOCKS" 0
   ssr_depinstall "mosdns" "MosDNS" 0
   ssr_depinstall "shadowsocksr-libev-ssr-check" "SSR Check" 0
@@ -1298,7 +1309,6 @@ install_ssr_dependencies() {
   ssr_depinstall "shadowsocks-rust-sslocal" "Shadowsocks Rust Local" 0
   ssr_depinstall "shadowsocks-rust-ssserver" "Shadowsocks Rust Server" 0
   ssr_depinstall "simple-obfs-client" "Simple-Obfs Client" 0
-  ssr_depinstall "xray-core" "Xray 内核" 1
   ssr_depinstall "v2ray-geoip" "v2ray-geoip" 0
   ssr_depinstall "v2ray-geosite" "v2ray-geosite" 0
 }
