@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.5 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.6 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.5"
+VERSION="20260904.6"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1262,6 +1262,50 @@ install_ssr_dependencies() {
   pkginstall "v2ray-geosite" "v2ray-geosite"
 }
 
+ssr_files_installed() {
+  [ -s /usr/lib/lua/luci/controller/shadowsocksr.lua ] && [ -x /etc/init.d/shadowsocksr ] && return 0
+  [ -s /usr/share/rpcd/acl.d/luci-app-ssr-plus.json ] && [ -s /etc/config/shadowsocksr ] && return 0
+  return 1
+}
+
+install_ssr_manual_from_ipk() {
+  local ipk="/tmp/luci-app-ssr-plus.manual.ipk" work="/tmp/ssrplus-ipk" log="/tmp/ssr_manual_install.log" rc=0
+  info "包管理器未登记 SSR Plus，回退解包安装官方 IPK..."
+  rm -rf "$work" "$ipk" "$log"
+  mkdir -p "$work" || return 1
+  if ! download_ssr_release_pkg "ipk" "$ipk"; then
+    err "SSR Plus IPK 兜底下载失败"
+    rm -rf "$work" "$ipk"
+    return 1
+  fi
+  if ! tar -xzf "$ipk" -C "$work" > "$log" 2>&1; then
+    err "SSR Plus IPK 解包失败"
+    grep -E "ERROR|failed|invalid|not found|No such" "$log" || true
+    rm -rf "$work" "$ipk" "$log"
+    return 1
+  fi
+  if [ ! -s "$work/data.tar.gz" ]; then
+    err "SSR Plus IPK 缺少 data.tar.gz，无法兜底安装"
+    rm -rf "$work" "$ipk" "$log"
+    return 1
+  fi
+  tar -xzf "$work/data.tar.gz" -C / >> "$log" 2>&1
+  rc=$?
+  chmod +x /etc/init.d/shadowsocksr /usr/bin/ssr-* 2>/dev/null || true
+  [ -x /etc/uci-defaults/luci-ssr-plus ] && /etc/uci-defaults/luci-ssr-plus >> "$log" 2>&1 || true
+  /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+  rm -rf /tmp/luci-indexcache.* /tmp/luci-modulecache/ 2>/dev/null || true
+  if [ "$rc" = "0" ] && ssr_files_installed; then
+    ok "SSR Plus 文件已安装 ✓ (fw876/helloworld IPK 解包兜底，版本 $SSR_RELEASE_VER)"
+    rm -rf "$work" "$ipk" "$log"
+    return 0
+  fi
+  err "SSR Plus 解包兜底失败"
+  grep -E "ERROR|failed|invalid|not found|No such|Permission" "$log" || true
+  rm -rf "$work" "$ipk" "$log"
+  return 1
+}
+
 install_ssr_release() {
   # ash/dash 在同一个 local 命令里不会让后续赋值看到前面的 ext，必须拆开；否则 pkgfile 会变成 /tmp/luci-app-ssr-plus.
   local ext pkgfile oldver newver rc log
@@ -1303,6 +1347,13 @@ install_ssr_release() {
     ok "SSR Plus: $oldver → $newver ✓ (Release 版本 $SSR_RELEASE_VER)"
     return 0
   fi
+  if ssr_files_installed; then
+    ok "SSR Plus 文件已存在 ✓ (包管理器未返回版本，版本 $SSR_RELEASE_VER)"
+    return 0
+  fi
+  if install_ssr_manual_from_ipk; then
+    return 0
+  fi
   if [ "$rc" = "2" ]; then
     err "SSR Plus 安装失败: 缺少依赖；OPKG 系统请确认 OpenWrt/openwrt.ai 依赖源可用"
   else
@@ -1311,10 +1362,14 @@ install_ssr_release() {
       info "诊断: apk 已安装记录"
       apk list --installed '*ssr*' 2>/dev/null | grep -v WARNING || true
       grep -n '^P:luci-app-ssr-plus$\|^V:' /lib/apk/db/installed /usr/lib/apk/db/installed 2>/dev/null | head -20 || true
+      info "诊断: SSR Plus 文件"
+      ls -l /usr/lib/lua/luci/controller/shadowsocksr.lua /etc/init.d/shadowsocksr /usr/share/rpcd/acl.d/luci-app-ssr-plus.json 2>/dev/null || true
     else
       info "诊断: opkg 已安装记录"
       opkg list-installed 2>/dev/null | grep 'ssr-plus\|shadowsocksr' || true
       grep -n '^Package: luci-app-ssr-plus$\|^Version:' /usr/lib/opkg/status /var/lib/opkg/status 2>/dev/null | head -20 || true
+      info "诊断: SSR Plus 文件"
+      ls -l /usr/lib/lua/luci/controller/shadowsocksr.lua /etc/init.d/shadowsocksr /usr/share/rpcd/acl.d/luci-app-ssr-plus.json 2>/dev/null || true
     fi
   fi
   return 1
