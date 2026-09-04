@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.6 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.7 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.6"
+VERSION="20260904.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1228,38 +1228,79 @@ download_ssr_release_pkg() {
   done
   return 1
 }
+ssr_dep_bin() {
+  case "$1" in
+    nping) echo "nping" ;;
+    mosdns) echo "mosdns" ;;
+    microsocks) echo "microsocks" ;;
+    ipt2socks) echo "ipt2socks" ;;
+    dns2socks) echo "dns2socks" ;;
+    xray-core) echo "xray" ;;
+    *) echo "" ;;
+  esac
+}
+ssr_dep_present() {
+  local pkg="$1" bin
+  check_installed "$pkg" && return 0
+  bin=$(ssr_dep_bin "$pkg")
+  [ -n "$bin" ] && command -v "$bin" >/dev/null 2>&1 && return 0
+  return 1
+}
+ssr_depinstall() {
+  local pkg="$1" desc="$2" required="$3" rc=0 bin=""
+  if ssr_dep_present "$pkg"; then
+    ok "$desc ($(get_version "$pkg")) ✓"
+    return 0
+  fi
+  info "安装 $desc..."
+  apk_install "$pkg"
+  rc=$?
+  if ssr_dep_present "$pkg"; then
+    ok "$desc ($(get_version "$pkg")) ✓"
+    return 0
+  fi
+  # OpenWrt APK 25.12 对本地/部分仓库包可能返回 OK 但不登记；SSR Plus 已有主程序兜底，依赖不在这里刷红。
+  if [ "$rc" = "0" ]; then
+    info "$desc: 包管理器返回 OK 但未登记，继续安装 SSR Plus"
+  elif [ "$required" = "1" ]; then
+    info "$desc: 未确认安装，继续；若 SSR Plus 页面异常再补装此依赖"
+  else
+    info "$desc: 可选组件未安装，继续"
+  fi
+  return 0
+}
 install_ssr_dependencies() {
-  pkginstall "coreutils" "Coreutils"
-  pkginstall "coreutils-base64" "Coreutils Base64"
-  pkginstall "dns2tcp" "DNS2TCP"
-  pkginstall "dnsmasq-full" "dnsmasq-full"
-  pkginstall "jq" "jq"
-  pkginstall "ip-full" "ip-full"
-  pkginstall "lua" "Lua"
-  pkginstall "lua-neturl" "lua-neturl"
-  pkginstall "libuci-lua" "libuci-lua"
-  pkginstall "luci-compat" "LuCI Compat"
-  pkginstall "tcping" "TCPing"
-  pkginstall "resolveip" "ResolveIP"
-  pkginstall "nping" "Nping"
-  pkginstall "unzip" "Unzip"
-  pkginstall "xz" "XZ"
-  pkginstall "xz-utils" "XZ Utils"
-  pkginstall "lyaml" "lyaml"
-  pkginstall "microsocks" "Microsocks"
-  pkginstall "ipt2socks" "IPT2SOCKS"
-  pkginstall "dns2socks" "DNS2SOCKS"
-  pkginstall "mosdns" "MosDNS"
-  pkginstall "shadowsocksr-libev-ssr-check" "SSR Check"
-  pkginstall "shadowsocksr-libev-ssr-local" "SSR Local"
-  pkginstall "shadowsocksr-libev-ssr-redir" "SSR Redir"
-  pkginstall "shadowsocksr-libev-ssr-server" "SSR Server"
-  pkginstall "shadowsocks-rust-sslocal" "Shadowsocks Rust Local"
-  pkginstall "shadowsocks-rust-ssserver" "Shadowsocks Rust Server"
-  pkginstall "simple-obfs-client" "Simple-Obfs Client"
-  pkginstall "xray-core" "Xray 内核"
-  pkginstall "v2ray-geoip" "v2ray-geoip"
-  pkginstall "v2ray-geosite" "v2ray-geosite"
+  ssr_depinstall "coreutils" "Coreutils" 1
+  ssr_depinstall "coreutils-base64" "Coreutils Base64" 1
+  ssr_depinstall "dns2tcp" "DNS2TCP" 0
+  ssr_depinstall "dnsmasq-full" "dnsmasq-full" 1
+  ssr_depinstall "jq" "jq" 1
+  ssr_depinstall "ip-full" "ip-full" 1
+  ssr_depinstall "lua" "Lua" 1
+  ssr_depinstall "lua-neturl" "lua-neturl" 1
+  ssr_depinstall "libuci-lua" "libuci-lua" 1
+  ssr_depinstall "luci-compat" "LuCI Compat" 1
+  ssr_depinstall "tcping" "TCPing" 0
+  ssr_depinstall "resolveip" "ResolveIP" 1
+  ssr_depinstall "nping" "Nping" 0
+  ssr_depinstall "unzip" "Unzip" 1
+  ssr_depinstall "xz" "XZ" 1
+  ssr_depinstall "xz-utils" "XZ Utils" 1
+  ssr_depinstall "lyaml" "lyaml" 1
+  ssr_depinstall "microsocks" "Microsocks" 1
+  ssr_depinstall "ipt2socks" "IPT2SOCKS" 1
+  ssr_depinstall "dns2socks" "DNS2SOCKS" 0
+  ssr_depinstall "mosdns" "MosDNS" 0
+  ssr_depinstall "shadowsocksr-libev-ssr-check" "SSR Check" 0
+  ssr_depinstall "shadowsocksr-libev-ssr-local" "SSR Local" 0
+  ssr_depinstall "shadowsocksr-libev-ssr-redir" "SSR Redir" 0
+  ssr_depinstall "shadowsocksr-libev-ssr-server" "SSR Server" 0
+  ssr_depinstall "shadowsocks-rust-sslocal" "Shadowsocks Rust Local" 0
+  ssr_depinstall "shadowsocks-rust-ssserver" "Shadowsocks Rust Server" 0
+  ssr_depinstall "simple-obfs-client" "Simple-Obfs Client" 0
+  ssr_depinstall "xray-core" "Xray 内核" 1
+  ssr_depinstall "v2ray-geoip" "v2ray-geoip" 0
+  ssr_depinstall "v2ray-geosite" "v2ray-geosite" 0
 }
 
 ssr_files_installed() {
