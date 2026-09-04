@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260903.9 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.1 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260903.9"
+VERSION="20260904.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -828,7 +828,7 @@ get_repo_version() {
   else
     # APK: apk list 可能先输出已装旧版，再输出 [upgradable] 新版；不能 head -1
     # 例: luci-app-passwall-26.7.24-r1 [installed] / luci-app-passwall-26.8.26-r1 [upgradable]
-    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort | tail -1
+    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort -V | tail -1
   fi
 }
 
@@ -861,6 +861,28 @@ find_apk_url() {
     url="$SF_BASE/$feed/$pkg-$ver.apk$SF_MIRROR_QUERY"
     [ "$(check_url "$url")" = "200" ] && { echo "$url"; return; }
   done
+}
+
+apk_installed_exact() {
+  local pkg="$1" ver="$2"
+  [ -n "$pkg" ] && [ -n "$ver" ] || return 1
+  apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$ver"
+}
+
+# 预下载的 .apk 可能因 SourceForge 跳转/镜像不同步变成 HTML/错误页。
+# apk add 返回码不能直接代表目标包已升级；必须安装后读回精确版本，失败再走仓库精确版本兜底。
+apk_add_repo_exact() {
+  local pkg="$1" want_ver="$2" log="$3" rc=0
+  if [ -n "$want_ver" ]; then
+    apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
+    rc=$?
+    apk_installed_exact "$pkg" "$want_ver" && return 0
+    apk upgrade --available --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
+    rc=$?
+    apk_installed_exact "$pkg" "$want_ver" && return 0
+    return $rc
+  fi
+  apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
 }
 
 # 包安装/升级
@@ -956,25 +978,30 @@ apk_install() {
     return $rc
   fi
   local log=/tmp/apk_add.log url prog repo_ver
-  # --force-reinstall: 修复假安装(数据库有元数据但文件缺失)时 apk add 跳过解压的问题
-  # 之前的 SourceForge 重定向失败可能留下只注册元数据无文件的"假安装", apk add 认为已装直接 OK
-  # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本
+  : > "$log"
+  # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本。
+  # 先尝试 SourceForge 直链带进度；若本地包无效/未达到目标版本，必须回退仓库精确版本。
   repo_ver=$(get_repo_version "$pkg")
   url=$(find_apk_url "$pkg" "$repo_ver")
   if [ -n "$url" ]; then
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
     info "下载 $pkg (带进度)..."
     if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
-      apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" > "$log" 2>&1
+      apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
+      if [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver"; then
+        info "$pkg 直链包未达到源版本，回退 apk 仓库安装..."
+        apk_add_repo_exact "$pkg" "$repo_ver" "$log"
+        rc=$?
+      fi
     else
-      err "下载 $pkg 失败，回退 apk 直接安装..."
-      apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+      err "下载 $pkg 失败，回退 apk 仓库安装..."
+      apk_add_repo_exact "$pkg" "$repo_ver" "$log"
       rc=$?
     fi
   else
-    apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$pkg" > "$log" 2>&1
+    apk_add_repo_exact "$pkg" "$repo_ver" "$log"
     rc=$?
   fi
   grep -v "^WARNING.*opening" "$log" || true
@@ -989,26 +1016,26 @@ pkg_update() {
   if [ "$PKG_MGR" = "apk" ]; then
     local log=/tmp/apk_upgrade.log rc=0 url prog
     if [ -n "$want_ver" ]; then
-      # 先指定精确版本升级。若 apk 只改 world 约束但没替换，再用 --available 重选。
+      # 先尝试直链包以显示进度；安装后若未读回精确版本，再回退 apk 仓库精确版本。
+      : > "$log"
       url=$(find_apk_url "$pkg" "$want_ver")
       if [ -n "$url" ]; then
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
-          apk add --upgrade --latest --allow-untrusted --force-broken-world "/tmp/pkg_$pkg.apk" > "$log" 2>&1
+          apk add --upgrade --latest --allow-untrusted --force-broken-world "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
           rc=$?
           rm -f "/tmp/pkg_$pkg.apk"
         else
-          err "下载 $pkg 失败，回退 apk 直接升级..."
-          apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
-          rc=$?
+          err "下载 $pkg 失败，回退 apk 仓库升级..."
+          rc=1
         fi
       else
-        apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" > "$log" 2>&1
-        rc=$?
+        rc=1
       fi
-      if ! apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$want_ver"; then
-        apk upgrade --available --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
+      if ! apk_installed_exact "$pkg" "$want_ver"; then
+        info "$pkg 未达到目标版本，回退 apk 仓库升级..."
+        apk_add_repo_exact "$pkg" "$want_ver" "$log"
         rc=$?
       fi
     else
@@ -1016,7 +1043,7 @@ pkg_update() {
       rc=$?
     fi
     # apk upgrade --available 可能为满足 world 约束安装/卸载无关包；如果目标包没实际变更，避免刷出误导性 Purging/Installing 噪音。
-    if [ -n "$want_ver" ] && ! apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$want_ver"; then
+    if [ -n "$want_ver" ] && ! apk_installed_exact "$pkg" "$want_ver"; then
       grep -E "ERROR|WARNING|conflict|breaks|unable|failed|permission|No such|not found" "$log" || true
     else
       grep -v "^WARNING.*opening" "$log" || true
