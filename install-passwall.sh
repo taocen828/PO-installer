@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.2 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260904.4 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.2"
+VERSION="20260904.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -726,24 +726,51 @@ fi
 #==============================================
 hdr "安装主程序"
 
+get_version_from_status() {
+  local pkg="$1" file="$2"
+  [ -f "$file" ] || return 1
+  awk -v p="$pkg" '
+    $1=="Package:" && $2==p {f=1; next}
+    f && $1=="Version:" {print $2; exit}
+    f && $1=="Package:" {f=0}
+  ' "$file" 2>/dev/null
+}
+get_version_from_apk_db() {
+  local pkg="$1" file v
+  for file in /lib/apk/db/installed /usr/lib/apk/db/installed; do
+    [ -f "$file" ] || continue
+    # OpenWrt APK installed db uses compact fields like P:luci-app-xxx / V:1.2.3.
+    # Some apk-tools variants may print P: <pkg>; handle both forms.
+    v=$(awk -v p="$pkg" '
+      /^P:/ {
+        name=substr($0,3); sub(/^ /,"",name);
+        f=(name==p); next
+      }
+      f && /^V:/ {
+        ver=substr($0,3); sub(/^ /,"",ver); print ver; exit
+      }
+    ' "$file" 2>/dev/null)
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  done
+  return 1
+}
 get_version() {
-  local pkg="$1"
+  local pkg="$1" v=""
   if [ "$PKG_MGR" = "opkg" ]; then
-    opkg list-installed 2>/dev/null | grep "^$pkg " | awk '{print $3}'
+    v=$(opkg list-installed 2>/dev/null | grep "^$pkg " | awk '{print $3}' | sort -V | tail -1)
+    [ -n "$v" ] || v=$(get_version_from_status "$pkg" /usr/lib/opkg/status)
+    [ -n "$v" ] || v=$(get_version_from_status "$pkg" /var/lib/opkg/status)
+    echo "$v"
   else
-    # APK: apk info 会按包名前缀列出多个匹配项，head -1 可能读到旧 ABI/残留项。
-    # apk list --installed 才是当前已安装版本；取最高版本避免同名/ABI 过渡残留误判。
-    apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort -V | tail -1
+    # APK: apk list --installed 是主路径；本地 Release 安装后某些 OpenWrt apk 不刷新 list 输出，兜底读 apk db。
+    v=$(apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort -V | tail -1)
+    [ -n "$v" ] || v=$(get_version_from_apk_db "$pkg")
+    echo "$v"
   fi
 }
 check_installed() {
   local pkg="$1"
-  if [ "$PKG_MGR" = "opkg" ]; then
-    opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
-  else
-    # APK: 只能用已安装列表判断。apk info 在 OpenWrt APK 上可能匹配仓库/旧元数据，导致未安装包被当成已安装。
-    apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-" && return 0
-  fi
+  [ -n "$(get_version "$pkg")" ] && return 0
   return 1
 }
 
@@ -1201,6 +1228,40 @@ download_ssr_release_pkg() {
   done
   return 1
 }
+install_ssr_dependencies() {
+  pkginstall "coreutils" "Coreutils"
+  pkginstall "coreutils-base64" "Coreutils Base64"
+  pkginstall "dns2tcp" "DNS2TCP"
+  pkginstall "dnsmasq-full" "dnsmasq-full"
+  pkginstall "jq" "jq"
+  pkginstall "ip-full" "ip-full"
+  pkginstall "lua" "Lua"
+  pkginstall "lua-neturl" "lua-neturl"
+  pkginstall "libuci-lua" "libuci-lua"
+  pkginstall "luci-compat" "LuCI Compat"
+  pkginstall "tcping" "TCPing"
+  pkginstall "resolveip" "ResolveIP"
+  pkginstall "nping" "Nping"
+  pkginstall "unzip" "Unzip"
+  pkginstall "xz" "XZ"
+  pkginstall "xz-utils" "XZ Utils"
+  pkginstall "lyaml" "lyaml"
+  pkginstall "microsocks" "Microsocks"
+  pkginstall "ipt2socks" "IPT2SOCKS"
+  pkginstall "dns2socks" "DNS2SOCKS"
+  pkginstall "mosdns" "MosDNS"
+  pkginstall "shadowsocksr-libev-ssr-check" "SSR Check"
+  pkginstall "shadowsocksr-libev-ssr-local" "SSR Local"
+  pkginstall "shadowsocksr-libev-ssr-redir" "SSR Redir"
+  pkginstall "shadowsocksr-libev-ssr-server" "SSR Server"
+  pkginstall "shadowsocks-rust-sslocal" "Shadowsocks Rust Local"
+  pkginstall "shadowsocks-rust-ssserver" "Shadowsocks Rust Server"
+  pkginstall "simple-obfs-client" "Simple-Obfs Client"
+  pkginstall "xray-core" "Xray 内核"
+  pkginstall "v2ray-geoip" "v2ray-geoip"
+  pkginstall "v2ray-geosite" "v2ray-geosite"
+}
+
 install_ssr_release() {
   local ext="$1" pkgfile="/tmp/luci-app-ssr-plus.$ext" oldver newver rc log="/tmp/ssr_release_install.log"
   oldver=$(get_version "luci-app-ssr-plus")
@@ -1212,7 +1273,7 @@ install_ssr_release() {
   info "安装 SSR Plus $SSR_RELEASE_VER ($ext)..."
   : > "$log"
   if [ "$ext" = "apk" ]; then
-    apk add --upgrade --allow-untrusted --force-broken-world "$pkgfile" >> "$log" 2>&1
+    apk add --upgrade --allow-untrusted --force-broken-world --force-overwrite "$pkgfile" >> "$log" 2>&1
     rc=$?
   else
     opkg install "$pkgfile" --force-downgrade --force-overwrite --force-depends >> "$log" 2>&1
@@ -1223,7 +1284,7 @@ install_ssr_release() {
   if [ "$rc" = "0" ]; then
     grep -v -e "^Configuring" -e "^WARNING.*opening" -e "^\.\.\.$" -e "^Collected errors:$" -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
   else
-    grep -E "ERROR|WARNING|conflict|breaks|unable|failed|permission|No such|not found|pkg_hash_check_unresolved|cannot find dependency|incompatible" "$log" || true
+    grep -E "ERROR|WARNING|conflict|breaks|unable|failed|permission|No such|not found|pkg_hash_check_unresolved|cannot find dependency|incompatible|Unknown package|not a valid|Failed" "$log" || true
   fi
   rm -f "$log"
   newver=$(get_version "luci-app-ssr-plus")
@@ -1242,6 +1303,15 @@ install_ssr_release() {
     err "SSR Plus 安装失败: 缺少依赖；OPKG 系统请确认 OpenWrt/openwrt.ai 依赖源可用"
   else
     err "SSR Plus 安装失败: 当前版本 ${newver:-未安装}，Release 版本 ${SSR_RELEASE_VER:-未知}"
+    if [ "$PKG_MGR" = "apk" ]; then
+      info "诊断: apk 已安装记录"
+      apk list --installed '*ssr*' 2>/dev/null | grep -v WARNING || true
+      grep -n '^P:luci-app-ssr-plus$\|^V:' /lib/apk/db/installed /usr/lib/apk/db/installed 2>/dev/null | head -20 || true
+    else
+      info "诊断: opkg 已安装记录"
+      opkg list-installed 2>/dev/null | grep 'ssr-plus\|shadowsocksr' || true
+      grep -n '^Package: luci-app-ssr-plus$\|^Version:' /usr/lib/opkg/status /var/lib/opkg/status 2>/dev/null | head -20 || true
+    fi
   fi
   return 1
 }
@@ -1252,32 +1322,11 @@ if [ "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     hdr "SSR Plus 安装"
     # 先装依赖/协议组件，最后装 LuCI 主程序，避免主程序先因依赖未解开而失败。
-    pkginstall "coreutils-base64" "Coreutils Base64"
-    pkginstall "dns2tcp" "DNS2TCP"
-    pkginstall "dnsmasq-full" "dnsmasq-full"
-    pkginstall "jq" "jq"
-    pkginstall "ip-full" "ip-full"
-    pkginstall "lua-neturl" "lua-neturl"
-    pkginstall "libuci-lua" "libuci-lua"
-    pkginstall "tcping" "TCPing"
-    pkginstall "resolveip" "ResolveIP"
-    pkginstall "nping" "Nping"
-    pkginstall "microsocks" "Microsocks"
-    pkginstall "dns2socks" "DNS2SOCKS"
-    pkginstall "mosdns" "MosDNS"
-    pkginstall "shadowsocksr-libev-ssr-check" "SSR Check"
-    pkginstall "shadowsocksr-libev-ssr-local" "SSR Local"
-    pkginstall "shadowsocksr-libev-ssr-redir" "SSR Redir"
-    pkginstall "shadowsocksr-libev-ssr-server" "SSR Server"
-    pkginstall "shadowsocks-rust-sslocal" "Shadowsocks Rust Local"
-    pkginstall "shadowsocks-rust-ssserver" "Shadowsocks Rust Server"
-    pkginstall "simple-obfs-client" "Simple-Obfs Client"
-    pkginstall "xray-core" "Xray 内核"
-    pkginstall "v2ray-geoip" "v2ray-geoip"
-    pkginstall "v2ray-geosite" "v2ray-geosite"
+    install_ssr_dependencies
     install_ssr_release "ipk"
   else
     hdr "SSR Plus 安装"
+    install_ssr_dependencies
     install_ssr_release "apk"
   fi
 fi
