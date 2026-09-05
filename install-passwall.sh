@@ -1,10 +1,10 @@
 #!/bin/sh
 #==============================================
-# PO-installer - PassWall / PassWall2 / OpenClash 一键安装
+# PO-installer - PassWall / PassWall2 / OpenClash / AdGuardHome 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260904.12 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.1 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260904.12"
+VERSION="20260905.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -50,7 +50,7 @@ fi
 
 echo ""
 echo "============================================"
-echo " PO-installer - PassWall/OpenClash 一键安装 (v$VERSION)"
+echo " PO-installer - PassWall/OpenClash/AdGuardHome 一键安装 (v$VERSION)"
 echo "============================================"
 echo ""
 echo ""
@@ -491,9 +491,10 @@ echo "  1) PassWall (经典版，推荐)"
 echo "  2) PassWall2 (新版，可与 PassWall 共存)"
 echo "  3) OpenClash (Clash 内核)"
 echo "  4) SSR Plus (ShadowSocksR Plus+)"
-echo "  5) 全部安装"
+echo "  5) AdGuardHome (DNS 广告过滤)"
+echo "  6) 全部安装"
 echo ""
-printf "请输入选项 (1/2/3/4/5): "
+printf "请输入选项 (1/2/3/4/5/6): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -502,16 +503,17 @@ while :; do
     break
   fi
   case "$MAIN_CHOICE" in
-    1|2|3|4|5) break ;;
-    *) printf "  无效输入，请重新选择 (1/2/3/4/5): " ;;
+    1|2|3|4|5|6) break ;;
+    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
-  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; ok "选择: PassWall" ;;
-  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; ok "选择: PassWall2" ;;
-  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; ok "选择: OpenClash" ;;
-  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; ok "选择: SSR Plus" ;;
-  5) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; ok "选择: 全部安装" ;;
+  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "选择: PassWall" ;;
+  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "选择: PassWall2" ;;
+  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; ok "选择: OpenClash" ;;
+  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; ok "选择: SSR Plus" ;;
+  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; ok "选择: AdGuardHome" ;;
+  6) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; ok "选择: 全部安装" ;;
 esac
 
 echo ""
@@ -538,6 +540,7 @@ REQUIRED_SPACE_MB=30
 [ "$INSTALL_PW2" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
 [ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
 [ "$INSTALL_SSR" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 60))
+[ "$INSTALL_AGH" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 40))
 OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
@@ -1181,6 +1184,14 @@ force_reinstall_selected() {
     remove_ssr_manual_files_keep_config
     ok "SSR Plus 程序文件已清理（保留配置）"
   fi
+  if [ "$INSTALL_AGH" = "1" ]; then
+    if [ -x /opt/AdGuardHome/AdGuardHome ]; then
+      /opt/AdGuardHome/AdGuardHome -s uninstall >/dev/null 2>&1 || true
+    fi
+    rm -f /usr/bin/AdGuardHome /etc/init.d/AdGuardHome 2>/dev/null || true
+    rm -rf /opt/AdGuardHome 2>/dev/null || true
+    ok "AdGuardHome 程序文件已清理"
+  fi
   clean_luci_cache
 }
 
@@ -1605,6 +1616,154 @@ dl_with_mirror() {
 }
 
 
+# AdGuardHome: 使用 AdGuardTeam/AdGuardHome 官方 Release 二进制安装。
+agh_arch_name() {
+  case "$SYS_ARCH" in
+    x86_64|amd64) echo "amd64" ;;
+    i386*|i686|386) echo "386" ;;
+    aarch64*|arm64) echo "arm64" ;;
+    arm_cortex-a5*|armv5*) echo "armv5" ;;
+    arm_cortex-a7*|arm_cortex-a8*|arm_cortex-a9*|armv7*) echo "armv7" ;;
+    arm*) echo "armv6" ;;
+    mipsel*|mipsle*) echo "mipsle_softfloat" ;;
+    mips64el*|mips64le*) echo "mips64le_softfloat" ;;
+    mips64*) echo "mips64_softfloat" ;;
+    mips*) echo "mips_softfloat" ;;
+    powerpc64le|ppc64le) echo "ppc64le" ;;
+    riscv64*) echo "riscv64" ;;
+    *) echo "" ;;
+  esac
+}
+get_agh_latest_json() {
+  local api="https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest" u
+  for u in "$api" \
+           "https://ghfast.top/$api" \
+           "https://ghproxy.net/$api" \
+           "https://ghproxy.cc/$api" \
+           "https://gh.ddlc.top/$api"; do
+    curl -sL --max-time 12 "$u" 2>/dev/null | grep -q '"tag_name"' || continue
+    curl -sL --max-time 20 "$u" 2>/dev/null
+    return 0
+  done
+  return 1
+}
+get_agh_latest_ver() {
+  get_agh_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
+}
+get_agh_asset_url() {
+  local arch json
+  arch=$(agh_arch_name)
+  [ -n "$arch" ] || return 1
+  json=$(get_agh_latest_json) || return 1
+  AGH_LATEST_VER=$(printf '%s\n' "$json" | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
+  printf '%s\n' "$json" | grep -oE 'https://[^" ]*/AdGuardHome_linux_[^" ]+\.tar\.gz' | grep "AdGuardHome_linux_${arch}\.tar\.gz" | head -1
+}
+get_agh_installed_ver() {
+  local bin="/opt/AdGuardHome/AdGuardHome" v
+  [ -x "$bin" ] || bin=$(command -v AdGuardHome 2>/dev/null)
+  [ -x "$bin" ] || { echo ""; return; }
+  v=$("$bin" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  echo "$v"
+}
+install_agh_service_fallback() {
+  [ -x /etc/init.d/AdGuardHome ] && return 0
+  cat > /etc/init.d/AdGuardHome << 'AGH_INIT_EOF'
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+USE_PROCD=1
+PROG=/opt/AdGuardHome/AdGuardHome
+start_service() {
+  procd_open_instance
+  procd_set_param command "$PROG" -w /opt/AdGuardHome --no-check-update
+  procd_set_param respawn
+  procd_set_param stdout 1
+  procd_set_param stderr 1
+  procd_close_instance
+}
+AGH_INIT_EOF
+  chmod +x /etc/init.d/AdGuardHome 2>/dev/null || true
+  /etc/init.d/AdGuardHome enable >/dev/null 2>&1 || true
+}
+install_adguardhome() {
+  hdr "AdGuardHome 安装"
+  local oldver latest url work tarball newver bin arch
+  bin="/opt/AdGuardHome/AdGuardHome"
+  oldver=$(get_agh_installed_ver)
+  latest=$(get_agh_latest_ver)
+  if [ -n "$oldver" ] && [ -n "$latest" ] && [ "$oldver" = "$latest" ]; then
+    ok "AdGuardHome 已是最新版 ($oldver)"
+    return 0
+  fi
+  arch=$(agh_arch_name)
+  if [ -z "$arch" ]; then
+    err "AdGuardHome 不支持或无法匹配当前架构: $SYS_ARCH"
+    return 1
+  fi
+  url=$(get_agh_asset_url)
+  [ -z "$latest" ] && latest="$AGH_LATEST_VER"
+  if [ -z "$url" ]; then
+    err "无法获取 AdGuardHome 下载地址 (GitHub 不可达或架构 $SYS_ARCH/$arch 无匹配资产)"
+    return 1
+  fi
+  info "下载 AdGuardHome ${latest:-latest} ($arch)..."
+  work="/tmp/AdGuardHome-install"
+  tarball="/tmp/AdGuardHome_linux_${arch}.tar.gz"
+  rm -rf "$work" "$tarball"
+  mkdir -p "$work" || return 1
+  if ! dl_with_mirror "$url" "$tarball"; then
+    rm -rf "$work" "$tarball"
+    err "AdGuardHome 下载失败（GitHub 通道不可达或资产无效）"
+    return 1
+  fi
+  if ! tar -xzf "$tarball" -C "$work" >/tmp/agh_extract.log 2>&1; then
+    err "AdGuardHome 解压失败"
+    grep -E "ERROR|failed|invalid|not found|No such" /tmp/agh_extract.log || true
+    rm -rf "$work" "$tarball" /tmp/agh_extract.log
+    return 1
+  fi
+  if [ ! -x "$work/AdGuardHome/AdGuardHome" ]; then
+    err "AdGuardHome 安装包缺少可执行文件"
+    rm -rf "$work" "$tarball" /tmp/agh_extract.log
+    return 1
+  fi
+  mkdir -p /opt
+  if [ -x "$bin" ]; then
+    "$bin" -s stop >/dev/null 2>&1 || true
+  fi
+  rm -rf /opt/AdGuardHome.new
+  mv "$work/AdGuardHome" /opt/AdGuardHome.new || { err "AdGuardHome 文件写入失败"; rm -rf "$work" "$tarball"; return 1; }
+  if [ -d /opt/AdGuardHome ]; then
+    [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && cp /opt/AdGuardHome/AdGuardHome.yaml /opt/AdGuardHome.new/AdGuardHome.yaml 2>/dev/null || true
+    [ -d /opt/AdGuardHome/data ] && cp -a /opt/AdGuardHome/data /opt/AdGuardHome.new/ 2>/dev/null || true
+    rm -rf /opt/AdGuardHome.old
+    mv /opt/AdGuardHome /opt/AdGuardHome.old 2>/dev/null || rm -rf /opt/AdGuardHome
+  fi
+  mv /opt/AdGuardHome.new /opt/AdGuardHome
+  chmod +x "$bin" 2>/dev/null || true
+  ln -sf "$bin" /usr/bin/AdGuardHome 2>/dev/null || true
+  newver=$(get_agh_installed_ver)
+  if [ -n "$latest" ] && [ -n "$newver" ] && [ "$newver" != "$latest" ]; then
+    err "AdGuardHome 版本校验异常: 已安装 $newver，期望 $latest"
+    rm -rf "$work" "$tarball" /tmp/agh_extract.log
+    return 1
+  fi
+  "$bin" -s install >/tmp/agh_service.log 2>&1 || install_agh_service_fallback
+  /etc/init.d/AdGuardHome enable >/dev/null 2>&1 || true
+  /etc/init.d/AdGuardHome start >/dev/null 2>&1 || "$bin" -s start >/dev/null 2>&1 || true
+  if [ -x "$bin" ]; then
+    [ -n "$oldver" ] && [ "$oldver" != "$newver" ] && ok "AdGuardHome: $oldver → ${newver:-$latest} ✓" || ok "AdGuardHome ${newver:-$latest} ✓"
+    info "默认管理地址: http://路由器IP:3000 （首次初始化；DNS 53 端口如被 dnsmasq/AdGuard 其它服务占用需手动调整）"
+  else
+    err "AdGuardHome 安装失败"
+    rm -rf "$work" "$tarball" /tmp/agh_extract.log /tmp/agh_service.log
+    return 1
+  fi
+  rm -rf "$work" "$tarball" /tmp/agh_extract.log /tmp/agh_service.log /opt/AdGuardHome.old
+  return 0
+}
+
+
 # 获取 Mihomo 最新版本和匹配当前架构的下载地址
 # 不再手拼文件名：MetaCubeX 会为 amd64 提供多种 v1/v2/v3/goXXX 变体，
 # mips/mipsel 也区分 hardfloat/softfloat；手拼容易拿错或拿不到最新版资产。
@@ -1686,6 +1845,10 @@ get_oc_latest() {
   done
   return 1
 }
+if [ "$INSTALL_AGH" = "1" ]; then
+  install_adguardhome
+fi
+
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 安装"
 
