@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.10 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.11 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.10"
+VERSION="20260905.11"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1017,12 +1017,30 @@ apk_add_repo_exact() {
 # 包安装/升级
 # 主包走 curl 带进度下载（百分比），依赖包逐个显示 [N/总数] 包名级进度
 # 过滤已知无害的 opkg 噪音: Configuring 进度、remove_obsolesced_files(旧文件已删)、opkg.lock 警告
+opkg_preflight_installable() {
+  # 先用 --noaction 做依赖预检，避免 --force-depends 把 LuCI 主包半升级后才发现 kmod/nftables 依赖不匹配。
+  # 第三方/厂商固件常见: 普通 packages 源可用，但 targets/kmod 源不匹配，出现 kmod-nft-core / nftables-json incompatible。
+  local target="$1" log="/tmp/opkg_preflight.log"
+  [ "$PKG_MGR" = "opkg" ] || return 0
+  opkg install --noaction "$target" --force-downgrade --force-overwrite > "$log" 2>&1
+  if grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package" "$log" 2>/dev/null; then
+    err "依赖预检失败，跳过安装/升级，避免半升级破坏现有版本"
+    grep -E "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|kmod-|nftables" "$log" 2>/dev/null || true
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+  return 0
+}
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
     # 预解析依赖清单 (模拟安装), 用于显示包名级进度; 排除主包自身(后面单独处理)
     local total=0 cur=0 dep deps
-    deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite --force-depends 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
+    if ! opkg_preflight_installable "$pkg"; then
+      return 2
+    fi
+    deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
     for dep in $deps; do total=$((total + 1)); done
     [ "$total" = "0" ] && total=1
     cur=0
@@ -1054,8 +1072,10 @@ apk_install() {
       if [ -n "$repo_ver" ] && ! echo "$url" | grep -Fq "$repo_ver"; then
         info "索引版本不匹配 (期望 $repo_ver)，使用速度优先源安装..."
         # 保底仍调用 opkg，但前面的源顺序已是国内优先；正常路径不会走到这里。
-        opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-        rc=$?
+        if ! opkg_preflight_installable "$pkg"; then rc=2; else
+          opkg install "$pkg" --force-downgrade --force-overwrite > "$log" 2>&1
+          rc=$?
+        fi
         grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
         grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
         rm -f "$log"
@@ -1063,16 +1083,20 @@ apk_install() {
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
-          opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-          rc=$?
+          if ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then rc=2; else
+            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
+            rc=$?
+          fi
           # 新版依赖缺失 (pkg_hash_check_unresolved) → 返回2, 上层保留旧版
           grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
           grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
         else
           err "下载 $pkg 失败，回退 opkg 直接安装..."
-          opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-          rc=$?
+          if ! opkg_preflight_installable "$pkg"; then rc=2; else
+            opkg install "$pkg" --force-downgrade --force-overwrite > "$log" 2>&1
+            rc=$?
+          fi
           grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
           grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           rm -f "$log"
@@ -1086,19 +1110,25 @@ apk_install() {
         local dl_ipk
         dl_ipk=$(ls -t /tmp/*.ipk 2>/dev/null | head -1)
         if [ -n "$dl_ipk" ] && { [ -z "$repo_ver" ] || echo "$dl_ipk" | grep -Fq "$repo_ver"; }; then
-          opkg install "$dl_ipk" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-          rc=$?
+          if ! opkg_preflight_installable "$dl_ipk"; then rc=2; else
+            opkg install "$dl_ipk" --force-downgrade --force-overwrite > "$log" 2>&1
+            rc=$?
+          fi
           rm -f "$dl_ipk"
         else
           [ -n "$dl_ipk" ] && rm -f "$dl_ipk"
           info "下载版本不匹配 (期望 $repo_ver)，直接 opkg install..."
-          opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-          rc=$?
+          if ! opkg_preflight_installable "$pkg"; then rc=2; else
+            opkg install "$pkg" --force-downgrade --force-overwrite > "$log" 2>&1
+            rc=$?
+          fi
         fi
       else
         # opkg download 失败, 直接 opkg install
-        opkg install "$pkg" --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
-        rc=$?
+        if ! opkg_preflight_installable "$pkg"; then rc=2; else
+          opkg install "$pkg" --force-downgrade --force-overwrite > "$log" 2>&1
+          rc=$?
+        fi
       fi
       grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
       grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
