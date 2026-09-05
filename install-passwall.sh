@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.4 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.5 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.4"
+VERSION="20260905.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -492,10 +492,11 @@ echo "  2) PassWall2 (新版，可与 PassWall 共存)"
 echo "  3) OpenClash (Clash 内核)"
 echo "  4) SSR Plus (ShadowSocksR Plus+)"
 echo "  5) AdGuardHome (DNS 广告过滤)"
-echo "  6) 全部安装"
-echo "  7) 卸载插件"
+echo "  6) iStore 商店"
+echo "  7) 全部安装"
+echo "  8) 卸载插件"
 echo ""
-printf "请输入选项 (1/2/3/4/5/6/7): "
+printf "请输入选项 (1/2/3/4/5/6/7/8): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -504,18 +505,19 @@ while :; do
     break
   fi
   case "$MAIN_CHOICE" in
-    1|2|3|4|5|6|7) break ;;
-    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7): " ;;
+    1|2|3|4|5|6|7|8) break ;;
+    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
-  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "选择: PassWall" ;;
-  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "选择: PassWall2" ;;
-  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; ok "选择: OpenClash" ;;
-  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; ok "选择: SSR Plus" ;;
-  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; ok "选择: AdGuardHome" ;;
-  6) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; ok "选择: 全部安装" ;;
-  7)
+  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
+  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
+  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
+  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
+  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
+  6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
+  7) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "选择: 全部安装" ;;
+  8)
     echo ""
     echo "请选择要卸载的软件："
     echo ""
@@ -524,9 +526,10 @@ case "$MAIN_CHOICE" in
     echo "  3) OpenClash"
     echo "  4) SSR Plus"
     echo "  5) AdGuardHome"
-    echo "  6) 全部卸载"
+    echo "  6) iStore 商店"
+    echo "  7) 全部卸载"
     echo ""
-    printf "请输入选项 (1/2/3/4/5/6): "
+    printf "请输入选项 (1/2/3/4/5/6/7): "
     while :; do
       if ! read -r UNINSTALL_CHOICE; then
         echo ""
@@ -534,17 +537,18 @@ case "$MAIN_CHOICE" in
         exit 0
       fi
       case "$UNINSTALL_CHOICE" in
-        1|2|3|4|5|6) break ;;
-        *) printf "  无效输入，请重新选择 (1/2/3/4/5/6): " ;;
+        1|2|3|4|5|6|7) break ;;
+        *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7): " ;;
       esac
     done
     case "$UNINSTALL_CHOICE" in
-      1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "卸载: PassWall" ;;
-      2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "卸载: PassWall2" ;;
-      3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; ok "卸载: OpenClash" ;;
-      4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; ok "卸载: SSR Plus" ;;
-      5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; ok "卸载: AdGuardHome" ;;
-      6) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; ok "卸载: 全部插件" ;;
+      1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: PassWall" ;;
+      2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: PassWall2" ;;
+      3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: OpenClash" ;;
+      4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: SSR Plus" ;;
+      5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "卸载: AdGuardHome" ;;
+      6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "卸载: iStore 商店" ;;
+      7) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "卸载: 全部插件" ;;
     esac
     FORCE_REINSTALL=0; UNINSTALL_ONLY=1
     ;;
@@ -613,6 +617,7 @@ REQUIRED_SPACE_MB=30
 [ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
 [ "$INSTALL_SSR" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 60))
 [ "$INSTALL_AGH" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 40))
+[ "$INSTALL_ISTORE" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 20))
 OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
@@ -1279,6 +1284,10 @@ remove_plugin_config() {
     ssr)
       rm -f /etc/config/shadowsocksr 2>/dev/null || true
       ;;
+    istore)
+      rm -f /etc/config/store /etc/config/istore /etc/config/tasks 2>/dev/null || true
+      rm -rf /usr/share/istore /tmp/istore 2>/dev/null || true
+      ;;
   esac
 }
 config_action_text() {
@@ -1312,6 +1321,14 @@ force_reinstall_selected() {
     remove_adguardhome_keep_config
     ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
   fi
+  if [ "$INSTALL_ISTORE" = "1" ]; then
+    remove_pkg_keep_config "luci-app-store" "iStore 商店" || true
+    remove_pkg_keep_config "luci-lib-taskd" "iStore taskd 库" || true
+    remove_pkg_keep_config "luci-lib-xterm" "iStore xterm 库" || true
+    remove_pkg_keep_config "taskd" "iStore taskd" || true
+    remove_plugin_config "istore"
+    ok "iStore 商店已清理（$(config_action_text)）"
+  fi
   clean_luci_cache
 }
 uninstall_selected_only() {
@@ -1341,6 +1358,14 @@ uninstall_selected_only() {
   if [ "$INSTALL_AGH" = "1" ]; then
     remove_adguardhome_keep_config
     ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
+  fi
+  if [ "$INSTALL_ISTORE" = "1" ]; then
+    remove_pkg_keep_config "luci-app-store" "iStore 商店" || true
+    remove_pkg_keep_config "luci-lib-taskd" "iStore taskd 库" || true
+    remove_pkg_keep_config "luci-lib-xterm" "iStore xterm 库" || true
+    remove_pkg_keep_config "taskd" "iStore taskd" || true
+    remove_plugin_config "istore"
+    ok "iStore 商店已清理（$(config_action_text)）"
   fi
   clean_luci_cache
   echo ""
@@ -2005,6 +2030,58 @@ get_oc_latest() {
 }
 if [ "$INSTALL_AGH" = "1" ]; then
   install_adguardhome
+fi
+
+install_istore() {
+  hdr "iStore 商店安装"
+  case "$SYS_ARCH" in
+    x86_64|amd64|aarch64*|arm64)
+      ;;
+    *)
+      err "iStore 官方安装脚本只支持 x86_64 和 arm64，当前架构: $SYS_ARCH"
+      return 1
+      ;;
+  esac
+  if check_installed "luci-app-store" || [ -s /usr/lib/lua/luci/controller/store.lua ] || [ -d /usr/lib/lua/luci/view/store ]; then
+    ok "iStore 商店已安装"
+    return 0
+  fi
+  local run="/tmp/istore-reinstall.run" url u
+  url="https://github.com/linkease/openwrt-app-actions/raw/main/applications/luci-app-systools/root/usr/share/systools/istore-reinstall.run"
+  info "下载 iStore 官方安装脚本..."
+  for u in "$url" \
+           "https://ghfast.top/$url" \
+           "https://ghproxy.net/$url" \
+           "https://ghproxy.cc/$url" \
+           "https://gh.ddlc.top/$url"; do
+    curl -fsL --max-time 60 -o "$run" "$u" 2>/dev/null || { rm -f "$run"; continue; }
+    grep -q "ISTORE_REPO=https://istore.istoreos.com/repo/all/store" "$run" 2>/dev/null && \
+      grep -q "luci-app-store" "$run" 2>/dev/null && \
+      grep -q "/tmp/is-opkg install" "$run" 2>/dev/null && break
+    rm -f "$run"
+  done
+  if [ ! -s "$run" ]; then
+    err "iStore 官方安装脚本下载失败或内容校验失败"
+    return 1
+  fi
+  chmod 755 "$run"
+  info "执行 iStore 官方安装脚本..."
+  "$run" > /tmp/istore_install.log 2>&1
+  local rc=$?
+  if [ "$rc" = "0" ] && { check_installed "luci-app-store" || [ -s /usr/lib/lua/luci/controller/store.lua ] || [ -d /usr/lib/lua/luci/view/store ]; }; then
+    grep -E "ERROR|Failed|failed|not found|No such|unable|cannot" /tmp/istore_install.log 2>/dev/null || true
+    ok "iStore 商店安装完成 ✓"
+    rm -f "$run" /tmp/istore_install.log
+    return 0
+  fi
+  err "iStore 商店安装失败"
+  grep -E "ERROR|Failed|failed|not found|No such|unable|cannot|curl|wget|opkg|apk" /tmp/istore_install.log 2>/dev/null || true
+  rm -f "$run" /tmp/istore_install.log
+  return 1
+}
+
+if [ "$INSTALL_ISTORE" = "1" ]; then
+  install_istore
 fi
 
 if [ "$INSTALL_OC" = "1" ]; then
