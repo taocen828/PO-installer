@@ -2,9 +2,9 @@
 #==============================================
 # PO-installer - PassWall / PassWall2 / OpenClash / AdGuardHome 一键安装
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.1 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.1"
+VERSION="20260905.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -520,20 +520,23 @@ echo ""
 echo "安装模式："
 echo "  1) 直接安装/升级（默认）"
 echo "  2) 先卸载已选插件主程序，再重新安装（保留配置）"
+echo "  3) 仅卸载已选插件（保留配置）"
 echo ""
-printf "请选择安装模式 (1/2，回车默认1): "
+printf "请选择安装模式 (1/2/3，回车默认1): "
 if ! read -r INSTALL_MODE; then
   echo ""
   INSTALL_MODE="1"
 fi
 case "$INSTALL_MODE" in
-  2) FORCE_REINSTALL=1; ok "模式: 卸载后重装（保留配置）" ;;
-  *) FORCE_REINSTALL=0; ok "模式: 直接安装/升级" ;;
+  2) FORCE_REINSTALL=1; UNINSTALL_ONLY=0; ok "模式: 卸载后重装（保留配置）" ;;
+  3) FORCE_REINSTALL=0; UNINSTALL_ONLY=1; ok "模式: 仅卸载（保留配置）" ;;
+  *) FORCE_REINSTALL=0; UNINSTALL_ONLY=0; ok "模式: 直接安装/升级" ;;
 esac
 
 #==============================================
-# 3.5 空间检测（根据选择项估算）
+# 3.5 空间检测（根据选择项估算；仅卸载模式跳过）
 #==============================================
+if [ "$UNINSTALL_ONLY" != "1" ]; then
 hdr "空间检测"
 REQUIRED_SPACE_MB=30
 [ "$INSTALL_PW" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
@@ -547,10 +550,12 @@ OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
 ok "Overlay 可用: ${OVERLAY_SPACE}MB"
 info "预计需要: ${REQUIRED_SPACE_MB}MB"
 [ "$OVERLAY_SPACE" -ge "$REQUIRED_SPACE_MB" ] && ok "空间充足" || err "空间不足"
+fi
 
 #==============================================
 # 4. 配置源
 #==============================================
+if [ "$UNINSTALL_ONLY" != "1" ]; then
 hdr "软件源配置"
 info "快速检测系统默认源..."
 SYS_SOURCE_OK=0
@@ -740,9 +745,10 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     fi
   fi
 fi
+fi
 
 #==============================================
-# 5. 安装主程序
+# 5. 安装主程序 / 卸载
 #==============================================
 hdr "安装主程序"
 
@@ -1164,6 +1170,25 @@ remove_ssr_manual_files_keep_config() {
          /usr/lib/lua/luci/view/shadowsocksr \
          /usr/share/shadowsocksr 2>/dev/null || true
 }
+
+remove_adguardhome_keep_config() {
+  # 卸载 AdGuardHome 程序和服务，保留 /opt/AdGuardHome/AdGuardHome.yaml 与 data。
+  local tmp="/tmp/AdGuardHome.keep"
+  if [ -x /opt/AdGuardHome/AdGuardHome ]; then
+    /opt/AdGuardHome/AdGuardHome -s stop >/dev/null 2>&1 || true
+    /opt/AdGuardHome/AdGuardHome -s uninstall >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp"
+  mkdir -p "$tmp" 2>/dev/null || true
+  [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && cp /opt/AdGuardHome/AdGuardHome.yaml "$tmp/AdGuardHome.yaml" 2>/dev/null || true
+  [ -d /opt/AdGuardHome/data ] && cp -a /opt/AdGuardHome/data "$tmp/data" 2>/dev/null || true
+  rm -f /usr/bin/AdGuardHome /etc/init.d/AdGuardHome 2>/dev/null || true
+  rm -rf /opt/AdGuardHome 2>/dev/null || true
+  mkdir -p /opt/AdGuardHome 2>/dev/null || true
+  [ -f "$tmp/AdGuardHome.yaml" ] && mv "$tmp/AdGuardHome.yaml" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
+  [ -d "$tmp/data" ] && mv "$tmp/data" /opt/AdGuardHome/data 2>/dev/null || true
+  rm -rf "$tmp"
+}
 force_reinstall_selected() {
   [ "$FORCE_REINSTALL" = "1" ] || return 0
   hdr "卸载旧版主程序"
@@ -1185,14 +1210,43 @@ force_reinstall_selected() {
     ok "SSR Plus 程序文件已清理（保留配置）"
   fi
   if [ "$INSTALL_AGH" = "1" ]; then
-    if [ -x /opt/AdGuardHome/AdGuardHome ]; then
-      /opt/AdGuardHome/AdGuardHome -s uninstall >/dev/null 2>&1 || true
-    fi
-    rm -f /usr/bin/AdGuardHome /etc/init.d/AdGuardHome 2>/dev/null || true
-    rm -rf /opt/AdGuardHome 2>/dev/null || true
-    ok "AdGuardHome 程序文件已清理"
+    remove_adguardhome_keep_config
+    ok "AdGuardHome 程序文件已清理（保留配置）"
   fi
   clean_luci_cache
+}
+uninstall_selected_only() {
+  [ "$UNINSTALL_ONLY" = "1" ] || return 0
+  hdr "卸载已选插件"
+  clean_apk_broken_world
+  if [ "$INSTALL_PW" = "1" ]; then
+    remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
+    remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
+  fi
+  if [ "$INSTALL_PW2" = "1" ]; then
+    remove_pkg_keep_config "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
+    remove_pkg_keep_config "luci-app-passwall2" "PassWall2" || true
+  fi
+  if [ "$INSTALL_OC" = "1" ]; then
+    remove_pkg_keep_config "luci-app-openclash" "OpenClash" || true
+  fi
+  if [ "$INSTALL_SSR" = "1" ]; then
+    remove_pkg_keep_config "luci-app-ssr-plus" "SSR Plus" || true
+    remove_ssr_manual_files_keep_config
+    ok "SSR Plus 程序文件已清理（保留配置）"
+  fi
+  if [ "$INSTALL_AGH" = "1" ]; then
+    remove_adguardhome_keep_config
+    ok "AdGuardHome 程序文件已清理（保留配置）"
+  fi
+  clean_luci_cache
+  echo ""
+  echo "============================================="
+  echo " [✓] 卸载完成！"
+  echo "============================================="
+  echo ""
+  echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
+  exit 0
 }
 
 # 简化版（不询问，直接安装）
@@ -1268,6 +1322,7 @@ pkgupgrade() {
   fi
 }
 
+uninstall_selected_only
 force_reinstall_selected
 
 # PassWall
