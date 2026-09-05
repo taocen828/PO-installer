@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.5 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.6 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.5"
+VERSION="20260905.6"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2032,6 +2032,78 @@ if [ "$INSTALL_AGH" = "1" ]; then
   install_adguardhome
 fi
 
+istore_files_installed() {
+  [ -s /usr/lib/lua/luci/controller/store.lua ] && [ -d /www/luci-static/istore ] && return 0
+  [ -x /bin/is-opkg ] && [ -x /etc/init.d/istore ] && return 0
+  return 1
+}
+fetch_istore_ipk() {
+  local pkg="$1" out="$2" base idx fn u
+  for base in "https://istore.istoreos.com/repo/all/store" "https://repo.istoreos.com/repo/all/store"; do
+    idx=$(curl -fsL --max-time 20 "$base/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null) || continue
+    fn=$(printf '%s\n' "$idx" | awk -v p="$pkg" '
+      $1=="Package:" && $2==p {f=1; next}
+      f && $1=="Filename:" {print $2; exit}
+      f && $1=="Package:" {f=0}
+    ')
+    [ -n "$fn" ] || continue
+    u="$base/$fn"
+    curl -fL --progress-bar --max-time 90 -o "$out" "$u" 2>/dev/null || curl -fsL --max-time 90 -o "$out" "$u" 2>/dev/null || { rm -f "$out"; continue; }
+    [ -s "$out" ] || continue
+    # iStore repo 的 .ipk 实际是 gzip tar，含 data.tar.gz/control.tar.gz。
+    tar -tzf "$out" 2>/dev/null | grep -q '^\./data\.tar\.gz$' && return 0
+    rm -f "$out"
+  done
+  return 1
+}
+install_istore_ipk_manual() {
+  # 官方 istore-reinstall.run 在 APK 固件上可能被 world 约束卡住，报 unable to select packages。
+  # 兜底直接解包 iStore 官方 all/store IPK：这些包都是 all 架构，适合 x86_64/arm64。
+  local pkg ipk work rc=0
+  info "官方脚本失败，回退直接解包 iStore 官方 IPK..."
+  work="/tmp/istore-ipk"
+  rm -rf "$work"
+  mkdir -p "$work" || return 1
+  for pkg in taskd luci-lib-xterm luci-lib-taskd luci-app-store; do
+    ipk="$work/$pkg.ipk"
+    info "下载 iStore 组件: $pkg"
+    if ! fetch_istore_ipk "$pkg" "$ipk"; then
+      err "iStore 组件下载失败: $pkg"
+      rm -rf "$work"
+      return 1
+    fi
+    mkdir -p "$work/$pkg"
+    tar -xzf "$ipk" -C "$work/$pkg" >/tmp/istore_extract.log 2>&1 || rc=1
+    if [ "$rc" != "0" ] || [ ! -s "$work/$pkg/data.tar.gz" ]; then
+      err "iStore 组件解包失败: $pkg"
+      grep -E "ERROR|failed|invalid|not found|No such" /tmp/istore_extract.log 2>/dev/null || true
+      rm -rf "$work" /tmp/istore_extract.log
+      return 1
+    fi
+    tar -xzf "$work/$pkg/data.tar.gz" -C / >>/tmp/istore_extract.log 2>&1 || rc=1
+    if [ "$rc" != "0" ]; then
+      err "iStore 组件写入失败: $pkg"
+      grep -E "ERROR|failed|invalid|not found|No such|Permission" /tmp/istore_extract.log 2>/dev/null || true
+      rm -rf "$work" /tmp/istore_extract.log
+      return 1
+    fi
+  done
+  chmod +x /bin/is-opkg /etc/init.d/istore /etc/init.d/tasks /usr/libexec/taskd 2>/dev/null || true
+  [ -x /etc/uci-defaults/luci-app-store ] && /etc/uci-defaults/luci-app-store >/tmp/istore_uci.log 2>&1 || true
+  /etc/init.d/tasks enable >/dev/null 2>&1 || true
+  /etc/init.d/tasks start >/dev/null 2>&1 || true
+  /etc/init.d/istore enable >/dev/null 2>&1 || true
+  /etc/init.d/istore start >/dev/null 2>&1 || true
+  clean_luci_cache
+  if istore_files_installed; then
+    ok "iStore 商店安装完成 ✓ (IPK 解包兜底)"
+    rm -rf "$work" /tmp/istore_extract.log /tmp/istore_uci.log
+    return 0
+  fi
+  err "iStore IPK 解包兜底失败：关键文件不存在"
+  rm -rf "$work" /tmp/istore_extract.log /tmp/istore_uci.log
+  return 1
+}
 install_istore() {
   hdr "iStore 商店安装"
   case "$SYS_ARCH" in
@@ -2042,7 +2114,7 @@ install_istore() {
       return 1
       ;;
   esac
-  if check_installed "luci-app-store" || [ -s /usr/lib/lua/luci/controller/store.lua ] || [ -d /usr/lib/lua/luci/view/store ]; then
+  if check_installed "luci-app-store" || istore_files_installed; then
     ok "iStore 商店已安装"
     return 0
   fi
@@ -2060,22 +2132,26 @@ install_istore() {
       grep -q "/tmp/is-opkg install" "$run" 2>/dev/null && break
     rm -f "$run"
   done
-  if [ ! -s "$run" ]; then
-    err "iStore 官方安装脚本下载失败或内容校验失败"
-    return 1
+  if [ -s "$run" ]; then
+    chmod 755 "$run"
+    info "执行 iStore 官方安装脚本..."
+    "$run" > /tmp/istore_install.log 2>&1
+    local rc=$?
+    if [ "$rc" = "0" ] && { check_installed "luci-app-store" || istore_files_installed; }; then
+      grep -E "ERROR|Failed|failed|not found|No such|unable|cannot" /tmp/istore_install.log 2>/dev/null || true
+      ok "iStore 商店安装完成 ✓"
+      rm -f "$run" /tmp/istore_install.log
+      return 0
+    fi
+    grep -E "ERROR|Failed|failed|not found|No such|unable|cannot|curl|wget|opkg|apk" /tmp/istore_install.log 2>/dev/null || true
+  else
+    info "iStore 官方安装脚本下载失败或内容校验失败，尝试 IPK 解包兜底"
   fi
-  chmod 755 "$run"
-  info "执行 iStore 官方安装脚本..."
-  "$run" > /tmp/istore_install.log 2>&1
-  local rc=$?
-  if [ "$rc" = "0" ] && { check_installed "luci-app-store" || [ -s /usr/lib/lua/luci/controller/store.lua ] || [ -d /usr/lib/lua/luci/view/store ]; }; then
-    grep -E "ERROR|Failed|failed|not found|No such|unable|cannot" /tmp/istore_install.log 2>/dev/null || true
-    ok "iStore 商店安装完成 ✓"
+  if install_istore_ipk_manual; then
     rm -f "$run" /tmp/istore_install.log
     return 0
   fi
   err "iStore 商店安装失败"
-  grep -E "ERROR|Failed|failed|not found|No such|unable|cannot|curl|wget|opkg|apk" /tmp/istore_install.log 2>/dev/null || true
   rm -f "$run" /tmp/istore_install.log
   return 1
 }
