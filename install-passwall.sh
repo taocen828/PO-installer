@@ -1,6 +1,6 @@
 #!/bin/sh
 #==============================================
-# PO-installer - PassWall / PassWall2 / OpenClash / AdGuardHome 一键安装
+# OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
 # VERSION: 20260905.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
@@ -50,7 +50,7 @@ fi
 
 echo ""
 echo "============================================"
-echo " PO-installer - PassWall/OpenClash/AdGuardHome 一键安装 (v$VERSION)"
+echo " OpenWrt 工具箱 (v$VERSION)"
 echo "============================================"
 echo ""
 echo ""
