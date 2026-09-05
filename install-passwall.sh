@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.3 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.4 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.3"
+VERSION="20260905.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -493,7 +493,7 @@ echo "  3) OpenClash (Clash 内核)"
 echo "  4) SSR Plus (ShadowSocksR Plus+)"
 echo "  5) AdGuardHome (DNS 广告过滤)"
 echo "  6) 全部安装"
-echo "  7) 卸载插件（保留配置）"
+echo "  7) 卸载插件"
 echo ""
 printf "请输入选项 (1/2/3/4/5/6/7): "
 while :; do
@@ -517,7 +517,7 @@ case "$MAIN_CHOICE" in
   6) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; ok "选择: 全部安装" ;;
   7)
     echo ""
-    echo "请选择要卸载的软件（保留配置）："
+    echo "请选择要卸载的软件："
     echo ""
     echo "  1) PassWall"
     echo "  2) PassWall2"
@@ -550,12 +550,29 @@ case "$MAIN_CHOICE" in
     ;;
 esac
 
+if [ "$UNINSTALL_ONLY" = "1" ]; then
+  echo ""
+  echo "卸载配置："
+  echo "  1) 保留配置（默认）"
+  echo "  2) 删除配置"
+  echo ""
+  printf "请选择 (1/2，回车默认1): "
+  if ! read -r UNINSTALL_CFG_CHOICE; then
+    echo ""
+    UNINSTALL_CFG_CHOICE="1"
+  fi
+  case "$UNINSTALL_CFG_CHOICE" in
+    2) UNINSTALL_KEEP_CONFIG=0; ok "卸载配置: 删除配置" ;;
+    *) UNINSTALL_KEEP_CONFIG=1; ok "卸载配置: 保留配置" ;;
+  esac
+fi
+
 if [ "$UNINSTALL_ONLY" != "1" ]; then
   echo ""
   echo "安装模式："
   echo "  1) 直接安装/升级（默认）"
   echo "  2) 先卸载已选插件主程序，再重新安装（保留配置）"
-  echo "  3) 仅卸载已选插件（保留配置）"
+  echo "  3) 仅卸载已选插件"
   echo ""
   printf "请选择安装模式 (1/2/3，回车默认1): "
   if ! read -r INSTALL_MODE; then
@@ -564,9 +581,25 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   fi
   case "$INSTALL_MODE" in
     2) FORCE_REINSTALL=1; UNINSTALL_ONLY=0; ok "模式: 卸载后重装（保留配置）" ;;
-    3) FORCE_REINSTALL=0; UNINSTALL_ONLY=1; ok "模式: 仅卸载（保留配置）" ;;
+    3) FORCE_REINSTALL=0; UNINSTALL_ONLY=1; ok "模式: 仅卸载" ;;
     *) FORCE_REINSTALL=0; UNINSTALL_ONLY=0; ok "模式: 直接安装/升级" ;;
   esac
+  if [ "$UNINSTALL_ONLY" = "1" ]; then
+    echo ""
+    echo "卸载配置："
+    echo "  1) 保留配置（默认）"
+    echo "  2) 删除配置"
+    echo ""
+    printf "请选择 (1/2，回车默认1): "
+    if ! read -r UNINSTALL_CFG_CHOICE; then
+      echo ""
+      UNINSTALL_CFG_CHOICE="1"
+    fi
+    case "$UNINSTALL_CFG_CHOICE" in
+      2) UNINSTALL_KEEP_CONFIG=0; ok "卸载配置: 删除配置" ;;
+      *) UNINSTALL_KEEP_CONFIG=1; ok "卸载配置: 保留配置" ;;
+    esac
+  fi
 fi
 
 #==============================================
@@ -1168,7 +1201,7 @@ remove_pkg_keep_config() {
     info "$desc 未登记安装，跳过包管理器卸载"
     return 0
   fi
-  info "卸载 $desc（保留配置）..."
+  info "卸载 $desc（$(config_action_text)）..."
   if [ "$PKG_MGR" = "opkg" ]; then
     opkg remove "$pkg" > "$log" 2>&1
     rc=$?
@@ -1208,22 +1241,48 @@ remove_ssr_manual_files_keep_config() {
 }
 
 remove_adguardhome_keep_config() {
-  # 卸载 AdGuardHome 程序和服务，保留 /opt/AdGuardHome/AdGuardHome.yaml 与 data。
+  # 卸载 AdGuardHome 程序和服务；是否保留 /opt/AdGuardHome/AdGuardHome.yaml 与 data 由 UNINSTALL_KEEP_CONFIG 控制。
   local tmp="/tmp/AdGuardHome.keep"
   if [ -x /opt/AdGuardHome/AdGuardHome ]; then
     /opt/AdGuardHome/AdGuardHome -s stop >/dev/null 2>&1 || true
     /opt/AdGuardHome/AdGuardHome -s uninstall >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
-  mkdir -p "$tmp" 2>/dev/null || true
-  [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && cp /opt/AdGuardHome/AdGuardHome.yaml "$tmp/AdGuardHome.yaml" 2>/dev/null || true
-  [ -d /opt/AdGuardHome/data ] && cp -a /opt/AdGuardHome/data "$tmp/data" 2>/dev/null || true
+  if [ "$UNINSTALL_KEEP_CONFIG" != "0" ]; then
+    mkdir -p "$tmp" 2>/dev/null || true
+    [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && cp /opt/AdGuardHome/AdGuardHome.yaml "$tmp/AdGuardHome.yaml" 2>/dev/null || true
+    [ -d /opt/AdGuardHome/data ] && cp -a /opt/AdGuardHome/data "$tmp/data" 2>/dev/null || true
+  fi
   rm -f /usr/bin/AdGuardHome /etc/init.d/AdGuardHome 2>/dev/null || true
   rm -rf /opt/AdGuardHome 2>/dev/null || true
-  mkdir -p /opt/AdGuardHome 2>/dev/null || true
-  [ -f "$tmp/AdGuardHome.yaml" ] && mv "$tmp/AdGuardHome.yaml" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
-  [ -d "$tmp/data" ] && mv "$tmp/data" /opt/AdGuardHome/data 2>/dev/null || true
+  if [ "$UNINSTALL_KEEP_CONFIG" != "0" ]; then
+    mkdir -p /opt/AdGuardHome 2>/dev/null || true
+    [ -f "$tmp/AdGuardHome.yaml" ] && mv "$tmp/AdGuardHome.yaml" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
+    [ -d "$tmp/data" ] && mv "$tmp/data" /opt/AdGuardHome/data 2>/dev/null || true
+  fi
   rm -rf "$tmp"
+}
+remove_plugin_config() {
+  local plugin="$1"
+  [ "$UNINSTALL_KEEP_CONFIG" = "0" ] || return 0
+  case "$plugin" in
+    passwall)
+      rm -f /etc/config/passwall 2>/dev/null || true
+      ;;
+    passwall2)
+      rm -f /etc/config/passwall2 2>/dev/null || true
+      ;;
+    openclash)
+      rm -f /etc/config/openclash 2>/dev/null || true
+      rm -rf /etc/openclash /etc/openclash_backup 2>/dev/null || true
+      ;;
+    ssr)
+      rm -f /etc/config/shadowsocksr 2>/dev/null || true
+      ;;
+  esac
+}
+config_action_text() {
+  [ "$UNINSTALL_KEEP_CONFIG" = "0" ] && echo "删除配置" || echo "保留配置"
 }
 force_reinstall_selected() {
   [ "$FORCE_REINSTALL" = "1" ] || return 0
@@ -1232,22 +1291,26 @@ force_reinstall_selected() {
   if [ "$INSTALL_PW" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
     remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
+    remove_plugin_config "passwall"
   fi
   if [ "$INSTALL_PW2" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
     remove_pkg_keep_config "luci-app-passwall2" "PassWall2" || true
+    remove_plugin_config "passwall2"
   fi
   if [ "$INSTALL_OC" = "1" ]; then
     remove_pkg_keep_config "luci-app-openclash" "OpenClash" || true
+    remove_plugin_config "openclash"
   fi
   if [ "$INSTALL_SSR" = "1" ]; then
     remove_pkg_keep_config "luci-app-ssr-plus" "SSR Plus" || true
     remove_ssr_manual_files_keep_config
-    ok "SSR Plus 程序文件已清理（保留配置）"
+    remove_plugin_config "ssr"
+    ok "SSR Plus 程序文件已清理（$(config_action_text)）"
   fi
   if [ "$INSTALL_AGH" = "1" ]; then
     remove_adguardhome_keep_config
-    ok "AdGuardHome 程序文件已清理（保留配置）"
+    ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
   fi
   clean_luci_cache
 }
@@ -1258,22 +1321,26 @@ uninstall_selected_only() {
   if [ "$INSTALL_PW" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
     remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
+    remove_plugin_config "passwall"
   fi
   if [ "$INSTALL_PW2" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
     remove_pkg_keep_config "luci-app-passwall2" "PassWall2" || true
+    remove_plugin_config "passwall2"
   fi
   if [ "$INSTALL_OC" = "1" ]; then
     remove_pkg_keep_config "luci-app-openclash" "OpenClash" || true
+    remove_plugin_config "openclash"
   fi
   if [ "$INSTALL_SSR" = "1" ]; then
     remove_pkg_keep_config "luci-app-ssr-plus" "SSR Plus" || true
     remove_ssr_manual_files_keep_config
-    ok "SSR Plus 程序文件已清理（保留配置）"
+    remove_plugin_config "ssr"
+    ok "SSR Plus 程序文件已清理（$(config_action_text)）"
   fi
   if [ "$INSTALL_AGH" = "1" ]; then
     remove_adguardhome_keep_config
-    ok "AdGuardHome 程序文件已清理（保留配置）"
+    ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
   fi
   clean_luci_cache
   echo ""
