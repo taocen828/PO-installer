@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.2 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.3 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.2"
+VERSION="20260905.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -493,8 +493,9 @@ echo "  3) OpenClash (Clash 内核)"
 echo "  4) SSR Plus (ShadowSocksR Plus+)"
 echo "  5) AdGuardHome (DNS 广告过滤)"
 echo "  6) 全部安装"
+echo "  7) 卸载插件（保留配置）"
 echo ""
-printf "请输入选项 (1/2/3/4/5/6): "
+printf "请输入选项 (1/2/3/4/5/6/7): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -503,8 +504,8 @@ while :; do
     break
   fi
   case "$MAIN_CHOICE" in
-    1|2|3|4|5|6) break ;;
-    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6): " ;;
+    1|2|3|4|5|6|7) break ;;
+    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
@@ -514,24 +515,59 @@ case "$MAIN_CHOICE" in
   4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; ok "选择: SSR Plus" ;;
   5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; ok "选择: AdGuardHome" ;;
   6) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; ok "选择: 全部安装" ;;
+  7)
+    echo ""
+    echo "请选择要卸载的软件（保留配置）："
+    echo ""
+    echo "  1) PassWall"
+    echo "  2) PassWall2"
+    echo "  3) OpenClash"
+    echo "  4) SSR Plus"
+    echo "  5) AdGuardHome"
+    echo "  6) 全部卸载"
+    echo ""
+    printf "请输入选项 (1/2/3/4/5/6): "
+    while :; do
+      if ! read -r UNINSTALL_CHOICE; then
+        echo ""
+        info "输入流已关闭，默认不执行卸载"
+        exit 0
+      fi
+      case "$UNINSTALL_CHOICE" in
+        1|2|3|4|5|6) break ;;
+        *) printf "  无效输入，请重新选择 (1/2/3/4/5/6): " ;;
+      esac
+    done
+    case "$UNINSTALL_CHOICE" in
+      1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "卸载: PassWall" ;;
+      2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; ok "卸载: PassWall2" ;;
+      3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; ok "卸载: OpenClash" ;;
+      4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; ok "卸载: SSR Plus" ;;
+      5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; ok "卸载: AdGuardHome" ;;
+      6) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; ok "卸载: 全部插件" ;;
+    esac
+    FORCE_REINSTALL=0; UNINSTALL_ONLY=1
+    ;;
 esac
 
-echo ""
-echo "安装模式："
-echo "  1) 直接安装/升级（默认）"
-echo "  2) 先卸载已选插件主程序，再重新安装（保留配置）"
-echo "  3) 仅卸载已选插件（保留配置）"
-echo ""
-printf "请选择安装模式 (1/2/3，回车默认1): "
-if ! read -r INSTALL_MODE; then
+if [ "$UNINSTALL_ONLY" != "1" ]; then
   echo ""
-  INSTALL_MODE="1"
+  echo "安装模式："
+  echo "  1) 直接安装/升级（默认）"
+  echo "  2) 先卸载已选插件主程序，再重新安装（保留配置）"
+  echo "  3) 仅卸载已选插件（保留配置）"
+  echo ""
+  printf "请选择安装模式 (1/2/3，回车默认1): "
+  if ! read -r INSTALL_MODE; then
+    echo ""
+    INSTALL_MODE="1"
+  fi
+  case "$INSTALL_MODE" in
+    2) FORCE_REINSTALL=1; UNINSTALL_ONLY=0; ok "模式: 卸载后重装（保留配置）" ;;
+    3) FORCE_REINSTALL=0; UNINSTALL_ONLY=1; ok "模式: 仅卸载（保留配置）" ;;
+    *) FORCE_REINSTALL=0; UNINSTALL_ONLY=0; ok "模式: 直接安装/升级" ;;
+  esac
 fi
-case "$INSTALL_MODE" in
-  2) FORCE_REINSTALL=1; UNINSTALL_ONLY=0; ok "模式: 卸载后重装（保留配置）" ;;
-  3) FORCE_REINSTALL=0; UNINSTALL_ONLY=1; ok "模式: 仅卸载（保留配置）" ;;
-  *) FORCE_REINSTALL=0; UNINSTALL_ONLY=0; ok "模式: 直接安装/升级" ;;
-esac
 
 #==============================================
 # 3.5 空间检测（根据选择项估算；仅卸载模式跳过）
