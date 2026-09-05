@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.11 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.12 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.11"
+VERSION="20260905.12"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -107,10 +107,11 @@ else
   err "无法识别包管理器"; exit 1
 fi
 
-# 早期清理上次运行追加的 PO-managed 源。
+# 早期清理上次运行追加的代理插件源。
 # 必须放在第一次 opkg print-architecture 之前，否则历史 customfeeds 与 distfeeds 重复时，opkg 自身会先刷 Duplicate src declaration。
+# 注意：openwrt_ 是脚本探测/修复后的正确系统依赖源，不能清理；否则下一次运行又退回坏源。
 if [ "$PKG_MGR" = "opkg" ] && [ -f /etc/opkg/customfeeds.conf ]; then
-  grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-clean 2>/dev/null || true
+  grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-clean 2>/dev/null || true
   cat /tmp/customfeeds.po-clean > /etc/opkg/customfeeds.conf 2>/dev/null
   rm -f /tmp/customfeeds.po-clean
 fi
@@ -705,9 +706,9 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 # 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
-    # 清旧声明（幂等）: 过滤 passwall/iw_/openwrt_ 行后重建文件 (避免 busybox sed -i 符号链接坑)
+    # 清旧声明（幂等）: 仅过滤代理插件源；保留已修复的 openwrt_ 系统依赖源 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
-      grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" -e "^src/gz openwrt_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
+      grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
       cat /tmp/customfeeds.tmp > /etc/opkg/customfeeds.conf 2>/dev/null
       rm -f /tmp/customfeeds.tmp
     fi
