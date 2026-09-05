@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.7 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.8 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.7"
+VERSION="20260905.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2037,6 +2037,37 @@ istore_files_installed() {
   [ -x /bin/is-opkg ] && [ -x /etc/init.d/istore ] && return 0
   return 1
 }
+istore_runtime_deps_ok() {
+  command -v script >/dev/null 2>&1 && command -v stty >/dev/null 2>&1 && return 0
+  return 1
+}
+ensure_istore_runtime_deps() {
+  # taskd 运行商店安装任务时会调用 `script` 和 `stty`。
+  # 手动解包 iStore 时包管理器不会自动安装 taskd 的依赖，缺 script 会报：/usr/libexec/taskd: exec: line 11: script: not found
+  local need="" log="/tmp/istore_deps.log" rc=0
+  command -v script >/dev/null 2>&1 || need="$need script-utils"
+  command -v stty >/dev/null 2>&1 || need="$need coreutils-stty"
+  [ -z "$need" ] && return 0
+  info "补装 iStore 运行依赖:$need"
+  : > "$log"
+  if [ "$PKG_MGR" = "apk" ]; then
+    apk add --upgrade --latest --allow-untrusted --force-broken-world $need > "$log" 2>&1
+    rc=$?
+  else
+    opkg install $need --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+    rc=$?
+  fi
+  if istore_runtime_deps_ok; then
+    grep -E "ERROR|WARNING|failed|not found|unable|cannot|conflict|breaks" "$log" 2>/dev/null || true
+    rm -f "$log"
+    ok "iStore 运行依赖已就绪"
+    return 0
+  fi
+  grep -E "ERROR|WARNING|failed|not found|unable|cannot|conflict|breaks" "$log" 2>/dev/null || true
+  rm -f "$log"
+  err "iStore 运行依赖缺失：$(command -v script >/dev/null 2>&1 || echo script) $(command -v stty >/dev/null 2>&1 || echo stty)"
+  return $rc
+}
 fetch_istore_ipk() {
   local pkg="$1" out="$2" base idx fn u
   for base in "https://istore.istoreos.com/repo/all/store" "https://repo.istoreos.com/repo/all/store"; do
@@ -2089,6 +2120,7 @@ install_istore_ipk_manual() {
     fi
   done
   chmod +x /bin/is-opkg /etc/init.d/istore /etc/init.d/tasks /usr/libexec/taskd 2>/dev/null || true
+  ensure_istore_runtime_deps || true
   [ -x /etc/uci-defaults/luci-app-store ] && /etc/uci-defaults/luci-app-store >/tmp/istore_uci.log 2>&1 || true
   /etc/init.d/tasks enable >/dev/null 2>&1 || true
   /etc/init.d/tasks start >/dev/null 2>&1 || true
@@ -2115,7 +2147,12 @@ install_istore() {
       ;;
   esac
   if check_installed "luci-app-store" || istore_files_installed; then
-    ok "iStore 商店已安装"
+    ensure_istore_runtime_deps || true
+    if istore_runtime_deps_ok; then
+      ok "iStore 商店已安装，运行依赖正常"
+    else
+      err "iStore 商店已安装，但 taskd 运行依赖不完整；商店安装插件可能失败"
+    fi
     return 0
   fi
   if [ "$PKG_MGR" = "apk" ]; then
