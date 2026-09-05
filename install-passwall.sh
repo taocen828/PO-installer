@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.12 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.13 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.12"
+VERSION="20260905.13"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -37,6 +37,75 @@ check_url() {
     fi
   fi
   echo "$code"
+}
+
+# 修复“电脑可上网，但 SSH 到路由器后路由器自身 ping 不通”的常见问题。
+# 只处理路由器自身出网：默认路由缺失/网络服务卡住/DNS 文件异常，不改 LAN/DHCP/代理规则。
+repair_router_self_network() {
+  local ip_ok=0 dns_ok=0 gw="" wan_if="" wan_dev="" changed=0
+  hdr "路由器自身联网检测"
+
+  ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 2 119.29.29.29 >/dev/null 2>&1 || ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1
+  [ "$?" = "0" ] && ip_ok=1
+  ping -c 1 -W 3 baidu.com >/dev/null 2>&1 || ping -c 1 -W 3 openwrt.org >/dev/null 2>&1
+  [ "$?" = "0" ] && dns_ok=1
+
+  [ "$ip_ok" = "1" ] && [ "$dns_ok" = "1" ] && { ok "路由器自身联网正常"; return 0; }
+
+  if [ "$ip_ok" != "1" ]; then
+    err "路由器自身无法 ping 通公网 IP，尝试修复默认路由/重启网络服务"
+    gw=$(ip route 2>/dev/null | awk '/^default / {print $3; exit}')
+    wan_dev=$(ip route 2>/dev/null | awk '/^default / {print $5; exit}')
+    if [ -z "$gw" ]; then
+      wan_if=$(uci -q get network.wan.ifname 2>/dev/null)
+      [ -z "$wan_if" ] && wan_if=$(uci -q get network.wan.device 2>/dev/null)
+      gw=$(ubus call network.interface.wan status 2>/dev/null | sed -n 's/.*"nexthop"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+      [ -z "$wan_dev" ] && wan_dev="$wan_if"
+      if [ -n "$gw" ] && [ -n "$wan_dev" ]; then
+        ip route replace default via "$gw" dev "$wan_dev" 2>/dev/null && changed=1 && ok "已临时修复默认路由: $gw dev $wan_dev"
+      fi
+    fi
+    if [ "$changed" != "1" ]; then
+      /etc/init.d/network reload >/dev/null 2>&1 || /etc/init.d/network restart >/dev/null 2>&1 || true
+      /etc/init.d/firewall reload >/dev/null 2>&1 || true
+      sleep 3
+      ok "已重载 network/firewall"
+    fi
+  fi
+
+  ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 2 119.29.29.29 >/dev/null 2>&1 || ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1
+  [ "$?" = "0" ] && ip_ok=1 || ip_ok=0
+
+  if [ "$dns_ok" != "1" ] && [ "$ip_ok" = "1" ]; then
+    if [ "$ip_ok" = "1" ]; then
+      info "公网 IP 可达但域名不通，修复路由器自身 DNS"
+      mkdir -p /tmp/resolv.conf.d 2>/dev/null || true
+      {
+        echo "nameserver 223.5.5.5"
+        echo "nameserver 119.29.29.29"
+        echo "nameserver 1.1.1.1"
+      } > /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null || true
+      [ -L /tmp/resolv.conf ] || {
+        cp /tmp/resolv.conf /tmp/resolv.conf.po-bak 2>/dev/null || true
+        rm -f /tmp/resolv.conf 2>/dev/null || true
+        ln -s /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf 2>/dev/null || true
+      }
+      /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+      changed=1
+    fi
+  fi
+
+  ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 2 119.29.29.29 >/dev/null 2>&1 || ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1
+  [ "$?" = "0" ] && ip_ok=1 || ip_ok=0
+  ping -c 1 -W 3 baidu.com >/dev/null 2>&1 || ping -c 1 -W 3 openwrt.org >/dev/null 2>&1
+  [ "$?" = "0" ] && dns_ok=1 || dns_ok=0
+
+  if [ "$ip_ok" = "1" ] && [ "$dns_ok" = "1" ]; then
+    ok "路由器自身联网已修复"
+    return 0
+  fi
+  [ "$ip_ok" = "1" ] && err "仍有 DNS 问题：公网 IP 可达，域名解析失败" || err "仍无法 ping 通公网 IP：请检查 WAN 网关/上级光猫/策略路由"
+  return 1
 }
 
 # 管道模式
@@ -244,6 +313,12 @@ if [ "$PKG_MGR" = "opkg" ]; then
   # 去尾随空格 (tr 换行→空格会产生)
   SERIES_CHAIN=${SERIES_CHAIN% }
   info "opkg 系统: 官方 25.12/snapshots 为 apk 格式，源链过滤为 opkg 可用系列 → $SERIES_CHAIN"
+fi
+
+# 源探测/下载安装依赖路由器自身出网；如果客户端电脑能上网但路由器 SSH 内 ping 不通，先自动修复一次。
+# 如确需跳过，可执行: PO_SKIP_NET_REPAIR=1 sh install-passwall.sh
+if [ "$PO_SKIP_NET_REPAIR" != "1" ]; then
+  ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 2 119.29.29.29 >/dev/null 2>&1 || ping -c 1 -W 3 baidu.com >/dev/null 2>&1 || repair_router_self_network || true
 fi
 
 #==============================================
@@ -496,8 +571,9 @@ echo "  5) AdGuardHome (DNS 广告过滤)"
 echo "  6) iStore 商店"
 echo "  7) 全部安装"
 echo "  8) 卸载插件"
+echo "  9) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
 echo ""
-printf "请输入选项 (1/2/3/4/5/6/7/8): "
+printf "请输入选项 (1/2/3/4/5/6/7/8/9): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -506,8 +582,8 @@ while :; do
     break
   fi
   case "$MAIN_CHOICE" in
-    1|2|3|4|5|6|7|8) break ;;
-    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8): " ;;
+    1|2|3|4|5|6|7|8|9) break ;;
+    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8/9): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
@@ -552,6 +628,11 @@ case "$MAIN_CHOICE" in
       7) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "卸载: 全部插件" ;;
     esac
     FORCE_REINSTALL=0; UNINSTALL_ONLY=1
+    ;;
+  9)
+    ok "选择: 修复路由器自身联网"
+    repair_router_self_network
+    exit $?
     ;;
 esac
 
