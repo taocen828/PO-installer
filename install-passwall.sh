@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.8 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.9 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.8"
+VERSION="20260905.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1193,7 +1193,7 @@ clean_apk_broken_world() {
   cp /etc/apk/world /tmp/apk.world.po-bak 2>/dev/null || true
   # OpenWrt apk world 可带约束/校验后缀，如 luci-app-ssr-plus><Qxxx；按前缀清理。
   awk '
-    $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|nping|sing-box)([<>=~].*)?$/ {next}
+    $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next}
     {print}
   ' /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || cp /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null
   cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
@@ -2051,6 +2051,7 @@ ensure_istore_runtime_deps() {
   info "补装 iStore 运行依赖:$need"
   : > "$log"
   if [ "$PKG_MGR" = "apk" ]; then
+    clean_apk_broken_world
     apk add --upgrade --latest --allow-untrusted --force-broken-world $need > "$log" 2>&1
     rc=$?
   else
@@ -2067,6 +2068,27 @@ ensure_istore_runtime_deps() {
   rm -f "$log"
   err "iStore 运行依赖缺失：$(command -v script >/dev/null 2>&1 || echo script) $(command -v stty >/dev/null 2>&1 || echo stty)"
   return $rc
+}
+patch_istore_is_opkg_world_cleanup() {
+  # iStore 的 /bin/is-opkg 在安装商店插件时会直接调用 apk；如果 /etc/apk/world 残留 naiveprox4/naiveproxy 等坏约束，
+  # 商店内安装会报 unable to select packages。给 is-opkg 注入一次轻量 world 清理，避免用户手动编辑 world。
+  [ "$PKG_MGR" = "apk" ] || return 0
+  [ -s /bin/is-opkg ] || return 0
+  grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null && return 0
+  cp /bin/is-opkg /tmp/is-opkg.po-bak 2>/dev/null || true
+  awk '
+    NR==2 {
+      print "PO_CLEAN_APK_WORLD=1"
+      print "if [ -f /etc/apk/world ]; then"
+      print "  awk '\''$0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next} {print}'\'' /etc/apk/world > /tmp/apk.world.istore-clean 2>/dev/null && cat /tmp/apk.world.istore-clean > /etc/apk/world"
+      print "  rm -f /tmp/apk.world.istore-clean 2>/dev/null || true"
+      print "fi"
+    }
+    {print}
+  ' /bin/is-opkg > /tmp/is-opkg.po-new 2>/dev/null && cat /tmp/is-opkg.po-new > /bin/is-opkg
+  rm -f /tmp/is-opkg.po-new 2>/dev/null || true
+  chmod +x /bin/is-opkg 2>/dev/null || true
+  grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null && ok "iStore is-opkg 已注入 APK world 清理" || info "iStore is-opkg world 清理注入失败，继续"
 }
 fetch_istore_ipk() {
   local pkg="$1" out="$2" base idx fn u
@@ -2121,6 +2143,7 @@ install_istore_ipk_manual() {
   done
   chmod +x /bin/is-opkg /etc/init.d/istore /etc/init.d/tasks /usr/libexec/taskd 2>/dev/null || true
   ensure_istore_runtime_deps || true
+  patch_istore_is_opkg_world_cleanup
   [ -x /etc/uci-defaults/luci-app-store ] && /etc/uci-defaults/luci-app-store >/tmp/istore_uci.log 2>&1 || true
   /etc/init.d/tasks enable >/dev/null 2>&1 || true
   /etc/init.d/tasks start >/dev/null 2>&1 || true
@@ -2148,6 +2171,7 @@ install_istore() {
   esac
   if check_installed "luci-app-store" || istore_files_installed; then
     ensure_istore_runtime_deps || true
+    patch_istore_is_opkg_world_cleanup
     if istore_runtime_deps_ok; then
       ok "iStore 商店已安装，运行依赖正常"
     else
