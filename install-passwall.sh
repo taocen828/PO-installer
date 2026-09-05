@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.6 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.7 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.6"
+VERSION="20260905.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2117,6 +2117,11 @@ install_istore() {
   if check_installed "luci-app-store" || istore_files_installed; then
     ok "iStore 商店已安装"
     return 0
+  fi
+  if [ "$PKG_MGR" = "apk" ]; then
+    info "检测到 APK 固件，跳过官方 repo-apk 安装路径，直接使用官方 IPK 解包兜底"
+    install_istore_ipk_manual
+    return $?
   fi
   local run="/tmp/istore-reinstall.run" url u
   url="https://github.com/linkease/openwrt-app-actions/raw/main/applications/luci-app-systools/root/usr/share/systools/istore-reinstall.run"
