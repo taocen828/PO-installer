@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260905.9 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260905.10 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260905.9"
+VERSION="20260905.10"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1192,12 +1192,33 @@ clean_apk_broken_world() {
   [ -f /etc/apk/world ] || return 0
   cp /etc/apk/world /tmp/apk.world.po-bak 2>/dev/null || true
   # OpenWrt apk world 可带约束/校验后缀，如 luci-app-ssr-plus><Qxxx；按前缀清理。
+  # naiveprox4 是错误包名；naiveproxy 在 25.12/APK 上可能依赖不存在的 libatomic1，留在 world 会让 iStore 内安装任何插件都失败。
   awk '
     $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next}
+    $0 ~ /^naiveprox/ {next}
+    $0 ~ /^libatomic/ {next}
     {print}
   ' /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || cp /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null
-  cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
+  if ! cmp -s /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null; then
+    cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
+    ok "已清理 APK world 残留约束: naiveprox*/libatomic*"
+  fi
   rm -f /tmp/apk.world.po-clean 2>/dev/null || true
+}
+
+
+clean_apk_broken_installed() {
+  [ "$PKG_MGR" = "apk" ] || return 0
+  clean_apk_broken_world
+  # 如果已安装 naiveproxy 但系统没有 libatomic1，APK 求解器会继续报 libatomic1 missing；先移除这个已破损包。
+  if apk list --installed 'naiveproxy' 2>/dev/null | grep -q '^naiveproxy-'; then
+    if ! apk info 'libatomic1' >/dev/null 2>&1 && ! apk list --installed 'libatomic1' 2>/dev/null | grep -q '^libatomic1-'; then
+      info "检测到已安装 naiveproxy 依赖缺失 libatomic1，先移除破损 naiveproxy"
+      apk del --force-broken-world naiveproxy >/tmp/apk_clean_naiveproxy.log 2>&1 || true
+      grep -E "ERROR|WARNING|failed|not found|unable|cannot|conflict|breaks" /tmp/apk_clean_naiveproxy.log 2>/dev/null || true
+      rm -f /tmp/apk_clean_naiveproxy.log 2>/dev/null || true
+    fi
+  fi
 }
 
 remove_pkg_keep_config() {
@@ -2051,7 +2072,7 @@ ensure_istore_runtime_deps() {
   info "补装 iStore 运行依赖:$need"
   : > "$log"
   if [ "$PKG_MGR" = "apk" ]; then
-    clean_apk_broken_world
+    clean_apk_broken_installed
     apk add --upgrade --latest --allow-untrusted --force-broken-world $need > "$log" 2>&1
     rc=$?
   else
@@ -2074,13 +2095,16 @@ patch_istore_is_opkg_world_cleanup() {
   # 商店内安装会报 unable to select packages。给 is-opkg 注入一次轻量 world 清理，避免用户手动编辑 world。
   [ "$PKG_MGR" = "apk" ] || return 0
   [ -s /bin/is-opkg ] || return 0
-  grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null && return 0
+  if grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null; then
+    grep -q "naiveprox" /bin/is-opkg 2>/dev/null && grep -q "libatomic" /bin/is-opkg 2>/dev/null && return 0
+    cp /tmp/is-opkg.po-bak /bin/is-opkg 2>/dev/null || true
+  fi
   cp /bin/is-opkg /tmp/is-opkg.po-bak 2>/dev/null || true
   awk '
     NR==2 {
       print "PO_CLEAN_APK_WORLD=1"
       print "if [ -f /etc/apk/world ]; then"
-      print "  awk '\''$0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next} {print}'\'' /etc/apk/world > /tmp/apk.world.istore-clean 2>/dev/null && cat /tmp/apk.world.istore-clean > /etc/apk/world"
+      print "  awk '\''$0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next} $0 ~ /^naiveprox/ {next} $0 ~ /^libatomic/ {next} {print}'\'' /etc/apk/world > /tmp/apk.world.istore-clean 2>/dev/null && cat /tmp/apk.world.istore-clean > /etc/apk/world"
       print "  rm -f /tmp/apk.world.istore-clean 2>/dev/null || true"
       print "fi"
     }
@@ -2161,6 +2185,7 @@ install_istore_ipk_manual() {
 }
 install_istore() {
   hdr "iStore 商店安装"
+  clean_apk_broken_installed
   case "$SYS_ARCH" in
     x86_64|amd64|aarch64*|arm64)
       ;;
