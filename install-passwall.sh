@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260906.3 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260906.4 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260906.3"
+VERSION="20260906.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1046,12 +1046,20 @@ get_repo_version() {
 # 版本比较：仅当 $1 明确大于 $2 时返回 0。
 # 避免把本机 sing-box 1.14.0 误判成可“升级”到源里的 1.13.21-r1。
 version_newer() {
-  local a="$1" b="$2" top
+  local a="$1" b="$2" an bn top
   [ -n "$a" ] && [ -n "$b" ] || return 1
   [ "$a" = "$b" ] && return 1
-  if printf '%s\n%s\n' "$a" "$b" | sort -V >/dev/null 2>&1; then
-    top=$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)
-    [ "$top" = "$a" ] && return 0 || return 1
+  an=$(echo "$a" | sed 's/^v//; s/-r[0-9][0-9]*$//')
+  bn=$(echo "$b" | sed 's/^v//; s/-r[0-9][0-9]*$//')
+  # ChinaDNS-NG 旧版会显示 v1.0-beta.25，而新源是 2025.08.09-r1。
+  # sort -V 会把带 v/beta 的旧版本排到日期版本后面，需先把日期版判为新上游格式。
+  case "$an|$bn" in
+    20[0-9][0-9].*'|'*beta*) return 0 ;;
+    *beta*'|'20[0-9][0-9].*) return 1 ;;
+  esac
+  if printf '%s\n%s\n' "$an" "$bn" | sort -V >/dev/null 2>&1; then
+    top=$(printf '%s\n%s\n' "$an" "$bn" | sort -V | tail -1)
+    [ "$top" = "$an" ] && return 0 || return 1
   fi
   return 0
 }
@@ -2487,7 +2495,7 @@ fi
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "Geo 数据库"
-  for pkg in geoview v2ray-geoip v2ray-geosite; do
+  for pkg in chinadns-ng geoview v2ray-geoip v2ray-geosite; do
     pkgupgrade "$pkg" "$pkg"
   done
 fi
