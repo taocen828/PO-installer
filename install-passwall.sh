@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260906.1 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260906.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260906.1"
+VERSION="20260906.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1088,9 +1088,8 @@ apk_add_repo_exact() {
     apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
     apk_installed_exact "$pkg" "$want_ver" && return 0
-    apk upgrade --available --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
-    rc=$?
-    apk_installed_exact "$pkg" "$want_ver" && return 0
+    # 不再回退 apk upgrade --available：OpenWrt APK 会为满足 world 约束顺手升级大量 LuCI/系统包，
+    # 用户只想装一个可选组件时不应触发全系统事务。
     return $rc
   fi
   apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
@@ -2532,7 +2531,11 @@ opt_pkginstall() {
     local ver repo_ver
     ver=$(opt_version "$pkg")
     repo_ver=$(get_repo_version "$pkg")
-    if [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
+    # 只有二进制存在、包管理器未登记时，不强行把 1.14.0 判成低于 1.14.0-r1。
+    # sing-box 这类上游二进制版本没有 -r 包修订号；功能版本相同就跳过，避免 apk 拉起系统级升级事务。
+    if [ -n "$repo_ver" ] && [ -n "$ver" ] && [ "${repo_ver%%-r*}" = "$ver" ]; then
+      ok "$desc 已存在二进制 ($ver)，源版本 $repo_ver 仅包修订号不同，跳过安装"
+    elif [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
       info "$desc 已安装二进制 ($ver)，源中有新版本 ($repo_ver)，尝试安装包管理器版本..."
       pkginstall "$pkg" "$desc"
     else
@@ -2557,7 +2560,9 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     if opt_installed "$comp"; then
       ver=$(opt_version "$comp")
       repo_ver=$(get_repo_version "$comp")
-      if [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
+      if [ -n "$repo_ver" ] && [ -n "$ver" ] && [ "${repo_ver%%-r*}" = "$ver" ]; then
+        echo "  $i) $desc ($ver，本体已是源版本，包修订 $repo_ver) ✓"
+      elif [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
         echo "  $i) $desc ($ver → 可升级 $repo_ver) ⬆"
       elif [ -n "$repo_ver" ] && [ -z "$ver" ]; then
         echo "  $i) $desc (已安装，版本未知 → 源版本 $repo_ver) ✓"
