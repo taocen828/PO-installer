@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260906.4 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260906.5 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260906.4"
+VERSION="20260906.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -211,6 +211,23 @@ fi
 [ -z "$SYS_ARCH" ] && { err "无法检测架构"; exit 1; }
 CPU_ARCH="$SYS_ARCH"
 ok "CPU 架构: $CPU_ARCH"
+
+# OPKG 必须启用 all/noarch 架构；某些精简/第三方固件缺失后，
+# luci-app-passwall 这类 Architecture: all 的包会被误判为 incompatible。
+ensure_opkg_common_arches() {
+  [ "$PKG_MGR" = "opkg" ] || return 0
+  local changed=0
+  if ! opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -qx 'all'; then
+    echo "arch all 1" >> /etc/opkg.conf
+    changed=1
+  fi
+  if ! opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -qx 'noarch'; then
+    echo "arch noarch 1" >> /etc/opkg.conf
+    changed=1
+  fi
+  [ "$changed" = "1" ] && info "已补齐 OPKG 通用架构: all/noarch"
+}
+ensure_opkg_common_arches
 
 if [ -r /etc/openwrt_release ]; then . /etc/openwrt_release; fi
 SYS_RELEASE="$DISTRIB_RELEASE"; SYS_DESC="$DISTRIB_DESCRIPTION"
@@ -1069,6 +1086,33 @@ find_pkg_url() {
   find_pkg_meta "$1" url
 }
 
+# 从 opkg 索引/远端 SF 索引读取 Depends 字段，供直链安装路径先装依赖。
+find_pkg_depends() {
+  local pkg="$1" idx deps sf_feed meta
+  for idx in /var/opkg-lists/iw_* /var/opkg-lists/*; do
+    [ -f "$idx" ] || continue
+    deps=$(awk -v p="$pkg" '
+      $1=="Package:" && $2==p {f=1; next}
+      f && $1=="Depends:" {sub(/^Depends:[[:space:]]*/, ""); print; exit}
+      f && $1=="Package:" {f=0}
+    ' "$idx" 2>/dev/null)
+    [ -n "$deps" ] && { echo "$deps"; return 0; }
+  done
+  if [ -n "$SF_BASE" ]; then
+    for sf_feed in passwall_luci passwall_packages passwall2; do
+      meta=$(curl -sL --max-time 10 "$SF_BASE/$sf_feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pkg" '
+        $1=="Package:" && $2==p {f=1; next}
+        f && $1=="Depends:" {sub(/^Depends:[[:space:]]*/, ""); print; exit}
+        f && $1=="Package:" {f=0}
+      ')
+      [ -n "$meta" ] && { echo "$meta"; return 0; }
+    done
+  fi
+}
+normalize_dep_names() {
+  tr ',' '\n' | sed 's/(.*)//g; s/^[[:space:]]*//; s/[[:space:]]*$//' | awk 'NF && $1 !~ /^kernel$/ {print $1}' | sort -u
+}
+
 # APK 主包也走 curl 预下载，这样和 IPK 一样能显示 100% 进度条。
 # SourceForge APK 文件名格式: 包名-版本.apk，例如 sing-box-1.13.21-r1.apk
 find_apk_url() {
@@ -1135,8 +1179,8 @@ apk_install() {
     if [ -z "$url" ] && ! opkg_preflight_installable "$pkg"; then
       return 2
     fi
-    deps=""
-    if [ -z "$url" ]; then
+    deps=$(find_pkg_depends "$pkg" | normalize_dep_names | grep -v "^$pkg$" || true)
+    if [ -z "$deps" ] && [ -z "$url" ]; then
       deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
     fi
     for dep in $deps; do total=$((total + 1)); done
