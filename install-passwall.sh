@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260906.2 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260906.3 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260906.2"
+VERSION="20260906.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1116,12 +1116,21 @@ opkg_preflight_installable() {
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
+    local url prog log=/tmp/opkg_install.log repo_ver
+    url=$(find_pkg_url "$pkg")
+    repo_ver=$(get_repo_version "$pkg")
     # 预解析依赖清单 (模拟安装), 用于显示包名级进度; 排除主包自身(后面单独处理)
     local total=0 cur=0 dep deps
-    if ! opkg_preflight_installable "$pkg"; then
+    # 如果 PassWall/SF 索引已被脚本手动兜底到 /var/opkg-lists，但 opkg 自身没有接收该 feed，
+    # `opkg install --noaction luci-app-passwall` 会误报 Unknown package。
+    # 此时只要 find_pkg_url 已经从索引/远端 Packages.gz 找到直链，就跳过包名预检，下载本地 ipk 后再对本地文件做真实依赖预检。
+    if [ -z "$url" ] && ! opkg_preflight_installable "$pkg"; then
       return 2
     fi
-    deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
+    deps=""
+    if [ -z "$url" ]; then
+      deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
+    fi
     for dep in $deps; do total=$((total + 1)); done
     [ "$total" = "0" ] && total=1
     cur=0
@@ -1145,9 +1154,6 @@ apk_install() {
     done
     printf "\r  [%s/%s] 完成             \n" "$total" "$total"
     # 主包: 优先 find_pkg_url 拿 URL 走 curl 带进度; 找不到则 opkg download(也带进度到 stderr)
-    local url prog log=/tmp/opkg_install.log repo_ver
-    url=$(find_pkg_url "$pkg")
-    repo_ver=$(get_repo_version "$pkg")
     if [ -n "$url" ]; then
       # 验证 URL 文件名版本 = 目标版本 (多源时 find_pkg_url 可能拿到旧源 URL, 下载旧版无意义)
       if [ -n "$repo_ver" ] && ! echo "$url" | grep -Fq "$repo_ver"; then
