@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260906.5 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260907.1 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260906.5"
+VERSION="20260907.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -249,6 +249,7 @@ arch_to_targets() {
   case "$1" in
     aarch64_cortex-a53)   echo "armvirt/64 bcm27xx/bcm2710 bcm4908/generic mediatek/mt7622 mvebu/cortexa53 sunxi/cortexa53" ;;
     aarch64_cortex-a72)   echo "bcm27xx/bcm2711 mvebu/cortexa72" ;;
+    aarch64_cortex-a76)   echo "bcm27xx/bcm2712" ;;
     aarch64_generic)      echo "octeontx/generic rockchip/armv8" ;;
     arc_archs)            echo "archs38/generic" ;;
     arm_arm1176jzf-s_vfp) echo "bcm27xx/bcm2708" ;;
@@ -288,6 +289,7 @@ apk_pkg_arch_from_target() {
   case "$1" in
     mediatek/filogic|mediatek/mt7622|bcm27xx/bcm2710|bcm4908/generic|mvebu/cortexa53|sunxi/cortexa53|armvirt/64) echo "aarch64_cortex-a53" ;;
     bcm27xx/bcm2711|mvebu/cortexa72) echo "aarch64_cortex-a72" ;;
+    bcm27xx/bcm2712) echo "aarch64_cortex-a76" ;;
     rockchip/armv8|octeontx/generic) echo "aarch64_generic" ;;
     *) echo "" ;;
   esac
@@ -446,7 +448,7 @@ SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
-    25.12) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12
+    25.12|snapshots) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12/snapshots
   esac
   SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
 else
@@ -1000,7 +1002,7 @@ find_pkg_meta() {
     fi
   done
   # 24.10/opkg 有时 opkg update 未刷新 SF 索引但本地旧索引仍存在；直接读 SF Packages.gz 参与比较。
-  if [ -n "$SF_BASE" ]; then
+  if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
     local sf_feed sf_meta sf_ver sf_fn
     for sf_feed in passwall_luci passwall_packages passwall2; do
       sf_meta=$(curl -sL --max-time 10 "$SF_BASE/$sf_feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pkg" '
@@ -1098,7 +1100,7 @@ find_pkg_depends() {
     ' "$idx" 2>/dev/null)
     [ -n "$deps" ] && { echo "$deps"; return 0; }
   done
-  if [ -n "$SF_BASE" ]; then
+  if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
     for sf_feed in passwall_luci passwall_packages passwall2; do
       meta=$(curl -sL --max-time 10 "$SF_BASE/$sf_feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pkg" '
         $1=="Package:" && $2==p {f=1; next}
@@ -1117,7 +1119,7 @@ normalize_dep_names() {
 # SourceForge APK 文件名格式: 包名-版本.apk，例如 sing-box-1.13.21-r1.apk
 find_apk_url() {
   local pkg="$1" ver="$2" feed url
-  [ -n "$SF_BASE" ] || return
+  [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ] || return
   [ -n "$ver" ] || ver=$(get_repo_version "$pkg")
   [ -n "$ver" ] || return
   for feed in passwall_luci passwall_packages passwall2; do
@@ -2459,7 +2461,7 @@ if [ "$INSTALL_OC" = "1" ]; then
         if [ "$PKG_MGR" = "opkg" ]; then
           opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
         else
-          apk add --upgrade --allow-untrusted $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
+          apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
         fi
         rm -f "$OC_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
