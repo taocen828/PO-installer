@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260907.2 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260907.3 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260907.2"
+VERSION="20260907.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -299,6 +299,7 @@ apk_pkg_arch_from_target() {
     mediatek/filogic|mediatek/mt7622|bcm27xx/bcm2710|bcm4908/generic|mvebu/cortexa53|sunxi/cortexa53|armvirt/64) echo "aarch64_cortex-a53" ;;
     bcm27xx/bcm2711|mvebu/cortexa72) echo "aarch64_cortex-a72" ;;
     bcm27xx/bcm2712) echo "aarch64_cortex-a76" ;;
+    sifiveu/generic|star64/generic) echo "riscv64" ;;
     rockchip/armv8|octeontx/generic) echo "aarch64_generic" ;;
     *) echo "" ;;
   esac
@@ -1294,6 +1295,13 @@ apk_install() {
       grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
       rm -f "$log"
     fi
+    if [ "$rc" != "0" ]; then
+      case "$pkg" in
+        luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
+          info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
+          ;;
+      esac
+    fi
     return $rc
   fi
   local log=/tmp/apk_add.log url prog repo_ver
@@ -1325,6 +1333,13 @@ apk_install() {
   fi
   grep -v "^WARNING.*opening" "$log" || true
   rm -f "$log"
+  if [ "$rc" != "0" ]; then
+    case "$pkg" in
+      luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
+        info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
+        ;;
+    esac
+  fi
   return $rc
 }
 
@@ -1899,6 +1914,7 @@ install_ssr_release() {
   info "获取 SSR Plus 官方 Release (fw876/helloworld)..."
   if ! download_ssr_release_pkg "$ext" "$pkgfile"; then
     err "SSR Plus Release 下载失败 (GitHub 直连+代理均失败)"
+    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
     return 1
   fi
   info "安装 SSR Plus $SSR_RELEASE_VER ($ext)..."
@@ -1942,8 +1958,10 @@ install_ssr_release() {
   fi
   if [ "$rc" = "2" ]; then
     err "SSR Plus 安装失败: 缺少依赖；OPKG 系统请确认 OpenWrt/openwrt.ai 依赖源可用"
+    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
   else
     err "SSR Plus 安装失败: 当前版本 ${newver:-未安装}，Release 版本 ${SSR_RELEASE_VER:-未知}"
+    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
     if [ "$PKG_MGR" = "apk" ]; then
       info "诊断: apk 已安装记录"
       apk list --installed '*ssr*' 2>/dev/null | grep -v WARNING || true
@@ -2170,6 +2188,7 @@ mihomo_arch_pattern() {
     i386*|386) echo 'mihomo-linux-386-v[0-9.]+\.gz' ;;
     mipsel*) echo 'mihomo-linux-mipsle-softfloat-v[0-9.]+\.gz' ;;
     mips*) echo 'mihomo-linux-mips-softfloat-v[0-9.]+\.gz' ;;
+    riscv64*) echo 'mihomo-linux-riscv64-v[0-9.]+\.gz' ;;
     *) echo '' ;;
   esac
 }
@@ -2202,6 +2221,7 @@ install_mihomo_core() {
   [ -z "$MIHOMO_VER" ] && MIHOMO_VER=$(echo "$url" | sed -n 's#.*/download/\([^/]*\)/.*#\1#p')
   if [ -z "$MIHOMO_VER" ] || [ -z "$url" ]; then
     err "无法获取 Clash Meta 内核下载地址 (GitHub 不可达或架构 $SYS_ARCH 无匹配资产)"
+    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
     return 1
   fi
   info "下载 Clash Meta 内核 $MIHOMO_VER ($SYS_ARCH)..."
@@ -2222,6 +2242,7 @@ install_mihomo_core() {
     fi
   else
     err "Clash Meta 内核下载失败（GitHub 通道不可达或资产无效）"
+    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
     return 1
   fi
 }
