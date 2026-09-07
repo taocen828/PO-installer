@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260907.1 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260907.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260907.1"
+VERSION="20260907.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -137,18 +137,27 @@ if ! command -v wget >/dev/null 2>&1 || ! wget --version >/dev/null 2>&1; then
     cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
     cat > /usr/bin/wget << 'WGETEOF'
 #!/bin/sh
-URL=""; OUT=""
+URL=""; OUT=""; OUT_DIR=""; TIMEOUT="60"
 while [ $# -gt 0 ]; do
   case "$1" in
-    -O) shift; OUT="$1";;
-    -q|-P|-c|-nc|-nv|-S|-s|--no-check-certificate) ;;
+    -O) shift; OUT="$1" ;;
+    -P) shift; OUT_DIR="$1" ;;
+    -T|--timeout) shift; [ "$1" != "" ] && TIMEOUT="$1" ;;
+    --timeout=*) TIMEOUT="${1#--timeout=}" ;;
+    -t|--tries) shift ;;
+    --tries=*) ;;
+    -q|-c|-nc|-nv|-S|-s|--spider|--no-check-certificate) ;;
     *) URL="$1";;
   esac
   shift
 done
 [ -z "$URL" ] && exit 1
+if [ -z "$OUT" ] && [ -n "$OUT_DIR" ]; then
+  mkdir -p "$OUT_DIR" 2>/dev/null || true
+  OUT="$OUT_DIR/${URL##*/}"
+fi
 [ -n "$OUT" ] && set -- -o "$OUT"
-exec curl -sL --max-time 60 "$@" "$URL"
+exec curl -sL --max-time "$TIMEOUT" "$@" "$URL"
 WGETEOF
     chmod +x /usr/bin/wget
     WGET_FIXED=1
@@ -775,6 +784,7 @@ else
       [ -f /etc/apk/repositories.d/distfeeds.list ] && cp /etc/apk/repositories.d/distfeeds.list /tmp/distfeeds.list.bak 2>/dev/null
       [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^/#/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
       [ -f /etc/apk/repositories ] && cp /etc/apk/repositories /tmp/apk.repositories.bak 2>/dev/null
+      [ "$APK_REPO_FILE" != "/etc/apk/repositories" ] && [ -f /etc/apk/repositories ] && sed -i 's/^/#/' /etc/apk/repositories 2>/dev/null
       { echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/luci/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
@@ -914,7 +924,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
         echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
       done
       apk update >/dev/null 2>&1 || true
-      ok "源配置完成 (SourceForge)"
+      APK_PW_INDEX_OK=1
+      if [ "$INSTALL_PW" = "1" ] && ! apk list luci-app-passwall 2>/dev/null | grep -v WARNING | grep -q '^luci-app-passwall-'; then
+        APK_PW_INDEX_OK=0
+        err "SourceForge APK 源缺少 luci-app-passwall"
+      fi
+      if [ "$INSTALL_PW2" = "1" ] && ! apk list luci-app-passwall2 2>/dev/null | grep -v WARNING | grep -q '^luci-app-passwall2-'; then
+        APK_PW_INDEX_OK=0
+        err "SourceForge APK 源缺少 luci-app-passwall2"
+      fi
+      [ "$APK_PW_INDEX_OK" = "1" ] && ok "源配置完成 (SourceForge)" || err "PassWall APK 源索引刷新失败或构建残缺"
     else
       err "PassWall 源不可用：SourceForge 无法连接"
     fi
