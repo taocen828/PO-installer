@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.21 (旧版 MIPS OPKG 自动更新 Xray 官方 mips32le 内核)
+# VERSION: 20260910.22 (第三方 SNAPSHOT 安装 PassWall 强制补完整 userspace 依赖源)
 #==============================================
-VERSION="20260910.21"
+VERSION="20260910.22"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -929,7 +929,11 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     #    此时只补当前系列的 userspace packages feed，不写 kmod/target 源。
     NEED_PW_USERSPACE_DEPS=0
     if [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
+      # 未标明发行版本的第三方 SNAPSHOT（如 MT7621 5.4.227）必须补全匹配系列 userspace 源；
+      # 它的 opkg list 可能从旧缓存显示“有包”，实际安装时却无法解析递归依赖。
+      [ "$SYS_RELEASE" = "SNAPSHOT" ] && NEED_PW_USERSPACE_DEPS=1
       opkg list coreutils-timeout 2>/dev/null | grep -q '^coreutils-timeout ' || NEED_PW_USERSPACE_DEPS=1
+      opkg list libyaml 2>/dev/null | grep -q '^libyaml ' || NEED_PW_USERSPACE_DEPS=1
       opkg list lyaml 2>/dev/null | grep -q '^lyaml ' || NEED_PW_USERSPACE_DEPS=1
     fi
     if [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
