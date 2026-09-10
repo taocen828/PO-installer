@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.22 (第三方 SNAPSHOT 安装 PassWall 强制补完整 userspace 依赖源)
+# VERSION: 20260910.23 (MIPS Xray 官方更新优先使用 xray_softfloat)
 #==============================================
-VERSION="20260910.22"
+VERSION="20260910.23"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1833,7 +1833,9 @@ update_xray_official_mips() {
   rm -f "$tmp" "$newbin"
   for u in $(gh_candidates "$url"); do
     curl -fL --connect-timeout 10 --max-time 180 -o "$tmp" "$u" 2>/dev/null || { rm -f "$tmp"; continue; }
-    unzip -p "$tmp" xray > "$newbin" 2>/dev/null || { rm -f "$tmp" "$newbin"; continue; }
+    # MT7621 等 mipsel_24kc 通常没有可用硬件 FPU；官方压缩包同时提供 xray_softfloat，
+    # 普通 xray 会因 FPU/ABI 不兼容无法运行，必须优先取 softfloat 版本。
+    unzip -p "$tmp" xray_softfloat > "$newbin" 2>/dev/null || unzip -p "$tmp" xray > "$newbin" 2>/dev/null || { rm -f "$tmp" "$newbin"; continue; }
     [ -s "$newbin" ] && break
   done
   if [ ! -s "$newbin" ]; then
