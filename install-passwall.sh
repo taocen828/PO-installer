@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.11 (补全禁用 passwall2 SourceForge feed，Web 刷新无超时)
+# VERSION: 20260910.12 (恢复常驻 PassWall 源；默认 netix 节点避免 SourceForge 超时)
 #==============================================
-VERSION="20260910.11"
+VERSION="20260910.12"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -490,6 +490,7 @@ sf_pick_node() {
     case "$SF_MIRROR" in
       downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads"; return ;;
       master)    echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master"; return ;;
+      netix|jaist|nchc|netcologne|pilotfiber|phoenixnap|versaweb|ixpeering|astuteinternet) echo "https://$SF_MIRROR.dl.sourceforge.net/project/openwrt-passwall-build||$SF_MIRROR"; return ;;
       *)         echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$SF_MIRROR|$SF_MIRROR"; return ;;
     esac
   fi
@@ -512,15 +513,21 @@ sf_pick_node() {
   esac
 }
 
+# SourceForge 节点选择：默认优先使用已验证更稳定的 netix；downloads/master 会被分流到
+# onboardcloud，在部分代理/Fake-IP 链路上 10 秒超时。可用 SF_MIRROR 覆盖。
+SF_MIRROR=${SF_MIRROR:-netix}
+
 # 实际下载索引并校验格式；不以 check_url/HTTP 状态码决定 SF_OK。
 sf_probe_index() {
   local path="$1" u q tmp
   tmp="/tmp/po_sf_index.$$"
   for u in \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=$SF_MIRROR" \
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path" \
     "https://master.dl.sourceforge.net/project/openwrt-passwall-build/$path" \
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=jaist" \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc"; do
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=netix"; do
     rm -f "$tmp"
     curl -sL --retry 1 --connect-timeout 10 --max-time 25 -o "$tmp" "$u" 2>/dev/null || true
     if [ "$PKG_MGR" = "opkg" ]; then
@@ -2752,19 +2759,6 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     eval "desc=\"\$OPT_DESC_$idx\""
     [ -n "$comp" ] && opt_pkginstall "$comp" "$desc"
   done
-fi
-
-#==============================================
-# 8. 收尾：避免 LuCI/iStore Web 刷新直连 SourceForge 超时
-#==============================================
-# 脚本安装时已通过实际索引校验和直链下载完成 PassWall 包；但 Web 管理页的 opkg update
-# 不继承本次终端代理，直连 SourceForge 常在 10 秒后 curl(28)。安装完成后禁用 SF feed，
-# 保留本地索引；下次运行脚本会重新探测/临时写入并更新，Web 刷新不再被 SF 阻塞。
-if [ "$PKG_MGR" = "opkg" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ] && [ -f /etc/opkg/customfeeds.conf ]; then
-  if grep -qE '^src/gz passwall(_|2)' /etc/opkg/customfeeds.conf 2>/dev/null; then
-    sed -i 's/^src\/gz \(passwall[_2][^ ]* \)/#src\/gz \1/' /etc/opkg/customfeeds.conf 2>/dev/null || true
-    ok "PassWall SourceForge 源已转为脚本专用（Web 刷新不再直连超时）"
-  fi
 fi
 
 #==============================================
