@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.23 (MIPS Xray 官方更新优先使用 xray_softfloat)
+# VERSION: 20260910.24 (MIPS 已装 Xray 跳过失效仓库包，直接更新官方 softfloat)
 #==============================================
-VERSION="20260910.23"
+VERSION="20260910.24"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1857,7 +1857,17 @@ update_xray_official_mips() {
 }
 
 # PassWall
-[ "$INSTALL_PW" = "1" ] && pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" && pkginstall "xray-core" "Xray 内核" && update_xray_official_mips
+if [ "$INSTALL_PW" = "1" ]; then
+  pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
+  # MIPS 的仓库 xray-core 常是陈旧/失效条目（可能声明 1.7.5 但 IPK 已 404）；
+  # 已安装时跳过该仓库更新，直接走下面的官方 mips32le softfloat。首次安装仍由 OPKG 提供基础包。
+  if [ "$PKG_MGR" = "opkg" ] && echo "$SYS_ARCH" | grep -q '^mipsel' && check_installed xray-core; then
+    info "MIPS 已跳过过期的仓库 Xray 更新，改用官方 mips32le softfloat"
+  else
+    pkginstall "xray-core" "Xray 内核" || true
+  fi
+  update_xray_official_mips
+fi
 
 # PassWall2
 # PassWall2（注意: 国内 immortalwrt 源不含 PassWall2，仅 SourceForge 有）
