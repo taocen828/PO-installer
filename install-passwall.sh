@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.26 (mipsel_24kc geoview 兜底直链下载并输出真实安装错误)
+# VERSION: 20260910.27 (替换空壳 kiddin9 geoview，使用 PassWall 完整同架构包)
 #==============================================
-VERSION="20260910.26"
+VERSION="20260910.27"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2742,32 +2742,31 @@ fi
 #==============================================
 # 6. Geo 数据库（仅 PassWall/PassWall2 需要）
 #==============================================
-# geoview 在旧 21.02 源缺失时，使用 kiddin9 latest 的同架构预编译包直装（依赖仅 libc）。
+# geoview 在 21.02 源缺失时，使用 PassWall 22.03 的同架构完整预编译包。
+# kiddin9 latest 的 1KB geoview 包仅含控制信息、不含 /usr/bin/geoview，会导致组件页显示“版本无”。
 install_geoview_fallback() {
   [ "$PKG_MGR" = "opkg" ] || return 1
-  local base="https://dl.openwrt.ai/latest/packages/$SYS_ARCH/kiddin9" meta fn url
+  local base="https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-22.03/$SYS_ARCH/passwall_packages" meta url
+  meta=""
+  # SourceForge 22.03 的 geoview 对 mipsel_24kc 是完整可运行包（约 3MB），仅依赖 libc。
   meta=$(curl -sL --connect-timeout 10 --max-time 30 "$base/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk '
     $1=="Package:" && $2=="geoview" {f=1; next}
     f && $1=="Filename:" {print $2; exit}
     f && $1=="Package:" {f=0}
   ')
-  # latest 索引有时 gzip 解压/代理链异常，但 mipsel_24kc 的当前包名已知且直链可验证。
-  if [ -z "$meta" ] && [ "$SYS_ARCH" = "mipsel_24kc" ]; then
-    meta="geoview_0.2.6-r5_mipsel_24kc.ipk"
-  fi
-  [ -n "$meta" ] || { err "kiddin9 源没有 geoview ($SYS_ARCH)"; return 1; }
+  [ -n "$meta" ] || { err "PassWall 源没有 geoview ($SYS_ARCH)"; return 1; }
   url="$base/$meta"
-  info "安装 geoview（kiddin9 最新预编译包）..."
-  if curl -fL --connect-timeout 10 --max-time 60 -o /tmp/geoview.ipk "$url"; then
+  info "安装 geoview（PassWall 同架构完整预编译包）..."
+  if curl -fL --connect-timeout 10 --max-time 120 -o /tmp/geoview.ipk "$url"; then
     opkg install /tmp/geoview.ipk --force-downgrade --force-overwrite --force-depends >/tmp/geoview_install.log 2>&1 || true
   else
     err "geoview 下载失败: $url"
   fi
-  if ! check_installed geoview; then
+  if ! command -v geoview >/dev/null 2>&1; then
     cat /tmp/geoview_install.log 2>/dev/null || true
   fi
   rm -f /tmp/geoview.ipk /tmp/geoview_install.log
-  check_installed geoview
+  command -v geoview >/dev/null 2>&1
 }
 
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
@@ -2777,12 +2776,12 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
     pkgupgrade "$pkg" "$pkg"
   done
-  if check_installed geoview || [ -n "$(get_repo_version geoview)" ]; then
+  if check_installed geoview && command -v geoview >/dev/null 2>&1; then
     pkgupgrade "geoview" "geoview"
   elif install_geoview_fallback; then
     ok "geoview $(get_version geoview) ✓"
   else
-    err "geoview 安装失败：当前架构没有可用预编译包"
+    err "geoview 安装失败：当前架构没有可用完整预编译包"
   fi
 fi
 
