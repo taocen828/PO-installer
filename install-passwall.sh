@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260907.3 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260910.1 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260907.3"
+VERSION="20260910.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -108,13 +108,18 @@ repair_router_self_network() {
   return 1
 }
 
-# 管道模式
-if [ ! -t 0 ] && [ -z "$0" -o "$0" = "sh" -o "$0" = "-sh" ]; then
-  echo "检测到管道模式执行，正在保存脚本..."
-  cat > /tmp/install-passwall.sh
-  echo "脚本已保存到 /tmp/install-passwall.sh"
-  echo "请执行: sh /tmp/install-passwall.sh"
-  exit 0
+# 管道模式: stdin 不是 TTY, 且 $0 为 sh/ash/bash/dash/-sh/"" 时说明被管道/heredoc 传入，
+# 此时交互式 read 不可用, 先保存到 /tmp 提示手动执行。
+if [ ! -t 0 ]; then
+  case "$0" in
+    sh|ash|bash|dash|-sh|"")
+      echo "检测到管道模式执行，正在保存脚本..."
+      cat > /tmp/install-passwall.sh
+      echo "脚本已保存到 /tmp/install-passwall.sh"
+      echo "请执行: sh /tmp/install-passwall.sh"
+      exit 0
+      ;;
+  esac
 fi
 
 echo ""
@@ -477,11 +482,10 @@ sf_pick_node() {
       *)         echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$SF_MIRROR|$SF_MIRROR"; return ;;
     esac
   fi
-  for mirror in downloads master jaist nchc netix netcologne pilotfiber phoenixnap versaweb ixpeering astuteinternet ghfast; do
+  for mirror in downloads master jaist nchc netix netcologne pilotfiber phoenixnap versaweb ixpeering astuteinternet; do
     case "$mirror" in
       downloads) prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
       master)    prefix="https://master.dl.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
-      ghfast)    prefix="https://ghfast.top/https://master.dl.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
       *)         prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath?use_mirror=$mirror" ;;
     esac
     spd=$(curl -sL --max-time 6 -r 0-262143 -o /dev/null -w "%{speed_download}" "$url" 2>/dev/null)
@@ -493,7 +497,6 @@ sf_pick_node() {
   case "$best" in
     ""|downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads" ;;
     master)       echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master" ;;
-    ghfast)       echo "https://ghfast.top/https://master.dl.sourceforge.net/project/openwrt-passwall-build||ghfast" ;;
     *)            echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$best|$best" ;;
   esac
 }
@@ -1100,7 +1103,8 @@ version_newer() {
     top=$(printf '%s\n%s\n' "$an" "$bn" | sort -V | tail -1)
     [ "$top" = "$an" ] && return 0 || return 1
   fi
-  return 0
+  # sort -V 不可用时保守处理: 不判定为可升级
+  return 1
 }
 
 # 从 opkg 索引找包下载 URL（用于带进度下载）
@@ -1699,16 +1703,11 @@ fi
 #   luci-app-ssr-plus-196-r7.apk (APK)
 # opkg 下仍保留 openwrt.ai/kiddin9 作为依赖源；APK 下直接安装 release apk。
 get_ssr_latest_json() {
-  local api="https://api.github.com/repos/fw876/helloworld/releases/latest" u
-  for u in "$api" \
-           "https://ghfast.top/$api" \
-           "https://ghproxy.net/$api" \
-           "https://ghproxy.cc/$api"; do
-    curl -sL --max-time 12 "$u" 2>/dev/null | grep -q '"tag_name"' || continue
-    curl -sL --max-time 20 "$u" 2>/dev/null
-    return 0
-  done
-  return 1
+  local api="https://api.github.com/repos/fw876/helloworld/releases/latest" json
+  json=$(curl -sL --max-time 20 "$api" 2>/dev/null) || return 1
+  echo "$json" | grep -q '"tag_name"' || return 1
+  echo "$json"
+  return 0
 }
 get_ssr_asset_url() {
   local ext="$1" json pat
@@ -1734,11 +1733,7 @@ download_ssr_release_pkg() {
   [ -n "$url" ] || return 1
   SSR_RELEASE_URL="$url"
   SSR_RELEASE_VER=$(ssr_ver_from_url "$url" "$ext")
-  for u in "$url" \
-           "https://ghfast.top/$url" \
-           "https://ghproxy.net/$url" \
-           "https://ghproxy.cc/$url" \
-           "https://gh.ddlc.top/$url"; do
+  for u in "$url"; do
     curl -fL -# --max-time 90 -o "$out" "$u" 2>/dev/null
     if [ -s "$out" ]; then
       case "$ext" in
@@ -1754,23 +1749,18 @@ download_ssr_release_pkg() {
 ensure_lua_neturl_file() {
   # SSR Plus client.lua uses `require "url"`; lua-neturl installs exactly /usr/lib/lua/url.lua.
   # On APK 25.12, apk may print OK but not register/extract lua-neturl, so repair the single Lua module directly.
-  local dst="/usr/lib/lua/url.lua" url u
+  local dst="/usr/lib/lua/url.lua" url
   [ -s "$dst" ] && return 0
   mkdir -p /usr/lib/lua 2>/dev/null || true
   url="https://raw.githubusercontent.com/golgote/neturl/master/lib/net/url.lua"
-  for u in "$url" \
-           "https://ghfast.top/$url" \
-           "https://ghproxy.net/$url" \
-           "https://ghproxy.cc/$url"; do
-    curl -fsL --max-time 20 -o "$dst.tmp" "$u" 2>/dev/null || { rm -f "$dst.tmp"; continue; }
-    if grep -q 'return M' "$dst.tmp" 2>/dev/null && grep -q 'function M.parse' "$dst.tmp" 2>/dev/null; then
-      mv "$dst.tmp" "$dst"
-      chmod 644 "$dst" 2>/dev/null || true
-      ok "lua-neturl 模块已修复 (/usr/lib/lua/url.lua)"
-      return 0
-    fi
-    rm -f "$dst.tmp"
-  done
+  curl -fsL --max-time 20 -o "$dst.tmp" "$url" 2>/dev/null || { rm -f "$dst.tmp"; return 1; }
+  if grep -q 'return M' "$dst.tmp" 2>/dev/null && grep -q 'function M.parse' "$dst.tmp" 2>/dev/null; then
+    mv "$dst.tmp" "$dst"
+    chmod 644 "$dst" 2>/dev/null || true
+    ok "lua-neturl 模块已修复 (/usr/lib/lua/url.lua)"
+    return 0
+  fi
+  rm -f "$dst.tmp"
   err "lua-neturl 模块修复失败：无法下载 url.lua"
   return 1
 }
@@ -1995,35 +1985,28 @@ if [ "$INSTALL_SSR" = "1" ]; then
 fi
 
 # OpenClash
-# 下载函数: 直连 → ghfast.top → ghproxy.net (gh-proxy.com 已挂 403, 移除)
+# 下载函数: 官方直连；带代理则 curl 自动走代理
 # 返回 0=成功 1=全部失败
 # 验证下载内容: ipk 为 gzip/ar, apk 为 APK v3 adb(ADBd), gz 为 gzip
 # (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
 # 注意: OpenWrt 无 od/xxd; 用 dd 提取头部字节比较 (busybox 核心命令必有)
 #       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar/adb magic 4字节纯 ASCII 无 NUL
 dl_with_mirror() {
-  local url="$1" out="$2" u magic
-  # 多通道: 直连 + 多个国内 GitHub 代理 (gh-proxy.com 已挂 403 移除)
-  for u in "$url" \
-           "https://ghfast.top/$url" \
-           "https://ghproxy.net/$url" \
-           "https://ghproxy.cc/$url" \
-           "https://gh.ddlc.top/$url"; do
-    curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
-    if [ -s "$out" ]; then
-      case "$out" in
-        *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
-                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-        *.apk)  magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "ADBd" ] && return 0 ;;
-        *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "!<ar" ] && return 0
-                magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
-                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-      esac
-    fi
-    rm -f "$out"
-  done
+  local url="$1" out="$2" magic
+  curl -fL -# --max-time 60 -o "$out" "$url" 2>/dev/null
+  if [ -s "$out" ]; then
+    case "$out" in
+      *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
+              [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+      *.apk)  magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
+              [ "$magic" = "ADBd" ] && return 0 ;;
+      *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
+              [ "$magic" = "!<ar" ] && return 0
+              magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
+              [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+    esac
+  fi
+  rm -f "$out"
   return 1
 }
 
@@ -2047,17 +2030,11 @@ agh_arch_name() {
   esac
 }
 get_agh_latest_json() {
-  local api="https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest" u
-  for u in "$api" \
-           "https://ghfast.top/$api" \
-           "https://ghproxy.net/$api" \
-           "https://ghproxy.cc/$api" \
-           "https://gh.ddlc.top/$api"; do
-    curl -sL --max-time 12 "$u" 2>/dev/null | grep -q '"tag_name"' || continue
-    curl -sL --max-time 20 "$u" 2>/dev/null
-    return 0
-  done
-  return 1
+  local api="https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest" json
+  json=$(curl -sL --max-time 20 "$api" 2>/dev/null) || return 1
+  echo "$json" | grep -q '"tag_name"' || return 1
+  echo "$json"
+  return 0
 }
 get_agh_latest_ver() {
   get_agh_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
@@ -2193,15 +2170,11 @@ mihomo_arch_pattern() {
   esac
 }
 get_mihomo_latest_json() {
-  local api="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" u
-  for u in "$api" \
-           "https://ghfast.top/$api" \
-           "https://ghproxy.net/$api"; do
-    curl -sL --max-time 10 "$u" 2>/dev/null | grep -q '"tag_name"' || continue
-    curl -sL --max-time 20 "$u" 2>/dev/null
-    return 0
-  done
-  return 1
+  local api="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" json
+  json=$(curl -sL --max-time 20 "$api" 2>/dev/null) || return 1
+  echo "$json" | grep -q '"tag_name"' || return 1
+  echo "$json"
+  return 0
 }
 get_mihomo_latest_ver() {
   get_mihomo_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
@@ -2249,15 +2222,9 @@ install_mihomo_core() {
 
 # 获取 OpenClash 最新版本 (GitHub API → 代理重试)
 get_oc_latest() {
-  local api="https://api.github.com/repos/vernesong/OpenClash/releases/latest" u r
-  for u in "$api" \
-           "https://ghfast.top/$api" \
-           "https://ghproxy.net/$api" \
-           "https://ghproxy.cc/$api" \
-           "https://gh.ddlc.top/$api"; do
-    r=$(curl -sL --max-time 10 "$u" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
-    [ -n "$r" ] && { echo "$r"; return 0; }
-  done
+  local api="https://api.github.com/repos/vernesong/OpenClash/releases/latest" r
+  r=$(curl -sL --max-time 20 "$api" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+  [ -n "$r" ] && { echo "$r"; return 0; }
   return 1
 }
 if [ "$INSTALL_AGH" = "1" ]; then
@@ -2423,17 +2390,7 @@ install_istore() {
   local run="/tmp/istore-reinstall.run" url u
   url="https://github.com/linkease/openwrt-app-actions/raw/main/applications/luci-app-systools/root/usr/share/systools/istore-reinstall.run"
   info "下载 iStore 官方安装脚本..."
-  for u in "$url" \
-           "https://ghfast.top/$url" \
-           "https://ghproxy.net/$url" \
-           "https://ghproxy.cc/$url" \
-           "https://gh.ddlc.top/$url"; do
-    curl -fsL --max-time 60 -o "$run" "$u" 2>/dev/null || { rm -f "$run"; continue; }
-    grep -q "ISTORE_REPO=https://istore.istoreos.com/repo/all/store" "$run" 2>/dev/null && \
-      grep -q "luci-app-store" "$run" 2>/dev/null && \
-      grep -q "/tmp/is-opkg install" "$run" 2>/dev/null && break
-    rm -f "$run"
-  done
+  curl -fsL --max-time 60 -o "$run" "$url" 2>/dev/null || { rm -f "$run"; }
   if [ -s "$run" ]; then
     chmod 755 "$run"
     info "执行 iStore 官方安装脚本..."
@@ -2490,9 +2447,9 @@ if [ "$INSTALL_OC" = "1" ]; then
   elif [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
     info "OpenClash 更新: $OC_VER → $OC_LATEST..."
     OC_EXT="ipk"; [ "$PKG_MGR" = "apk" ] && OC_EXT="apk"
-    OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 10 | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
+    OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 20 | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
     if [ -z "$OC_URL" ]; then
-      OC_URL=$(curl -sL --max-time 10 "https://ghfast.top/https://api.github.com/repos/vernesong/OpenClash/releases/latest" 2>/dev/null | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
+      err "无法获取 OpenClash 下载地址 (GitHub API 不可达)"
     fi
     if [ -n "$OC_URL" ]; then
       info "下载 OpenClash $OC_LATEST ($OC_EXT)..."
@@ -2561,7 +2518,7 @@ if [ "$INSTALL_OC" = "1" ]; then
     else
       ok "Clash 内核已安装 (跳过下载)"
     fi
-    # 获取最新版本用于对比 (直连 → ghfast → ghproxy)
+    # 获取最新版本用于对比 (官方 API)
     MIHOMO_VER=$(get_mihomo_latest_ver)
     # 版本可解析且落后于最新 → 自动升级，不再询问
     if [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ] && [ "$INSTALLED_MIHOMO" != "$MIHOMO_VER" ]; then
