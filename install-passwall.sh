@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.6 (修复 iStoreOS compatfeeds.conf 追加时缺少换行)
+# VERSION: 20260910.7 (OPKG 合并 iStoreOS/系统源刷新，避免重复 opkg update)
 #==============================================
-VERSION="20260910.6"
+VERSION="20260910.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -832,9 +832,10 @@ if [ "$SYS_SOURCE_OK" = "1" ]; then
       : > /etc/opkg/compatfeeds.conf
     fi
     grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
+    # 不在这里单独执行 opkg update；后面的统一刷新会一次性处理系统源、compat 和插件源。
     rm -f /var/opkg-lists/istore_compat 2>/dev/null || true
-    opkg update >/dev/null 2>&1 || true
-    ok "iStoreOS 软件源已刷新（商店源 + 系统源）"
+    # iStoreOS 的系统源/compat 已在前面统一刷新流程中处理，不再单独刷新。
+    ok "iStoreOS 软件源已修复（等待统一刷新）"
   fi
 else
   err "系统源不可用，保留原系统源，仅追加 OpenWrt 镜像源..."
@@ -948,8 +949,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
         err "SSR Plus 源不可用或无 luci-app-ssr-plus ($SSR_BASE)"
       fi
     fi
-    # 强制刷新相关索引；否则 24.10/opkg 可能继续使用旧 /var/opkg-lists 缓存，导致检测不到新版本。
-    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* /var/opkg-lists/openwrt_ai_kiddin9 2>/dev/null || true
+    # SourceForge/immortalwrt 索引已由实际下载校验或国内源探测验证；统一 opkg update 只刷新一次。
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
     PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
