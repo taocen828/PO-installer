@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.17 (SNAPSHOT 依赖直接下载本地 IPK，绕过 OPKG 索引未落盘)
+# VERSION: 20260910.18 (补齐 libyaml，再安装 lyaml；阿里云缺索引回退官方源)
 #==============================================
-VERSION="20260910.17"
+VERSION="20260910.18"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1027,17 +1027,29 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     # OW_USE/packages/<arch>/packages 下载 IPK 并本地安装，不以 opkg list 的缓存为唯一依据。
     if [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       PW_DEP_READY=1
-      for pw_dep in coreutils-timeout lyaml; do
+      # 顺序必须先 libyaml，再 lyaml。阿里云部分历史索引缺 libyaml 时，回退官方同版本源。
+      for pw_dep in coreutils-timeout libyaml lyaml; do
         if opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
           continue
         fi
         pw_dep_meta=""
+        pw_dep_base="$OW_USE/packages/$SYS_ARCH/packages"
         if [ -n "$OW_USE" ]; then
-          pw_dep_meta=$(curl -sL --max-time 20 "$OW_USE/packages/$SYS_ARCH/packages/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pw_dep" '
+          pw_dep_meta=$(curl -sL --max-time 20 "$pw_dep_base/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pw_dep" '
             $1=="Package:" && $2==p {f=1; next}
             f && $1=="Filename:" {print $2; exit}
             f && $1=="Package:" {f=0}
           ')
+        fi
+        # 阿里云 21.02 的 Packages.gz 曾缺少 libyaml 条目；当前镜像找不到时改查官方同版本。
+        if [ -z "$pw_dep_meta" ] && [ -n "$OW_VER" ]; then
+          pw_dep_base="https://downloads.openwrt.org/releases/$OW_VER/packages/$SYS_ARCH/packages"
+          pw_dep_meta=$(curl -sL --max-time 20 "$pw_dep_base/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pw_dep" '
+            $1=="Package:" && $2==p {f=1; next}
+            f && $1=="Filename:" {print $2; exit}
+            f && $1=="Package:" {f=0}
+          ')
+          [ -n "$pw_dep_meta" ] && OW_DEP_BASE="$pw_dep_base"
         fi
         if [ -z "$pw_dep_meta" ]; then
           err "PassWall 必需依赖源中仍找不到 $pw_dep，停止主程序安装（不会继续卸载）"
@@ -1045,7 +1057,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
           continue
         fi
         info "预装 PassWall 依赖: $pw_dep"
-        pw_dep_url="$OW_USE/packages/$SYS_ARCH/packages/$pw_dep_meta"
+        pw_dep_url="$pw_dep_base/$pw_dep_meta"
         if curl -fL --connect-timeout 10 --max-time 60 -o "/tmp/pkg_$pw_dep.ipk" "$pw_dep_url"; then
           opkg install "/tmp/pkg_$pw_dep.ipk" --force-downgrade --force-overwrite --force-depends >/tmp/opkg_pw_dep.log 2>&1 || true
         else
