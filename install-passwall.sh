@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.24 (MIPS 已装 Xray 跳过失效仓库包，直接更新官方 softfloat)
+# VERSION: 20260910.25 (旧版 MIPS geoview 从 kiddin9 同架构预编译包安装)
 #==============================================
-VERSION="20260910.24"
+VERSION="20260910.25"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2742,6 +2742,25 @@ fi
 #==============================================
 # 6. Geo 数据库（仅 PassWall/PassWall2 需要）
 #==============================================
+# geoview 在旧 21.02 源缺失时，使用 kiddin9 latest 的同架构预编译包直装（依赖仅 libc）。
+install_geoview_fallback() {
+  [ "$PKG_MGR" = "opkg" ] || return 1
+  local base="https://dl.openwrt.ai/latest/packages/$SYS_ARCH/kiddin9" meta fn url
+  meta=$(curl -sL --connect-timeout 10 --max-time 30 "$base/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk '
+    $1=="Package:" && $2=="geoview" {f=1; next}
+    f && $1=="Filename:" {print $2; exit}
+    f && $1=="Package:" {f=0}
+  ')
+  [ -n "$meta" ] || return 1
+  url="$base/$meta"
+  info "安装 geoview（kiddin9 最新预编译包）..."
+  if curl -fL --connect-timeout 10 --max-time 60 -o /tmp/geoview.ipk "$url"; then
+    opkg install /tmp/geoview.ipk --force-downgrade --force-overwrite --force-depends >/tmp/geoview_install.log 2>&1 || true
+  fi
+  rm -f /tmp/geoview.ipk /tmp/geoview_install.log
+  check_installed geoview
+}
+
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "Geo 数据库"
   # geoview 并非所有旧版/第三方架构都有预编译包（21.02 mipsel_24kc 的 SF、官方、ImmortalWrt 均无）。
@@ -2751,8 +2770,10 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   done
   if check_installed geoview || [ -n "$(get_repo_version geoview)" ]; then
     pkgupgrade "geoview" "geoview"
+  elif install_geoview_fallback; then
+    ok "geoview $(get_version geoview) ✓"
   else
-    info "跳过 geoview：当前架构/源无预编译包（不影响 PassWall）"
+    err "geoview 安装失败：当前架构没有可用预编译包"
   fi
 fi
 
