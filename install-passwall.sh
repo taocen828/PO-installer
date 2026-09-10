@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.20 (无 geoview 预编译包时跳过，不误报 PassWall 安装失败)
+# VERSION: 20260910.21 (旧版 MIPS OPKG 自动更新 Xray 官方 mips32le 内核)
 #==============================================
-VERSION="20260910.20"
+VERSION="20260910.21"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1803,18 +1803,65 @@ pkgupgrade() {
 uninstall_selected_only
 force_reinstall_selected
 
+# 旧版 MIPS OPKG 源的 xray-core 常长期停留在 1.x；官方 Release 仍提供 mips32le 二进制。
+# 只替换独立 /usr/bin/xray，不改 LuCI、配置、内核模块；下载/解压/执行校验都成功才覆盖旧文件。
+update_xray_official_mips() {
+  [ "$PKG_MGR" = "opkg" ] || return 0
+  case "$SYS_ARCH" in mipsel_*|mipsel) ;; *) return 0;; esac
+  command -v curl >/dev/null 2>&1 || { info "跳过 Xray 官方更新：缺少 curl"; return 0; }
+  command -v unzip >/dev/null 2>&1 || { info "跳过 Xray 官方更新：缺少 unzip"; return 0; }
+  local api json tag url u cur new bin=/usr/bin/xray tmp=/tmp/xray-mips.zip newbin=/tmp/xray-new
+  cur=$($bin version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+  for u in $(gh_candidates "$api"); do
+    json=$(curl -sL --connect-timeout 10 --max-time 25 "$u" 2>/dev/null) || continue
+    tag=$(printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | cut -d'"' -f4)
+    url=$(printf '%s' "$json" | grep -oE 'https://[^" ]*/Xray-linux-mips32le\.zip' | head -1)
+    [ -n "$tag" ] && [ -n "$url" ] && break
+  done
+  [ -n "$url" ] || { info "跳过 Xray 官方更新：无法获取 mips32le Release"; return 0; }
+  new=${tag#v}
+  if [ -n "$cur" ] && ! version_newer "$new" "$cur"; then
+    ok "Xray 官方版 ($cur) 已是最新版"
+    return 0
+  fi
+  info "更新 Xray 官方 mips32le: ${cur:-未知} → $new"
+  rm -f "$tmp" "$newbin"
+  for u in $(gh_candidates "$url"); do
+    curl -fL --connect-timeout 10 --max-time 180 -o "$tmp" "$u" 2>/dev/null || { rm -f "$tmp"; continue; }
+    unzip -p "$tmp" xray > "$newbin" 2>/dev/null || { rm -f "$tmp" "$newbin"; continue; }
+    [ -s "$newbin" ] && break
+  done
+  if [ ! -s "$newbin" ]; then
+    err "Xray 官方 mips32le 下载或解压失败，保留当前版本 ${cur:-未知}"
+    rm -f "$tmp" "$newbin"
+    return 0
+  fi
+  chmod 755 "$newbin"
+  if ! "$newbin" version >/tmp/xray_version.log 2>&1; then
+    err "Xray 官方二进制无法运行，保留当前版本 ${cur:-未知}"
+    rm -f "$tmp" "$newbin" /tmp/xray_version.log
+    return 0
+  fi
+  mv "$bin" "$bin.po-bak" 2>/dev/null || true
+  mv "$newbin" "$bin" 2>/dev/null || { [ -f "$bin.po-bak" ] && mv "$bin.po-bak" "$bin"; err "Xray 替换失败，已恢复旧版本"; rm -f "$tmp" /tmp/xray_version.log; return 0; }
+  new=$($bin version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [ -n "$new" ] && ok "Xray 官方内核已更新 ($new)" || err "Xray 更新后版本读取失败"
+  rm -f "$tmp" /tmp/xray_version.log
+}
+
 # PassWall
-[ "$INSTALL_PW" = "1" ] && pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" && pkginstall "xray-core" "Xray 内核"
+[ "$INSTALL_PW" = "1" ] && pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" && pkginstall "xray-core" "Xray 内核" && update_xray_official_mips
 
 # PassWall2
 # PassWall2（注意: 国内 immortalwrt 源不含 PassWall2，仅 SourceForge 有）
 # SF 某些版本/架构构建残缺(架构不兼容)时, 明确提示改用 PassWall 经典版
 if [ "$INSTALL_PW2" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
-    pkginstall "luci-app-passwall2" "PassWall2"; pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"; [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+    pkginstall "luci-app-passwall2" "PassWall2"; pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"; [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核" && update_xray_official_mips
   else
     info "跳过 PassWall2: 当前 PassWall 源为国内 immortalwrt 镜像，不含 PassWall2 包（PassWall 经典版不受影响）"
-    [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核"
+    [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核" && update_xray_official_mips
   fi
 fi
 
