@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.16 (预装 SNAPSHOT PassWall 依赖；依赖失败不再先卸载主程序)
+# VERSION: 20260910.17 (SNAPSHOT 依赖直接下载本地 IPK，绕过 OPKG 索引未落盘)
 #==============================================
-VERSION="20260910.16"
+VERSION="20260910.17"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1023,26 +1023,41 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       err "代理插件源不可用：PassWall/SSR Plus 源均未成功配置（OpenClash 不受影响）"
     fi
     # 在卸载/安装主程序前，先把 PassWall 已知的基础用户态依赖安装到位。
-    # 这类第三方 SNAPSHOT 的自带源可能有 PassWall 之外的包，但缺 coreutils-timeout/lyaml；
-    # 先处理可避免本地 all 架构 IPK 的 --noaction 被依赖解析误报为 incompatible。
+    # 第三方 SNAPSHOT 的 opkg update 可能不落盘新追加 feed 的索引；缺包时直接从已验证的
+    # OW_USE/packages/<arch>/packages 下载 IPK 并本地安装，不以 opkg list 的缓存为唯一依据。
     if [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       PW_DEP_READY=1
       for pw_dep in coreutils-timeout lyaml; do
-        if ! opkg list "$pw_dep" 2>/dev/null | grep -q "^$pw_dep "; then
+        if opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
+          continue
+        fi
+        pw_dep_meta=""
+        if [ -n "$OW_USE" ]; then
+          pw_dep_meta=$(curl -sL --max-time 20 "$OW_USE/packages/$SYS_ARCH/packages/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | awk -v p="$pw_dep" '
+            $1=="Package:" && $2==p {f=1; next}
+            f && $1=="Filename:" {print $2; exit}
+            f && $1=="Package:" {f=0}
+          ')
+        fi
+        if [ -z "$pw_dep_meta" ]; then
           err "PassWall 必需依赖源中仍找不到 $pw_dep，停止主程序安装（不会继续卸载）"
           PW_DEP_READY=0
           continue
         fi
-        if ! opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
-          info "预装 PassWall 依赖: $pw_dep"
-          opkg install "$pw_dep" --force-downgrade --force-overwrite --force-depends >/tmp/opkg_pw_dep.log 2>&1 || true
-          if ! opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
-            err "PassWall 依赖安装失败: $pw_dep"
-            cat /tmp/opkg_pw_dep.log 2>/dev/null || true
-            PW_DEP_READY=0
-          fi
-          rm -f /tmp/opkg_pw_dep.log
+        info "预装 PassWall 依赖: $pw_dep"
+        pw_dep_url="$OW_USE/packages/$SYS_ARCH/packages/$pw_dep_meta"
+        if curl -fL --connect-timeout 10 --max-time 60 -o "/tmp/pkg_$pw_dep.ipk" "$pw_dep_url"; then
+          opkg install "/tmp/pkg_$pw_dep.ipk" --force-downgrade --force-overwrite --force-depends >/tmp/opkg_pw_dep.log 2>&1 || true
+        else
+          err "下载 PassWall 依赖失败: $pw_dep"
+          PW_DEP_READY=0
         fi
+        if ! opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
+          err "PassWall 依赖安装失败: $pw_dep"
+          cat /tmp/opkg_pw_dep.log 2>/dev/null || true
+          PW_DEP_READY=0
+        fi
+        rm -f "/tmp/pkg_$pw_dep.ipk" /tmp/opkg_pw_dep.log
       done
       [ "$PW_DEP_READY" = "1" ] && ok "PassWall 基础依赖已就绪" || err "PassWall 基础依赖未就绪，后续主程序将跳过"
     fi
