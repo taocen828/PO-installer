@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.27 (替换空壳 kiddin9 geoview，使用 PassWall 完整同架构包)
+# VERSION: 20260910.28 (清理 OpenClash 无效代理源路径；修复 PassWall2 MIPS Xray 更新短路)
 #==============================================
-VERSION="20260910.27"
+VERSION="20260910.28"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -905,10 +905,9 @@ fi
 echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
   info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
 
-# 添加 PassWall 源（装 PassWall/PassWall2/OpenClash 时都需要）
-# OpenClash 也需要 immortalwrt 源作为 GitHub 不可达时的降级通道
+# 添加代理插件源（仅 PassWall/PassWall2/SSR Plus；OpenClash 使用 GitHub 下载和自身降级逻辑）
 # 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INSTALL_SSR" = "1" ]; then
+if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     # 清旧声明（幂等）: 仅过滤代理插件源；保留已修复的 openwrt_ 系统依赖源 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
@@ -1874,10 +1873,19 @@ fi
 # SF 某些版本/架构构建残缺(架构不兼容)时, 明确提示改用 PassWall 经典版
 if [ "$INSTALL_PW2" = "1" ]; then
   if [ "$SF_OK" = "1" ]; then
-    pkginstall "luci-app-passwall2" "PassWall2"; pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"; [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核" && update_xray_official_mips
+    pkginstall "luci-app-passwall2" "PassWall2"
+    pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"
   else
     info "跳过 PassWall2: 当前 PassWall 源为国内 immortalwrt 镜像，不含 PassWall2 包（PassWall 经典版不受影响）"
-    [ "$INSTALL_PW" != "1" ] && pkginstall "xray-core" "Xray 内核" && update_xray_official_mips
+  fi
+  # 与 PassWall 路径保持一致：旧 MIPS 仓库 Xray 失败或过期时，仍继续走官方 softfloat。
+  if [ "$INSTALL_PW" != "1" ]; then
+    if [ "$PKG_MGR" = "opkg" ] && echo "$SYS_ARCH" | grep -q '^mipsel' && check_installed xray-core; then
+      info "MIPS 已跳过过期的仓库 Xray 更新，改用官方 mips32le softfloat"
+    else
+      pkginstall "xray-core" "Xray 内核" || true
+    fi
+    update_xray_official_mips
   fi
 fi
 
