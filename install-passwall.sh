@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.12 (恢复常驻 PassWall 源；默认 netix 节点避免 SourceForge 超时)
+# VERSION: 20260910.13 (PassWall SF 源仅脚本使用，防止 Web 刷新随机 CDN 超时)
 #==============================================
-VERSION="20260910.12"
+VERSION="20260910.13"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -512,10 +512,6 @@ sf_pick_node() {
     *)            echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$best|$best" ;;
   esac
 }
-
-# SourceForge 节点选择：默认优先使用已验证更稳定的 netix；downloads/master 会被分流到
-# onboardcloud，在部分代理/Fake-IP 链路上 10 秒超时。可用 SF_MIRROR 覆盖。
-SF_MIRROR=${SF_MIRROR:-netix}
 
 # 实际下载索引并校验格式；不以 check_url/HTTP 状态码决定 SF_OK。
 sf_probe_index() {
@@ -2759,6 +2755,19 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     eval "desc=\"\$OPT_DESC_$idx\""
     [ -n "$comp" ] && opt_pkginstall "$comp" "$desc"
   done
+fi
+
+#==============================================
+# 8. SourceForge 源收尾（避免 Web 软件源刷新随机超时）
+#==============================================
+# SourceForge 的 dl 子域仍会被动态重定向到不同 CDN；路由 Web 的 opkg update 可能刚好分到
+# 不可达节点而 curl(28)。安装过程已用实际索引校验/下载完成，结束后将 SF feed 设为脚本专用。
+# 下次选择 PassWall/PassWall2 时脚本会先清理旧声明、重新探测并临时写入，无需用户手工恢复。
+if [ "$PKG_MGR" = "opkg" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ] && [ -f /etc/opkg/customfeeds.conf ]; then
+  if grep -qE '^src/gz passwall(_|2)' /etc/opkg/customfeeds.conf 2>/dev/null; then
+    sed -i 's/^src\/gz \(passwall[_2][^ ]* \)/#src\/gz \1/' /etc/opkg/customfeeds.conf 2>/dev/null || true
+    ok "PassWall 源已设为脚本专用（Web 软件源刷新不会访问 SourceForge）"
+  fi
 fi
 
 #==============================================
