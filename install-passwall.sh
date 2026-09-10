@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.8 (iStoreOS 源正常时显示正常，修复时才提示已修复)
+# VERSION: 20260910.9 (系统源正常时跳过 OpenWrt 镜像依赖源，减少 OPKG 刷新时间)
 #==============================================
-VERSION="20260910.8"
+VERSION="20260910.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -911,10 +911,10 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       awk '/^src\/gz |^src / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -Fxq "$url" && return 0
       echo "src/gz $name $url" >> /etc/opkg/customfeeds.conf
     }
-    # 0) OpenWrt 官方/镜像 packages 源：即使系统默认源“看起来可用”，也补充一组已探测匹配的 base/luci/packages/routing/telephony
-    #    R3S/第三方固件常见问题是默认源缺 coreutils-base64/ruby/chinadns-ng 等依赖；只加 PassWall 源会导致主包下载成功但依赖解析失败。
-    #    不覆盖原 distfeeds，仅补充普通 packages 源；targets(kmod) 只有精确存在时才加，避免内核模块不匹配。
-    if [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+    # 0) OpenWrt 官方/镜像 packages 源：仅在系统源不可用时追加。
+    # 系统源正常时不再追加六个 Tsinghua feed，避免 opkg update 重复下载索引并拖慢安装；
+    # 也避免 Kwrt/iStoreOS 混入版本系列不匹配的官方包。
+    if [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
       [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && add_opkg_feed_once "openwrt_core" "$OW_USE/targets/$SYS_TARGET/packages"
       add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
       add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
@@ -922,6 +922,14 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
       add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "已追加匹配的 OpenWrt 依赖源 ($OW_USE / $SYS_ARCH)"
+    elif [ "$SYS_SOURCE_OK" = "1" ]; then
+      # 清理旧版写入 customfeeds 的 OpenWrt 镜像源；不碰 distfeeds.conf 中的系统源。
+      if [ -f /etc/opkg/customfeeds.conf ]; then
+        grep -v -e '^src/gz openwrt_' -e '^src/gz iw_' /etc/opkg/customfeeds.conf > /tmp/customfeeds.clean 2>/dev/null || true
+        cat /tmp/customfeeds.clean > /etc/opkg/customfeeds.conf 2>/dev/null || true
+        rm -f /tmp/customfeeds.clean
+      fi
+      info "系统源正常，不追加 OpenWrt 镜像依赖源（减少 opkg 刷新时间）"
     else
       info "未追加 OpenWrt 依赖源：未探测到匹配版本；将仅使用系统默认源"
     fi
