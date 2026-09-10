@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.3 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260910.4 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260910.3"
+VERSION="20260910.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -772,6 +772,17 @@ fi
 
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
+  # iStoreOS 的 iStore 商店依赖独立的 compat 源；系统源正常不代表商店源正常。
+  # 若 compatfeeds.conf 被覆盖/清空，商店会显示“软件源错误”。
+  if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos" && [ "$PKG_MGR" = "opkg" ]; then
+    if ! grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null; then
+      echo "src/gz istore_compat https://istore.istoreos.com/repo/all/compat" >> /etc/opkg/compatfeeds.conf 2>/dev/null || true
+      info "已修复 iStoreOS compatfeeds.conf（istore_compat 源）"
+    fi
+    rm -f /var/opkg-lists/istore_compat 2>/dev/null || true
+    opkg update >/dev/null 2>&1 || true
+    ok "iStoreOS 软件源已刷新（商店源 + 系统源）"
+  fi
 else
   err "系统源不可用，配置 OpenWrt 镜像源..."
   if [ "$PKG_MGR" = "opkg" ]; then
