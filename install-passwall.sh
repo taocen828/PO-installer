@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.13 (PassWall SF 源仅脚本使用，防止 Web 刷新随机 CDN 超时)
+# VERSION: 20260910.14 (SNAPSHOT MIPS 源探测先快速选 userspace 源，避免 manifest 扫描卡住)
 #==============================================
-VERSION="20260910.13"
+VERSION="20260910.14"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -394,8 +394,18 @@ probe_ow_ver() {
   if [ "$PKG_MGR" != "opkg" ] && [ "$(check_url $MIR/snapshots/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="snapshots"; return 0
   fi
-  # 3) 遍历候选平台 × 系列链，manifest 内核精确匹配（覆盖所有内核所有硬件）
-  #    候选平台: 本地检测 target 优先，然后架构映射全列表
+  # 3) SNAPSHOT/第三方固件常没有可用的精确 release 信息。先只探测每个系列的最新
+  #    userspace Packages.gz，避免在低性能 MIPS 上按多个 target 逐个下载 manifest 而卡数分钟。
+  #    这一步只用于普通用户态包；kmod 源仍在后面按目标平台单独严格验证。
+  for s in $SERIES_CHAIN; do
+    for v in $(list_series_vers "$MIR" "$s" | head -1); do
+      if [ "$(check_url "$MIR/releases/$v/packages/$SYS_ARCH/base/$PKG_FILE")" = "200" ]; then
+        OW_VER="$v"; return 0
+      fi
+    done
+  done
+  # 4) 仍无可用 userspace 源时，才遍历候选平台 × 系列链，以内核 manifest 精确匹配。
+  #    候选平台: 本地检测 target 优先，然后架构映射全列表。
   local cands="$SYS_TARGET $ARCH_TARGETS"
   for t in $cands; do
     [ -z "$t" ] && continue
