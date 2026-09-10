@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.25 (旧版 MIPS geoview 从 kiddin9 同架构预编译包安装)
+# VERSION: 20260910.26 (mipsel_24kc geoview 兜底直链下载并输出真实安装错误)
 #==============================================
-VERSION="20260910.25"
+VERSION="20260910.26"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2751,11 +2751,20 @@ install_geoview_fallback() {
     f && $1=="Filename:" {print $2; exit}
     f && $1=="Package:" {f=0}
   ')
-  [ -n "$meta" ] || return 1
+  # latest 索引有时 gzip 解压/代理链异常，但 mipsel_24kc 的当前包名已知且直链可验证。
+  if [ -z "$meta" ] && [ "$SYS_ARCH" = "mipsel_24kc" ]; then
+    meta="geoview_0.2.6-r5_mipsel_24kc.ipk"
+  fi
+  [ -n "$meta" ] || { err "kiddin9 源没有 geoview ($SYS_ARCH)"; return 1; }
   url="$base/$meta"
   info "安装 geoview（kiddin9 最新预编译包）..."
   if curl -fL --connect-timeout 10 --max-time 60 -o /tmp/geoview.ipk "$url"; then
     opkg install /tmp/geoview.ipk --force-downgrade --force-overwrite --force-depends >/tmp/geoview_install.log 2>&1 || true
+  else
+    err "geoview 下载失败: $url"
+  fi
+  if ! check_installed geoview; then
+    cat /tmp/geoview_install.log 2>/dev/null || true
   fi
   rm -f /tmp/geoview.ipk /tmp/geoview_install.log
   check_installed geoview
