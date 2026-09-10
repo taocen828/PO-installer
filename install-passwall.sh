@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.28 (清理 OpenClash 无效代理源路径；修复 PassWall2 MIPS Xray 更新短路)
+# VERSION: 20260910.29 (修 sf_probe_index APK 404 误判；收尾改用非 sed -i；OpenClash-only 恢复 iw 降级源)
 #==============================================
-VERSION="20260910.28"
+VERSION="20260910.29"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -535,11 +535,12 @@ sf_probe_index() {
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc" \
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=netix"; do
     rm -f "$tmp"
-    curl -sL --retry 1 --connect-timeout 10 --max-time 25 -o "$tmp" "$u" 2>/dev/null || true
+    curl -fsL --retry 1 --connect-timeout 10 --max-time 25 -o "$tmp" "$u" 2>/dev/null || true
     if [ "$PKG_MGR" = "opkg" ]; then
       gzip -t "$tmp" 2>/dev/null && { rm -f "$tmp"; echo "$u"; return 0; }
     else
-      [ -s "$tmp" ] && { rm -f "$tmp"; echo "$u"; return 0; }
+      # APK 索引 packages.adb 是 ADB 格式，前 4 字节魔数 ADBd；404 HTML 错误页不能算成功。
+      [ "$(dd if="$tmp" bs=1 count=4 2>/dev/null)" = "ADBd" ] && { rm -f "$tmp"; echo "$u"; return 0; }
     fi
   done
   rm -f "$tmp"
@@ -905,9 +906,10 @@ fi
 echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
   info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
 
-# 添加代理插件源（仅 PassWall/PassWall2/SSR Plus；OpenClash 使用 GitHub 下载和自身降级逻辑）
+# 添加代理插件源（PassWall/PassWall2/SSR Plus/OpenClash 均有需要；OpenClash 用 GitHub 下载，
+# 但 GitHub 不可达时降级走 immortalwrt 源 opkg 安装，所以 OpenClash-only 也必须写入 iw 源）
 # 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_SSR" = "1" ]; then
+if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     # 清旧声明（幂等）: 仅过滤代理插件源；保留已修复的 openwrt_ 系统依赖源 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
@@ -1041,10 +1043,13 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_SSR" = "1" ]; then
     fi
     rm -f /tmp/po_opkg_update.log 2>/dev/null || true
   else
-    # APK 系统: PassWall/PassWall2 才需要 SF；SSR Plus 走 fw876/helloworld Release，不写 SF 源，避免多余 apk update/404 探测。
+    # APK 系统: PassWall/PassWall2 才需要 SF；SSR Plus 走 fw876/helloworld Release、OpenClash 走 GitHub，
+    # 两者都不写 SF 源，避免多余 apk update/404 探测。
     if [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_OC" = "0" ] && [ "$INSTALL_SSR" = "1" ]; then
       ok "源配置完成 (SSR Plus 使用 fw876/helloworld GitHub Release 直装)"
-    elif [ "$SF_OK" = "1" ]; then
+    elif [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_OC" = "1" ]; then
+      ok "源配置完成 (OpenClash 使用 GitHub Release 直装，不写代理源)"
+    elif [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' "$APK_REPO_FILE" 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
@@ -2905,7 +2910,9 @@ fi
 # 下次选择 PassWall/PassWall2 时脚本会先清理旧声明、重新探测并临时写入，无需用户手工恢复。
 if [ "$PKG_MGR" = "opkg" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ] && [ -f /etc/opkg/customfeeds.conf ]; then
   if grep -qE '^src/gz passwall(_|2)' /etc/opkg/customfeeds.conf 2>/dev/null; then
-    sed -i 's/^src\/gz \(passwall[_2][^ ]* \)/#src\/gz \1/' /etc/opkg/customfeeds.conf 2>/dev/null || true
+    # 不用 sed -i：busybox sed -i 会破坏符号链接（与开头清理逻辑保持一致），用 sed 输出到临时文件再 cat 回写。
+    sed 's/^src\/gz \(passwall[_2][^ ]* \)/#src\/gz \1/' /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-sf 2>/dev/null && cat /tmp/customfeeds.po-sf > /etc/opkg/customfeeds.conf 2>/dev/null
+    rm -f /tmp/customfeeds.po-sf
     ok "PassWall 源已设为脚本专用（Web 软件源刷新不会访问 SourceForge）"
   fi
 fi
