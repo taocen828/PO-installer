@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.14 (SNAPSHOT MIPS 源探测先快速选 userspace 源，避免 manifest 扫描卡住)
+# VERSION: 20260910.15 (SNAPSHOT 缺 PassWall 依赖时补 packages 用户态源)
 #==============================================
-VERSION="20260910.14"
+VERSION="20260910.15"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -924,9 +924,14 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       awk '/^src\/gz |^src / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -Fxq "$url" && return 0
       echo "src/gz $name $url" >> /etc/opkg/customfeeds.conf
     }
-    # 0) OpenWrt 官方/镜像 packages 源：仅在系统源不可用时追加。
-    # 系统源正常时不再追加六个 Tsinghua feed，避免 opkg update 重复下载索引并拖慢安装；
-    # 也避免 Kwrt/iStoreOS 混入版本系列不匹配的官方包。
+    # 0) OpenWrt 官方/镜像 packages 源：系统源异常时追加完整依赖源。
+    #    对第三方 SNAPSHOT：即使系统源能更新，也可能缺 PassWall 必需的 coreutils-timeout/lyaml；
+    #    此时只补当前系列的 userspace packages feed，不写 kmod/target 源。
+    NEED_PW_USERSPACE_DEPS=0
+    if [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
+      opkg list coreutils-timeout 2>/dev/null | grep -q '^coreutils-timeout ' || NEED_PW_USERSPACE_DEPS=1
+      opkg list lyaml 2>/dev/null | grep -q '^lyaml ' || NEED_PW_USERSPACE_DEPS=1
+    fi
     if [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
       [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && add_opkg_feed_once "openwrt_core" "$OW_USE/targets/$SYS_TARGET/packages"
       add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
@@ -935,8 +940,11 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
       add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "已追加匹配的 OpenWrt 依赖源 ($OW_USE / $SYS_ARCH)"
+    elif [ "$NEED_PW_USERSPACE_DEPS" = "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+      add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
+      info "系统源缺少 PassWall 必需依赖，已补充 userspace packages 源 ($OW_USE / $SYS_ARCH)"
     elif [ "$SYS_SOURCE_OK" = "1" ]; then
-      # 清理旧版写入 customfeeds 的 OpenWrt 镜像源；不碰 distfeeds.conf 中的系统源。
+      # 系统源完整时清理旧版残留；不碰 distfeeds.conf 中的系统源。
       if [ -f /etc/opkg/customfeeds.conf ]; then
         grep -v -e '^src/gz openwrt_' -e '^src/gz iw_' /etc/opkg/customfeeds.conf > /tmp/customfeeds.clean 2>/dev/null || true
         cat /tmp/customfeeds.clean > /etc/opkg/customfeeds.conf 2>/dev/null || true
