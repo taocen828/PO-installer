@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.4 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260910.5 (延后代理源探测、实际索引校验、iStoreOS保留系统源)
 #==============================================
-VERSION="20260910.4"
+VERSION="20260910.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -366,6 +366,8 @@ fi
 #==============================================
 # 2. 源连通性检测
 #==============================================
+# SourceForge/ImmortalWrt 等代理插件源必须等用户选择后再探测；
+# 这里保留系统源/固件镜像的基础探测，避免 OpenClash/iStore 单独安装访问 SF。
 hdr "源连通性检测"
 SF_OK=0; OW_OK=0; OW_USE=""
 
@@ -465,6 +467,7 @@ else
   fi
 fi
 
+probe_proxy_sources() {
 # PassWall 源版本：跟随探测到的精确版本（22.03/23.05/24.10/25.12）
 # 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
 SF_PW_VER="$PW_VER"
@@ -509,13 +512,40 @@ sf_pick_node() {
   esac
 }
 
-SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
-SF_TEST="$SF_PREFIX/$SF_PATH/passwall_luci/Packages.gz"
-[ "$PKG_MGR" != "opkg" ] && SF_TEST="$SF_PREFIX/$SF_PATH/passwall_luci/packages.adb"
+# 实际下载索引并校验格式；不以 check_url/HTTP 状态码决定 SF_OK。
+sf_probe_index() {
+  local path="$1" u q tmp
+  tmp="/tmp/po_sf_index.$$"
+  for u in \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path" \
+    "https://master.dl.sourceforge.net/project/openwrt-passwall-build/$path" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=jaist" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc"; do
+    rm -f "$tmp"
+    curl -sL --retry 1 --connect-timeout 10 --max-time 25 -o "$tmp" "$u" 2>/dev/null || true
+    if [ "$PKG_MGR" = "opkg" ]; then
+      gzip -t "$tmp" 2>/dev/null && { rm -f "$tmp"; echo "$u"; return 0; }
+    else
+      [ -s "$tmp" ] && { rm -f "$tmp"; echo "$u"; return 0; }
+    fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
 SF_MIRROR_QUERY=""; SF_MIRROR_LABEL="default"
-if [ "$(check_url $SF_TEST)" = "200" ]; then
+SF_PROBE_URL=""
+if [ "$PKG_MGR" = "opkg" ]; then
+  SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
+else
+  SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/packages.adb")
+fi
+if [ -n "$SF_PROBE_URL" ]; then
+  SF_PREFIX="${SF_PROBE_URL%%/$SF_PATH/*}"
+  SF_MIRROR_QUERY=""
+  case "$SF_PROBE_URL" in *\?*) SF_MIRROR_QUERY="?${SF_PROBE_URL#*\?}";; esac
   SF_OK=1
-  ok "PassWall 源 ✓ (SourceForge)"
+  ok "PassWall 源 ✓ (SourceForge 实际索引校验通过)"
   if [ -n "$SF_MIRROR" ]; then
     info "使用手动指定 SourceForge 节点: $SF_MIRROR"
     SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
@@ -570,6 +600,9 @@ if [ "$PKG_MGR" = "opkg" ]; then
   done
   [ "$IW_OK" = "0" ] && info "immortalwrt 镜像不可用（仅 SF 源）"
 fi
+
+
+}
 
 # OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
 OW_OK=0; TARGET_OK=0
@@ -678,6 +711,11 @@ case "$MAIN_CHOICE" in
     ;;
 esac
 
+# 用户选择完成后才探测 SourceForge/ImmortalWrt；OpenClash/iStore 单独安装不访问代理插件源。
+if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ] || [ "$INSTALL_SSR" = "1" ]; }; then
+  probe_proxy_sources
+fi
+
 if [ "$UNINSTALL_ONLY" = "1" ]; then
   echo ""
   echo "卸载配置："
@@ -758,13 +796,19 @@ hdr "软件源配置"
 info "快速检测系统默认源..."
 SYS_SOURCE_OK=0
 if [ "$PKG_MGR" = "opkg" ]; then
-  # 不跑完整 opkg update 做“检测”：24.10 上会下载/验签所有源，慢则几分钟。
-  # 只抽样检测 distfeeds/customfeeds 里的 base/luci Packages.gz URL，真正 update 后面添加 PassWall 源后只跑一次。
-  for src in $(awk '/^src\/gz / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -E '/(base|luci)$' | head -2); do
+  # 早期版本可能注释过系统源；先恢复，避免 iStoreOS 商店被旧状态卡住。
+  if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos"; then
+    sed -i 's/^#\(src\/gz \)/\1/' /etc/opkg/distfeeds.conf 2>/dev/null || true
+    mkdir -p /etc/opkg
+    grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || echo 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
+  fi
+  # 抽样检测任意未注释的 src/gz；不能只匹配 /base|/luci，iStoreOS 使用 /repo/all/compat。
+  for src in $(awk '!/^#/ && /^src\/gz / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | head -5); do
+    [ -n "$src" ] || continue
     [ "$(check_url "$src/Packages.gz")" = "200" ] && SYS_SOURCE_OK=1 && break
   done
-  # 如果本机源文件格式特殊但前面已探测到官方镜像可用，也视为系统源可用，避免阻塞。
-  [ "$SYS_SOURCE_OK" = "0" ] && [ "$OW_OK" = "1" ] && SYS_SOURCE_OK=1
+  # 不因外部 best-effort 镜像可用而把版本不匹配的官方源当作系统源。
+  # iStoreOS compat 源可单独证明商店源可用，但仍需保留其自带 distfeeds。
 else
   # APK update 相对较快；保留真实验证。
   apk update >/dev/null 2>&1 && SYS_SOURCE_OK=1
@@ -773,8 +817,8 @@ fi
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
   # iStoreOS 的 iStore 商店依赖独立的 compat 源；系统源正常不代表商店源正常。
-  # 若 compatfeeds.conf 被覆盖/清空，商店会显示“软件源错误”。
   if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos" && [ "$PKG_MGR" = "opkg" ]; then
+    mkdir -p /etc/opkg
     if ! grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null; then
       echo "src/gz istore_compat https://istore.istoreos.com/repo/all/compat" >> /etc/opkg/compatfeeds.conf 2>/dev/null || true
       info "已修复 iStoreOS compatfeeds.conf（istore_compat 源）"
@@ -784,12 +828,11 @@ if [ "$SYS_SOURCE_OK" = "1" ]; then
     ok "iStoreOS 软件源已刷新（商店源 + 系统源）"
   fi
 else
-  err "系统源不可用，配置 OpenWrt 镜像源..."
+  err "系统源不可用，保留原系统源，仅追加 OpenWrt 镜像源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     if [ -n "$OW_USE" ]; then
-      # 备份后注释系统源（可恢复）
-      cp /etc/opkg/distfeeds.conf /tmp/distfeeds.conf.bak 2>/dev/null
-      [ -f /etc/opkg/distfeeds.conf ] && sed -i 's/^/#/' /etc/opkg/distfeeds.conf
+      # 绝不注释原系统源：iStoreOS/第三方固件需要保留自带 feeds；只往 customfeeds 追加兜底源。
+      cp /etc/opkg/distfeeds.conf /tmp/distfeeds.conf.bak 2>/dev/null || true
       { echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
         if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
           echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages"
@@ -806,10 +849,7 @@ else
     fi
   else
     if [ -n "$OW_USE" ]; then
-      [ -f /etc/apk/repositories.d/distfeeds.list ] && cp /etc/apk/repositories.d/distfeeds.list /tmp/distfeeds.list.bak 2>/dev/null
-      [ -f /etc/apk/repositories.d/distfeeds.list ] && sed -i 's/^/#/' /etc/apk/repositories.d/distfeeds.list 2>/dev/null
-      [ -f /etc/apk/repositories ] && cp /etc/apk/repositories /tmp/apk.repositories.bak 2>/dev/null
-      [ "$APK_REPO_FILE" != "/etc/apk/repositories" ] && [ -f /etc/apk/repositories ] && sed -i 's/^/#/' /etc/apk/repositories 2>/dev/null
+      # 绝不注释原 APK 系统源；只追加兜底源，避免 iStore/系统源状态被破坏。
       { echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/luci/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
