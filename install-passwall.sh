@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.9 (系统源正常时跳过 OpenWrt 镜像依赖源，减少 OPKG 刷新时间)
+# VERSION: 20260910.10 (PassWall 安装后禁用 SF feed，防止 Web OPKG 刷新超时)
 #==============================================
-VERSION="20260910.9"
+VERSION="20260910.10"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2755,7 +2755,20 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
 fi
 
 #==============================================
-# 8. 刷新 LuCI
+# 8. 收尾：避免 LuCI/iStore Web 刷新直连 SourceForge 超时
+#==============================================
+# 脚本安装时已通过实际索引校验和直链下载完成 PassWall 包；但 Web 管理页的 opkg update
+# 不继承本次终端代理，直连 SourceForge 常在 10 秒后 curl(28)。安装完成后禁用 SF feed，
+# 保留本地索引；下次运行脚本会重新探测/临时写入并更新，Web 刷新不再被 SF 阻塞。
+if [ "$PKG_MGR" = "opkg" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ] && [ -f /etc/opkg/customfeeds.conf ]; then
+  if grep -q '^src/gz passwall_' /etc/opkg/customfeeds.conf 2>/dev/null; then
+    sed -i 's/^src\/gz \(passwall_[^ ]* \)/#src\/gz \1/' /etc/opkg/customfeeds.conf 2>/dev/null || true
+    ok "PassWall SourceForge 源已转为脚本专用（Web 刷新不再直连超时）"
+  fi
+fi
+
+#==============================================
+# 9. 刷新 LuCI
 #==============================================
 if command -v luci-reload >/dev/null 2>&1; then
   luci-reload 2>/dev/null || true
