@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.7 (OPKG 合并 iStoreOS/系统源刷新，避免重复 opkg update)
+# VERSION: 20260910.8 (iStoreOS 源正常时显示正常，修复时才提示已修复)
 #==============================================
-VERSION="20260910.7"
+VERSION="20260910.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -825,17 +825,23 @@ if [ "$SYS_SOURCE_OK" = "1" ]; then
   # iStoreOS 的 iStore 商店依赖独立的 compat 源；系统源正常不代表商店源正常。
   if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos" && [ "$PKG_MGR" = "opkg" ]; then
     mkdir -p /etc/opkg
+    istore_feed_changed=0
     if [ -f /etc/opkg/compatfeeds.conf ]; then
       last_char=$(tail -c 1 /etc/opkg/compatfeeds.conf 2>/dev/null | tr -d '\n' 2>/dev/null)
-      [ -n "$last_char" ] && printf '\n' >> /etc/opkg/compatfeeds.conf
+      [ -n "$last_char" ] && printf '\n' >> /etc/opkg/compatfeeds.conf && istore_feed_changed=1
     else
       : > /etc/opkg/compatfeeds.conf
+      istore_feed_changed=1
     fi
-    grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
-    # 不在这里单独执行 opkg update；后面的统一刷新会一次性处理系统源、compat 和插件源。
-    rm -f /var/opkg-lists/istore_compat 2>/dev/null || true
-    # iStoreOS 的系统源/compat 已在前面统一刷新流程中处理，不再单独刷新。
-    ok "iStoreOS 软件源已修复（等待统一刷新）"
+    if ! grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null; then
+      printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
+      istore_feed_changed=1
+    fi
+    if [ "$istore_feed_changed" = "1" ]; then
+      ok "iStoreOS 软件源配置已修复"
+    else
+      ok "iStoreOS 软件源配置正常"
+    fi
   fi
 else
   err "系统源不可用，保留原系统源，仅追加 OpenWrt 镜像源..."
