@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.2 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260910.3 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260910.2"
+VERSION="20260910.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -37,6 +37,14 @@ check_url() {
     fi
   fi
   echo "$code"
+}
+
+# GitHub 下载候选：有用户代理时只走官方地址；无代理时再走公开代理兜底。
+gh_candidates() {
+  local url="$1"
+  printf '%s\n' "$url"
+  [ -n "$http_proxy$https_proxy$HTTP_PROXY$HTTPS_PROXY" ] && return 0
+  printf '%s\n' "https://ghfast.top/$url" "https://ghproxy.net/$url" "https://ghproxy.cc/$url" "https://gh.ddlc.top/$url"
 }
 
 # 修复“电脑可上网，但 SSH 到路由器后路由器自身 ping 不通”的常见问题。
@@ -1705,11 +1713,14 @@ fi
 #   luci-app-ssr-plus-196-r7.apk (APK)
 # opkg 下仍保留 openwrt.ai/kiddin9 作为依赖源；APK 下直接安装 release apk。
 get_ssr_latest_json() {
-  local api="https://api.github.com/repos/fw876/helloworld/releases/latest" json
-  json=$(curl -sL --max-time 20 "$api" 2>/dev/null) || return 1
-  echo "$json" | grep -q '"tag_name"' || return 1
-  echo "$json"
-  return 0
+  local api="https://api.github.com/repos/fw876/helloworld/releases/latest" u json
+  for u in $(gh_candidates "$api"); do
+    json=$(curl -sL --max-time 20 "$u" 2>/dev/null) || continue
+    echo "$json" | grep -q '"tag_name"' || continue
+    echo "$json"
+    return 0
+  done
+  return 1
 }
 get_ssr_asset_url() {
   local ext="$1" json pat
@@ -1735,7 +1746,7 @@ download_ssr_release_pkg() {
   [ -n "$url" ] || return 1
   SSR_RELEASE_URL="$url"
   SSR_RELEASE_VER=$(ssr_ver_from_url "$url" "$ext")
-  for u in "$url"; do
+  for u in $(gh_candidates "$url"); do
     curl -fL -# --max-time 90 -o "$out" "$u" 2>/dev/null
     if [ -s "$out" ]; then
       case "$ext" in
@@ -1755,14 +1766,16 @@ ensure_lua_neturl_file() {
   [ -s "$dst" ] && return 0
   mkdir -p /usr/lib/lua 2>/dev/null || true
   url="https://raw.githubusercontent.com/golgote/neturl/master/lib/net/url.lua"
-  curl -fsL --max-time 20 -o "$dst.tmp" "$url" 2>/dev/null || { rm -f "$dst.tmp"; return 1; }
-  if grep -q 'return M' "$dst.tmp" 2>/dev/null && grep -q 'function M.parse' "$dst.tmp" 2>/dev/null; then
-    mv "$dst.tmp" "$dst"
-    chmod 644 "$dst" 2>/dev/null || true
-    ok "lua-neturl 模块已修复 (/usr/lib/lua/url.lua)"
-    return 0
-  fi
-  rm -f "$dst.tmp"
+  for u in $(gh_candidates "$url"); do
+    curl -fsL --max-time 20 -o "$dst.tmp" "$u" 2>/dev/null || { rm -f "$dst.tmp"; continue; }
+    if grep -q 'return M' "$dst.tmp" 2>/dev/null && grep -q 'function M.parse' "$dst.tmp" 2>/dev/null; then
+      mv "$dst.tmp" "$dst"
+      chmod 644 "$dst" 2>/dev/null || true
+      ok "lua-neturl 模块已修复 (/usr/lib/lua/url.lua)"
+      return 0
+    fi
+    rm -f "$dst.tmp"
+  done
   err "lua-neturl 模块修复失败：无法下载 url.lua"
   return 1
 }
@@ -1994,21 +2007,23 @@ fi
 # 注意: OpenWrt 无 od/xxd; 用 dd 提取头部字节比较 (busybox 核心命令必有)
 #       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar/adb magic 4字节纯 ASCII 无 NUL
 dl_with_mirror() {
-  local url="$1" out="$2" magic
-  curl -fL -# --max-time 60 -o "$out" "$url" 2>/dev/null
-  if [ -s "$out" ]; then
-    case "$out" in
-      *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
-              [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-      *.apk)  magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-              [ "$magic" = "ADBd" ] && return 0 ;;
-      *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-              [ "$magic" = "!<ar" ] && return 0
-              magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
-              [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-    esac
-  fi
-  rm -f "$out"
+  local url="$1" out="$2" u magic
+  for u in $(gh_candidates "$url"); do
+    curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
+    if [ -s "$out" ]; then
+      case "$out" in
+        *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
+                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+        *.apk)  magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
+                [ "$magic" = "ADBd" ] && return 0 ;;
+        *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
+                [ "$magic" = "!<ar" ] && return 0
+                magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
+                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+      esac
+    fi
+    rm -f "$out"
+  done
   return 1
 }
 
@@ -2032,11 +2047,14 @@ agh_arch_name() {
   esac
 }
 get_agh_latest_json() {
-  local api="https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest" json
-  json=$(curl -sL --max-time 20 "$api" 2>/dev/null) || return 1
-  echo "$json" | grep -q '"tag_name"' || return 1
-  echo "$json"
-  return 0
+  local api="https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest" u json
+  for u in $(gh_candidates "$api"); do
+    json=$(curl -sL --max-time 20 "$u" 2>/dev/null) || continue
+    echo "$json" | grep -q '"tag_name"' || continue
+    echo "$json"
+    return 0
+  done
+  return 1
 }
 get_agh_latest_ver() {
   get_agh_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
@@ -2172,11 +2190,14 @@ mihomo_arch_pattern() {
   esac
 }
 get_mihomo_latest_json() {
-  local api="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" json
-  json=$(curl -sL --max-time 20 "$api" 2>/dev/null) || return 1
-  echo "$json" | grep -q '"tag_name"' || return 1
-  echo "$json"
-  return 0
+  local api="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" u json
+  for u in $(gh_candidates "$api"); do
+    json=$(curl -sL --max-time 20 "$u" 2>/dev/null) || continue
+    echo "$json" | grep -q '"tag_name"' || continue
+    echo "$json"
+    return 0
+  done
+  return 1
 }
 get_mihomo_latest_ver() {
   get_mihomo_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
@@ -2224,9 +2245,11 @@ install_mihomo_core() {
 
 # 获取 OpenClash 最新版本 (GitHub API → 代理重试)
 get_oc_latest() {
-  local api="https://api.github.com/repos/vernesong/OpenClash/releases/latest" r
-  r=$(curl -sL --max-time 20 "$api" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
-  [ -n "$r" ] && { echo "$r"; return 0; }
+  local api="https://api.github.com/repos/vernesong/OpenClash/releases/latest" u r
+  for u in $(gh_candidates "$api"); do
+    r=$(curl -sL --max-time 20 "$u" 2>/dev/null | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+    [ -n "$r" ] && { echo "$r"; return 0; }
+  done
   return 1
 }
 if [ "$INSTALL_AGH" = "1" ]; then
@@ -2392,7 +2415,14 @@ install_istore() {
   local run="/tmp/istore-reinstall.run" url u
   url="https://github.com/linkease/openwrt-app-actions/raw/main/applications/luci-app-systools/root/usr/share/systools/istore-reinstall.run"
   info "下载 iStore 官方安装脚本..."
-  curl -fsL --max-time 60 -o "$run" "$url" 2>/dev/null || { rm -f "$run"; }
+  rm -f "$run"
+  for u in $(gh_candidates "$url"); do
+    curl -fsL --max-time 60 -o "$run" "$u" 2>/dev/null || { rm -f "$run"; continue; }
+    grep -q "ISTORE_REPO=https://istore.istoreos.com/repo/all/store" "$run" 2>/dev/null && \
+      grep -q "luci-app-store" "$run" 2>/dev/null && \
+      grep -q "/tmp/is-opkg install" "$run" 2>/dev/null && break
+    rm -f "$run"
+  done
   if [ -s "$run" ]; then
     chmod 755 "$run"
     info "执行 iStore 官方安装脚本..."
@@ -2449,10 +2479,11 @@ if [ "$INSTALL_OC" = "1" ]; then
   elif [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
     info "OpenClash 更新: $OC_VER → $OC_LATEST..."
     OC_EXT="ipk"; [ "$PKG_MGR" = "apk" ] && OC_EXT="apk"
-    OC_URL=$(curl -sL "https://api.github.com/repos/vernesong/OpenClash/releases/latest" --max-time 20 | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
-    if [ -z "$OC_URL" ]; then
-      err "无法获取 OpenClash 下载地址 (GitHub API 不可达)"
-    fi
+    OC_URL=""
+    for OC_API_URL in $(gh_candidates "https://api.github.com/repos/vernesong/OpenClash/releases/latest"); do
+      OC_URL=$(curl -sL --max-time 20 "$OC_API_URL" | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
+      [ -n "$OC_URL" ] && break
+    done
     if [ -n "$OC_URL" ]; then
       info "下载 OpenClash $OC_LATEST ($OC_EXT)..."
       OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
