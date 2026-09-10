@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.19 (缓存完整 userspace 索引，OPKG 自动解析 SNAPSHOT 全部依赖)
+# VERSION: 20260910.20 (无 geoview 预编译包时跳过，不误报 PassWall 安装失败)
 #==============================================
-VERSION="20260910.19"
+VERSION="20260910.20"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2681,9 +2681,16 @@ fi
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "Geo 数据库"
-  for pkg in chinadns-ng geoview v2ray-geoip v2ray-geosite; do
+  # geoview 并非所有旧版/第三方架构都有预编译包（21.02 mipsel_24kc 的 SF、官方、ImmortalWrt 均无）。
+  # 它不是 PassWall 启动必需项；无包时明确跳过，不能把“Unknown package”当作安装失败。
+  for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
     pkgupgrade "$pkg" "$pkg"
   done
+  if check_installed geoview || [ -n "$(get_repo_version geoview)" ]; then
+    pkgupgrade "geoview" "geoview"
+  else
+    info "跳过 geoview：当前架构/源无预编译包（不影响 PassWall）"
+  fi
 fi
 
 # 可选组件检测：opkg/apk 元数据 + 二进制兜底。
