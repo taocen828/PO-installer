@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.5 (延后代理源探测、实际索引校验、iStoreOS保留系统源)
+# VERSION: 20260910.6 (修复 iStoreOS compatfeeds.conf 追加时缺少换行)
 #==============================================
-VERSION="20260910.5"
+VERSION="20260910.6"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -800,7 +800,13 @@ if [ "$PKG_MGR" = "opkg" ]; then
   if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos"; then
     sed -i 's/^#\(src\/gz \)/\1/' /etc/opkg/distfeeds.conf 2>/dev/null || true
     mkdir -p /etc/opkg
-    grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || echo 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
+    if [ -f /etc/opkg/compatfeeds.conf ]; then
+      last_char=$(tail -c 1 /etc/opkg/compatfeeds.conf 2>/dev/null | tr -d '\n' 2>/dev/null)
+      [ -n "$last_char" ] && printf '\n' >> /etc/opkg/compatfeeds.conf
+    else
+      : > /etc/opkg/compatfeeds.conf
+    fi
+    grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
   fi
   # 抽样检测任意未注释的 src/gz；不能只匹配 /base|/luci，iStoreOS 使用 /repo/all/compat。
   for src in $(awk '!/^#/ && /^src\/gz / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | head -5); do
@@ -819,10 +825,13 @@ if [ "$SYS_SOURCE_OK" = "1" ]; then
   # iStoreOS 的 iStore 商店依赖独立的 compat 源；系统源正常不代表商店源正常。
   if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos" && [ "$PKG_MGR" = "opkg" ]; then
     mkdir -p /etc/opkg
-    if ! grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null; then
-      echo "src/gz istore_compat https://istore.istoreos.com/repo/all/compat" >> /etc/opkg/compatfeeds.conf 2>/dev/null || true
-      info "已修复 iStoreOS compatfeeds.conf（istore_compat 源）"
+    if [ -f /etc/opkg/compatfeeds.conf ]; then
+      last_char=$(tail -c 1 /etc/opkg/compatfeeds.conf 2>/dev/null | tr -d '\n' 2>/dev/null)
+      [ -n "$last_char" ] && printf '\n' >> /etc/opkg/compatfeeds.conf
+    else
+      : > /etc/opkg/compatfeeds.conf
     fi
+    grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
     rm -f /var/opkg-lists/istore_compat 2>/dev/null || true
     opkg update >/dev/null 2>&1 || true
     ok "iStoreOS 软件源已刷新（商店源 + 系统源）"
