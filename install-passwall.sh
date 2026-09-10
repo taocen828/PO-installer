@@ -712,7 +712,7 @@ case "$MAIN_CHOICE" in
 esac
 
 # 用户选择完成后才探测 SourceForge/ImmortalWrt；OpenClash/iStore 单独安装不访问代理插件源。
-if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ] || [ "$INSTALL_SSR" = "1" ]; }; then
+if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
   probe_proxy_sources
 fi
 
