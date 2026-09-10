@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.15 (SNAPSHOT 缺 PassWall 依赖时补 packages 用户态源)
+# VERSION: 20260910.16 (预装 SNAPSHOT PassWall 依赖；依赖失败不再先卸载主程序)
 #==============================================
-VERSION="20260910.15"
+VERSION="20260910.16"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1022,6 +1022,30 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     else
       err "代理插件源不可用：PassWall/SSR Plus 源均未成功配置（OpenClash 不受影响）"
     fi
+    # 在卸载/安装主程序前，先把 PassWall 已知的基础用户态依赖安装到位。
+    # 这类第三方 SNAPSHOT 的自带源可能有 PassWall 之外的包，但缺 coreutils-timeout/lyaml；
+    # 先处理可避免本地 all 架构 IPK 的 --noaction 被依赖解析误报为 incompatible。
+    if [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
+      PW_DEP_READY=1
+      for pw_dep in coreutils-timeout lyaml; do
+        if ! opkg list "$pw_dep" 2>/dev/null | grep -q "^$pw_dep "; then
+          err "PassWall 必需依赖源中仍找不到 $pw_dep，停止主程序安装（不会继续卸载）"
+          PW_DEP_READY=0
+          continue
+        fi
+        if ! opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
+          info "预装 PassWall 依赖: $pw_dep"
+          opkg install "$pw_dep" --force-downgrade --force-overwrite --force-depends >/tmp/opkg_pw_dep.log 2>&1 || true
+          if ! opkg list-installed 2>/dev/null | grep -q "^$pw_dep "; then
+            err "PassWall 依赖安装失败: $pw_dep"
+            cat /tmp/opkg_pw_dep.log 2>/dev/null || true
+            PW_DEP_READY=0
+          fi
+          rm -f /tmp/opkg_pw_dep.log
+        fi
+      done
+      [ "$PW_DEP_READY" = "1" ] && ok "PassWall 基础依赖已就绪" || err "PassWall 基础依赖未就绪，后续主程序将跳过"
+    fi
     rm -f /tmp/po_opkg_update.log 2>/dev/null || true
   else
     # APK 系统: PassWall/PassWall2 才需要 SF；SSR Plus 走 fw876/helloworld Release，不写 SF 源，避免多余 apk update/404 探测。
@@ -1353,13 +1377,14 @@ apk_install() {
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
-          if ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then rc=2; else
+          if ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
+            rc=2
+          else
             opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
             rc=$?
+            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+            grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
-          # 新版依赖缺失 (pkg_hash_check_unresolved) → 返回2, 上层保留旧版
-          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
         else
           err "下载 $pkg 失败，回退 opkg 直接安装..."
@@ -1786,6 +1811,13 @@ pkgupgrade() {
 }
 
 uninstall_selected_only
+# 必需依赖未就绪时不执行“卸载后重装”，避免把现有 PassWall 先删掉又装不回。
+if [ "$PW_DEP_READY" = "0" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+  err "PassWall 基础依赖未就绪，跳过卸载/安装主程序，保留现有组件"
+  INSTALL_PW=0
+  INSTALL_PW2=0
+  FORCE_REINSTALL=0
+fi
 force_reinstall_selected
 
 # PassWall
