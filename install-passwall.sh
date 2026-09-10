@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.1 (版本号改为日期+当日次数，每次推送同步更新)
+# VERSION: 20260910.2 (版本号改为日期+当日次数，每次推送同步更新)
 #==============================================
-VERSION="20260910.1"
+VERSION="20260910.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -613,6 +613,8 @@ while :; do
     MAIN_CHOICE="1"
     break
   fi
+  # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
+  MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
     1|2|3|4|5|6|7|8|9) break ;;
     *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8/9): " ;;
