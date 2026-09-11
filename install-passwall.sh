@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.8 (独立检测 PassWall2 依赖与 luci-lua-runtime)
+# VERSION: 20260911.9 (修复 OpenClash Mihomo 内核最新版检测/刷新)
 #==============================================
-VERSION="20260911.8"
+VERSION="20260911.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2445,16 +2445,34 @@ install_adguardhome() {
 # mips/mipsel 也区分 hardfloat/softfloat；手拼容易拿错或拿不到最新版资产。
 mihomo_arch_pattern() {
   case "$SYS_ARCH" in
-    x86_64|amd64) echo 'mihomo-linux-amd64-v[0-9.]+\.gz' ;;
+    x86_64|amd64) echo 'mihomo-linux-amd64(-v[123])?(-go[0-9]+)?-v[0-9.]+\.gz' ;;
     aarch64*|arm64) echo 'mihomo-linux-arm64-v[0-9.]+\.gz' ;;
     arm_cortex-a7*|armv7*) echo 'mihomo-linux-armv7-v[0-9.]+\.gz' ;;
     arm_cortex-a5*|arm_cortex-a8*|arm_cortex-a9*|arm*) echo 'mihomo-linux-armv7-v[0-9.]+\.gz' ;;
-    i386*|386) echo 'mihomo-linux-386-v[0-9.]+\.gz' ;;
+    i386*|386) echo 'mihomo-linux-386(-softfloat)?(-go[0-9]+)?-v[0-9.]+\.gz' ;;
     mipsel*) echo 'mihomo-linux-mipsle-softfloat-v[0-9.]+\.gz' ;;
     mips*) echo 'mihomo-linux-mips-softfloat-v[0-9.]+\.gz' ;;
     riscv64*) echo 'mihomo-linux-riscv64-v[0-9.]+\.gz' ;;
     *) echo '' ;;
   esac
+}
+mihomo_arch_prefer_pattern() {
+  case "$SYS_ARCH" in
+    x86_64|amd64) echo 'mihomo-linux-amd64-v[0-9.]+\.gz' ;;
+    i386*|386) echo 'mihomo-linux-386-v[0-9.]+\.gz' ;;
+    *) mihomo_arch_pattern ;;
+  esac
+}
+mihomo_ver_num() {
+  echo "$1" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | sed 's/^v//'
+}
+mihomo_ver_tag() {
+  local v
+  v=$(mihomo_ver_num "$1")
+  [ -n "$v" ] && echo "v$v"
+}
+mihomo_version_matches() {
+  [ "$(mihomo_ver_num "$1")" = "$(mihomo_ver_num "$2")" ]
 }
 get_mihomo_latest_json() {
   local api="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" u json
@@ -2470,12 +2488,15 @@ get_mihomo_latest_ver() {
   get_mihomo_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
 }
 get_mihomo_asset_url() {
-  local pat json
+  local pat prefer json url
   pat=$(mihomo_arch_pattern)
+  prefer=$(mihomo_arch_prefer_pattern)
   [ -n "$pat" ] || return 1
   json=$(get_mihomo_latest_json) || return 1
   MIHOMO_VER=$(printf '%s\n' "$json" | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
-  printf '%s\n' "$json" | grep -oE 'https://[^" ]+' | grep -E "$pat" | head -1
+  url=$(printf '%s\n' "$json" | grep -oE 'https://[^" ]+' | grep -E "$prefer" | head -1)
+  [ -n "$url" ] || url=$(printf '%s\n' "$json" | grep -oE 'https://[^" ]+' | grep -E "$pat" | head -1)
+  printf '%s\n' "$url"
 }
 install_mihomo_core() {
   local dest="$1" url
@@ -2495,8 +2516,8 @@ install_mihomo_core() {
     chmod +x "$dest" 2>/dev/null || { err "Clash 内核安装失败"; return 1; }
     ncore=$("$dest" -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     [ -z "$ncore" ] && ncore=$("$dest" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    if [ -n "$ncore" ] && [ "$ncore" = "$MIHOMO_VER" ]; then
-      ok "Clash Meta 内核已安装最新版 ($ncore)"
+    if [ -n "$ncore" ] && mihomo_version_matches "$ncore" "$MIHOMO_VER"; then
+      ok "Clash Meta 内核已安装最新版 ($(mihomo_ver_tag "$ncore"))"
     elif [ -n "$ncore" ]; then
       err "Clash 内核版本校验异常: 已安装 $ncore，期望 $MIHOMO_VER"
       return 1
@@ -2831,18 +2852,20 @@ if [ "$INSTALL_OC" = "1" ]; then
     INSTALLED_MIHOMO=$("$CORE_FILE" -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     [ -z "$INSTALLED_MIHOMO" ] && INSTALLED_MIHOMO=$("$CORE_FILE" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -n "$INSTALLED_MIHOMO" ]; then
-      ok "Clash 内核已安装 ($INSTALLED_MIHOMO)"
+      ok "Clash 内核已安装 ($(mihomo_ver_tag "$INSTALLED_MIHOMO"))"
     else
-      ok "Clash 内核已安装 (跳过下载)"
+      ok "Clash 内核已安装，但版本不可解析，自动刷新到最新内核"
     fi
     # 获取最新版本用于对比 (官方 API)
     MIHOMO_VER=$(get_mihomo_latest_ver)
-    # 版本可解析且落后于最新 → 自动升级，不再询问
-    if [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ] && [ "$INSTALLED_MIHOMO" != "$MIHOMO_VER" ]; then
-      info "Clash 内核自动升级: $INSTALLED_MIHOMO → $MIHOMO_VER"
+    # 已装版本不可解析，或版本落后/不同 → 自动刷新到 latest，不再询问
+    if [ -n "$MIHOMO_VER" ] && { [ -z "$INSTALLED_MIHOMO" ] || ! mihomo_version_matches "$INSTALLED_MIHOMO" "$MIHOMO_VER"; }; then
+      info "Clash 内核自动升级: ${INSTALLED_MIHOMO:-未知} → $MIHOMO_VER"
       install_mihomo_core "$CORE_FILE"
     elif [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ]; then
       ok "Clash 内核已是最新 ($MIHOMO_VER)"
+    elif [ -z "$MIHOMO_VER" ]; then
+      err "无法获取 Clash Meta 最新版本，保留当前内核"
     fi
   else
     # 无内核 → 自动下载，不再询问
