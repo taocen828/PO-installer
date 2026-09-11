@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.2 (修复 OPKG 255 误报；保留真实错误日志；空间不足停止安装)
+# VERSION: 20260911.3 (旧版 5.4/5.10 OPKG 固定包线；SourceForge 架构回退；OpenClash 依赖预检)
 #==============================================
-VERSION="20260911.2"
+VERSION="20260911.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -266,7 +266,7 @@ echo "$PW_VER" | grep -qE "^2[5-9]|^3" && PW_VER="snapshots"
 [ "$PKG_MGR" = "apk" ] && PW_VER="snapshots"
 ok "源版本: $PW_VER"
 
-# 架构 → 目标平台候选映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
+# 架构 → 目标平台映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
 arch_to_targets() {
   case "$1" in
     aarch64_cortex-a53)   echo "armvirt/64 bcm27xx/bcm2710 bcm4908/generic mediatek/mt7622 mvebu/cortexa53 sunxi/cortexa53" ;;
@@ -335,6 +335,18 @@ ARCH_TARGETS=$(arch_to_targets "$SYS_ARCH")
 # 内核版本
 KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 [ -n "$KERNEL_VER" ] && ok "内核版本: $KERNEL_VER"
+
+# 旧版 OPKG 兼容策略：5.4 内核固定使用 21.02 包线，5.10 使用 22.03 包线。
+# 不把 23.05/24.10 的 userspace 包混入旧系统，避免 ruby/lua/iptables 等依赖跨发行版解析。
+LEGACY_OPKG=0
+if [ "$PKG_MGR" = "opkg" ]; then
+  case "$KERNEL_VER" in
+    5.4.*) LEGACY_OPKG=1; LEGACY_PW_SERIES="21.02" ;;
+    5.10.*) LEGACY_OPKG=1; LEGACY_PW_SERIES="22.03" ;;
+    5.15.*) LEGACY_PW_SERIES="23.05" ;;
+  esac
+  [ "$LEGACY_OPKG" = "1" ] && info "旧版 OPKG 兼容模式: 内核 $KERNEL_VER → PassWall $LEGACY_PW_SERIES 包线"
+fi
 
 # 版本系列链（按内核主线；4.14→19.07, 5.4→21.02, 6.12→25.12 优先(24.10.5 也用过 6.12), 6.x 兜底 24.10/snapshots）
 case "$KERNEL_VER" in
@@ -482,11 +494,19 @@ probe_proxy_sources() {
 # 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
 SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
+# SourceForge 的包架构目录与 OpenWrt 运行时架构不总是一致：
+# 21.02/22.03 的 aarch64_cortex-a53 包通常发布在 aarch64_generic 目录。
+SF_ARCH="$SYS_ARCH"
+case "$SYS_ARCH" in
+  aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76) SF_ARCH="aarch64_generic" ;;
+esac
+# 旧内核固件禁止被探测到的其它系列覆盖：SourceForge 同时维护 21.02/22.03/23.05/24.10 包线。
+[ "$LEGACY_OPKG" = "1" ] && SF_PW_VER="$LEGACY_PW_SERIES"
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
     25.12|snapshots) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12/snapshots
   esac
-  SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
+  SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH"
 else
   SF_PATH="snapshots/packages/$SYS_ARCH"
 fi
@@ -551,6 +571,13 @@ SF_MIRROR_QUERY=""; SF_MIRROR_LABEL="default"
 SF_PROBE_URL=""
 if [ "$PKG_MGR" = "opkg" ]; then
   SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
+  # SourceForge 历史目录并不统一：aarch64 可能使用 generic，也可能使用具体 cortex 目录。
+  # 首选 generic，探测不到时自动回退运行时架构，不能把架构目录写死。
+  if [ -z "$SF_PROBE_URL" ] && [ "$SF_ARCH" != "$SYS_ARCH" ]; then
+    SF_ARCH="$SYS_ARCH"
+    SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH"
+    SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
+  fi
 else
   SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/packages.adb")
 fi
@@ -595,10 +622,11 @@ SF_BASE="$SF_PREFIX/$SF_PATH"
 IW_OK=0; IW_USE=""; IW_VER=""
 if [ "$PKG_MGR" = "opkg" ]; then
   info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
-  # 按当前版本系列选 immortalwrt 版本 (21.02→21.02.7, 22.03→23.05.4, 23.05→23.05.4, 24.10→24.10.6)
-  case "$PW_VER" in
+  # 按内核系列选择同系列 ImmortalWrt 用户态源；旧版不能用 23.05 依赖混装。
+  case "$SF_PW_VER" in
     21.02) IW_CAND="21.02.7" ;;
-    22.03|23.05) IW_CAND="23.05.4" ;;
+    22.03) IW_CAND="23.05.4" ;;
+    23.05) IW_CAND="23.05.4" ;;
     24.10) IW_CAND="24.10.6" ;;
     *) IW_CAND="23.05.4" ;;
   esac
@@ -965,11 +993,15 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       info "未追加 OpenWrt 依赖源：未探测到匹配版本；将仅使用系统默认源"
     fi
     # 1) 国内 immortalwrt 源（探测到即可用，优先写入，opkg/下载 URL 均先走国内）
-    if [ "$IW_OK" = "1" ]; then
+    # 旧版 OPKG 已有同系列 SourceForge 包线时不混入 ImmortalWrt 补充源，避免 21/22.03 的依赖被 23.05 包覆盖。
+    if [ "$IW_OK" = "1" ] && { [ "$LEGACY_OPKG" != "1" ] || [ "$SF_OK" != "1" ]; }; then
       echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
       echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
     fi
     # 2) SF 源（仅 PassWall/PassWall2 需要；SSR Plus 走 fw876/helloworld Release，OpenClash 走 GitHub）
+    if [ "$SF_OK" = "1" ] && [ "$LEGACY_OPKG" = "1" ]; then
+      info "旧版 OPKG：仅使用 $SF_PW_VER/$SF_ARCH PassWall 源，避免跨版本依赖混装"
+    fi
     if [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       # SourceForge key 也按当前最快节点下载；固定 master 在部分网络下会失败，导致 opkg update 签名失败。
       curl -fsL --max-time 20 -o /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
@@ -2691,7 +2723,19 @@ if [ "$INSTALL_OC" = "1" ]; then
       OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
       if dl_with_mirror "$OC_URL" "$OC_PKG"; then
         if [ "$PKG_MGR" = "opkg" ]; then
-          opkg install "$OC_PKG" --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
+          OC_LOG=/tmp/po-openclash-install.log
+          opkg install --noaction "$OC_PKG" --force-downgrade --force-overwrite > "$OC_LOG" 2>&1
+          OC_PRE_RC=$?
+          if [ "$OC_PRE_RC" != "0" ]; then
+            err "OpenClash 依赖预检失败，未执行安装"
+            grep -E "cannot find dependency|incompatible|kmod-|No space|Unknown package|Collected errors|ERROR" "$OC_LOG" || cat "$OC_LOG"
+            info "OpenClash 诊断日志: $OC_LOG"
+          else
+            opkg install "$OC_PKG" --force-downgrade --force-overwrite > "$OC_LOG" 2>&1
+            OC_RC=$?
+            grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$OC_LOG" || true
+            [ "$OC_RC" != "0" ] && info "OpenClash 安装日志: $OC_LOG"
+          fi
         else
           apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
         fi
