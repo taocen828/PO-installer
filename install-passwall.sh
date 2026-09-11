@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260910.29 (修 sf_probe_index APK 404 误判；收尾改用非 sed -i；OpenClash-only 恢复 iw 降级源)
+# VERSION: 20260911.1 (修复 OpenClash/GitHub 下载失败时残留错误页覆盖安装包)
 #==============================================
-VERSION="20260910.29"
+VERSION="20260911.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2193,22 +2193,25 @@ fi
 # 注意: OpenWrt 无 od/xxd; 用 dd 提取头部字节比较 (busybox 核心命令必有)
 #       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar/adb magic 4字节纯 ASCII 无 NUL
 dl_with_mirror() {
-  local url="$1" out="$2" u magic
+  local url="$1" out="$2" u magic tmp
+  rm -f "$out"
   for u in $(gh_candidates "$url"); do
-    curl -fL -# --max-time 60 -o "$out" "$u" 2>/dev/null
-    if [ -s "$out" ]; then
+    tmp="${out}.tmp"
+    rm -f "$tmp" "$out"
+    curl -fL -# --max-time 60 -o "$tmp" "$u" 2>/dev/null
+    if [ -s "$tmp" ]; then
       case "$out" in
-        *.gz)   magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
-                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-        *.apk)  magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "ADBd" ] && return 0 ;;
-        *)      magic=$(dd if="$out" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "!<ar" ] && return 0
-                magic=$(dd if="$out" bs=1 count=2 2>/dev/null)
-                [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
+        *.gz)   magic=$(dd if="$tmp" bs=1 count=2 2>/dev/null)
+                [ "$magic" = "$(printf '\037\213')" ] && { mv "$tmp" "$out"; return 0; } ;;
+        *.apk)  magic=$(dd if="$tmp" bs=1 count=4 2>/dev/null)
+                [ "$magic" = "ADBd" ] && { mv "$tmp" "$out"; return 0; } ;;
+        *)      magic=$(dd if="$tmp" bs=1 count=4 2>/dev/null)
+                [ "$magic" = "!<ar" ] && { mv "$tmp" "$out"; return 0; }
+                magic=$(dd if="$tmp" bs=1 count=2 2>/dev/null)
+                [ "$magic" = "$(printf '\037\213')" ] && { mv "$tmp" "$out"; return 0; } ;;
       esac
     fi
-    rm -f "$out"
+    rm -f "$tmp" "$out"
   done
   return 1
 }
@@ -2670,6 +2673,11 @@ if [ "$INSTALL_OC" = "1" ]; then
       OC_URL=$(curl -sL --max-time 20 "$OC_API_URL" | grep -oE 'https://[^"]+\.(ipk|apk)' | grep "\.$OC_EXT" | head -1)
       [ -n "$OC_URL" ] && break
     done
+    if [ "$PKG_MGR" = "opkg" ]; then
+      OC_URL=$(printf '%s\n' "$OC_URL" | grep -E '\.ipk$')
+    else
+      OC_URL=$(printf '%s\n' "$OC_URL" | grep -E '\.apk$')
+    fi
     if [ -n "$OC_URL" ]; then
       info "下载 OpenClash $OC_LATEST ($OC_EXT)..."
       OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
