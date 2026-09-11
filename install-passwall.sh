@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.1 (修复 OpenClash/GitHub 下载失败时残留错误页覆盖安装包)
+# VERSION: 20260911.2 (修复 OPKG 255 误报；保留真实错误日志；空间不足停止安装)
 #==============================================
-VERSION="20260911.1"
+VERSION="20260911.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -799,7 +799,12 @@ OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
 OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
 ok "Overlay 可用: ${OVERLAY_SPACE}MB"
 info "预计需要: ${REQUIRED_SPACE_MB}MB"
-[ "$OVERLAY_SPACE" -ge "$REQUIRED_SPACE_MB" ] && ok "空间充足" || err "空间不足"
+if [ "$OVERLAY_SPACE" -ge "$REQUIRED_SPACE_MB" ]; then
+  ok "空间充足"
+else
+  err "空间不足，已停止安装；请先释放 Overlay 空间后重试"
+  exit 1
+fi
 fi
 
 #==============================================
@@ -1309,9 +1314,11 @@ opkg_preflight_installable() {
   local target="$1" log="/tmp/opkg_preflight.log"
   [ "$PKG_MGR" = "opkg" ] || return 0
   opkg install --noaction "$target" --force-downgrade --force-overwrite > "$log" 2>&1
-  if grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package" "$log" 2>/dev/null; then
+  local preflight_rc=$?
+  if [ "$preflight_rc" != "0" ] || grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:" "$log" 2>/dev/null; then
     err "依赖预检失败，跳过安装/升级，避免半升级破坏现有版本"
-    grep -E "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|kmod-|nftables" "$log" 2>/dev/null || true
+    grep -E "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:|ERROR" "$log" 2>/dev/null || cat "$log"
+    cp "$log" /tmp/po-last-opkg-preflight.log 2>/dev/null || true
     rm -f "$log"
     return 1
   fi
@@ -1380,6 +1387,7 @@ apk_install() {
           else
             opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
             rc=$?
+            cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
             grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
@@ -1428,13 +1436,13 @@ apk_install() {
       rm -f "$log"
     fi
     if [ "$rc" != "0" ]; then
-      case "$pkg" in
-        luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
-          info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
-          ;;
-      esac
-    fi
-    return $rc
+    case "$pkg" in
+      luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
+        info "安装日志已保留: /tmp/po-last-opkg-install.log"
+        ;;
+    esac
+  fi
+  return $rc
   fi
   local log=/tmp/apk_add.log url prog repo_ver
   : > "$log"
