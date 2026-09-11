@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.3 (旧版 5.4/5.10 OPKG 固定包线；SourceForge 架构回退；OpenClash 依赖预检)
+# VERSION: 20260911.4 (系统源检测优先官方 OpenWrt，国内镜像作为兜底)
 #==============================================
-VERSION="20260911.3"
+VERSION="20260911.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -433,12 +433,13 @@ probe_ow_ver() {
   return 1
 }
 
-# 候选 OpenWrt 镜像（阿里云 → 清华 → 官方），依次探测直到找到匹配的镜像+版本
-# 注意: 阿里云可能滞后（如 25.12 系列未同步完整），自动切到有完整版本的镜像
+# 候选 OpenWrt 镜像：官方源作为版本/内容基准，国内镜像作为连通性兜底。
+# 官方源最权威，不保证中国大陆直连稳定；阿里云通常更快，但可能存在同步延迟。
+# 因此先探测官方，官方不可达/缺版本时再切阿里云、清华。
 # 索引文件类型按包管理器判断：opkg→Packages.gz（24.10及以下），apk→packages.adb（25.12/snapshots）
 PKG_FILE="Packages.gz"
 [ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
-MIR_BASES="https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.openwrt.org https://downloads.immortalwrt.org"
+MIR_BASES="https://downloads.openwrt.org https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.immortalwrt.org"
 # ImmortalWrt 固件: immortalwrt 镜像排最前 (自编译/官方 iStoreOS 等)
 if echo "$SYS_DESC $DISTRIB_ID" | grep -qi immortalwrt; then
   MIR_BASES="https://downloads.immortalwrt.org https://mirror.sjtu.edu.cn/immortalwrt https://mirrors.vsean.net/immortalwrt $MIR_BASES"
