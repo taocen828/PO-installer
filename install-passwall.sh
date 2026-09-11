@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.6 (完整检测 PassWall/OpenClash 用户态依赖，单独提示 kmod-tun)
+# VERSION: 20260911.7 (修复依赖检测分支语法，覆盖 PassWall/OpenClash 用户态依赖)
 #==============================================
-VERSION="20260911.6"
+VERSION="20260911.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1105,6 +1105,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       err "代理插件源不可用：PassWall/SSR Plus 源均未成功配置（OpenClash 不受影响）"
     fi
     rm -f /tmp/po_opkg_update.log 2>/dev/null || true
+    fi
   else
     # APK 系统: PassWall/PassWall2 才需要 SF；SSR Plus 走 fw876/helloworld Release、OpenClash 走 GitHub，
     # 两者都不写 SF 源，避免多余 apk update/404 探测。
