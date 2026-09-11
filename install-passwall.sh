@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.7 (修复依赖检测分支语法，覆盖 PassWall/OpenClash 用户态依赖)
+# VERSION: 20260911.8 (独立检测 PassWall2 依赖与 luci-lua-runtime)
 #==============================================
-VERSION="20260911.7"
+VERSION="20260911.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -963,19 +963,30 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     #    对第三方 SNAPSHOT：即使系统源能更新，也可能缺 PassWall 必需的 coreutils-timeout/lyaml；
     #    此时只补当前系列的 userspace packages feed，不写 kmod/target 源。
     NEED_PW_USERSPACE_DEPS=0
+    NEED_PW2_USERSPACE_DEPS=0
     NEED_OC_USERSPACE_DEPS=0
     MISSING_PW_DEPS=""
+    MISSING_PW2_DEPS=""
     MISSING_OC_DEPS=""
     # 检查“索引中是否存在”而不是只检查 Packages.gz 是否能访问。
-    # PassWall 依赖随版本变化，下面覆盖 21/22/23/24 常见核心依赖；可选协议组件不作为阻断项。
-    if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
+    if [ "$INSTALL_PW" = "1" ]; then
       for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl chinadns-ng dns2socks dns2tcp dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
         opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW_DEPS="$MISSING_PW_DEPS $dep"
       done
       [ -n "$MISSING_PW_DEPS" ] && NEED_PW_USERSPACE_DEPS=1
-      if [ "$NEED_PW_USERSPACE_DEPS" = "1" ]; then
-        info "PassWall 依赖索引不完整，缺少:$MISSING_PW_DEPS"
-      fi
+      [ "$NEED_PW_USERSPACE_DEPS" = "1" ] && info "PassWall 依赖索引不完整，缺少:$MISSING_PW_DEPS"
+    fi
+    # PassWall2 与 PassWall 依赖不同：它额外需要 geoview/geo 数据包，通常不需要 chinadns/dns2socks。
+    if [ "$INSTALL_PW2" = "1" ]; then
+      for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl ip-full libuci-lua lua luci-compat luci-lib-jsonc lyaml resolveip tcping geoview v2ray-geoip v2ray-geosite unzip; do
+        opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW2_DEPS="$MISSING_PW2_DEPS $dep"
+      done
+      # 23.05/24.10 的 PassWall2 才声明 luci-lua-runtime；21/22.03 不把它当硬依赖。
+      case "$SF_PW_VER" in
+        23.05|24.10) opkg list luci-lua-runtime 2>/dev/null | grep -q '^luci-lua-runtime ' || MISSING_PW2_DEPS="$MISSING_PW2_DEPS luci-lua-runtime" ;;
+      esac
+      [ -n "$MISSING_PW2_DEPS" ] && NEED_PW2_USERSPACE_DEPS=1
+      [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] && info "PassWall2 依赖索引不完整，缺少:$MISSING_PW2_DEPS"
     fi
     # OpenClash 主包的系统用户态依赖（0.47.x）：dnsmasq-full/bash/curl/ca-bundle/ip-full/ruby/ruby-yaml/unzip。
     # kmod-tun 单独检测，不能从官方其它版本源补装，必须匹配当前内核 hash。
@@ -990,7 +1001,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       fi
     fi
     if [ "$INSTALL_PW$INSTALL_PW2" != "00" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; then
-    if { [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; } && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+    if { [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; } && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
       # 系统源能访问不等于依赖完整：iStoreOS/厂商源可能缺 coreutils-timeout、libyaml、lyaml。
       # 只要 PassWall 依赖探测缺包，就必须追加匹配系列 userspace 源。
       add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
@@ -1056,7 +1067,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 第三方 SNAPSHOT 的 opkg 有时不会将新 customfeed 的索引落盘。若补了完整 userspace packages 源，
     # 直接缓存 Packages.gz，使 OPKG 能解析所有递归依赖（而不是按 coreutils-timeout/libyaml 逐个特判）。
-    if [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; then
+    if [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; then
       info "缓存完整 userspace 依赖索引，交由 OPKG 自动解析递归依赖..."
       if curl -fsL --connect-timeout 10 --max-time 60 "$OW_USE/packages/$SYS_ARCH/packages/Packages.gz" 2>/dev/null | gzip -dc > /tmp/openwrt_packages.po 2>/dev/null && [ -s /tmp/openwrt_packages.po ]; then
         mkdir -p /var/opkg-lists 2>/dev/null || true
