@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.4 (系统源检测优先官方 OpenWrt，国内镜像作为兜底)
+# VERSION: 20260911.5 (系统源可用但依赖不完整时追加 userspace 依赖源)
 #==============================================
-VERSION="20260911.4"
+VERSION="20260911.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -971,7 +971,16 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       opkg list libyaml 2>/dev/null | grep -q '^libyaml ' || NEED_PW_USERSPACE_DEPS=1
       opkg list lyaml 2>/dev/null | grep -q '^lyaml ' || NEED_PW_USERSPACE_DEPS=1
     fi
-    if [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+    if [ "$NEED_PW_USERSPACE_DEPS" = "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+      # 系统源能访问不等于依赖完整：iStoreOS/厂商源可能缺 coreutils-timeout、libyaml、lyaml。
+      # 只要 PassWall 依赖探测缺包，就必须追加匹配系列 userspace 源。
+      add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
+      add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
+      add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
+      add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
+      add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
+      info "系统源可用但依赖不完整，已补充 OpenWrt userspace 依赖源 ($OW_USE / $SYS_ARCH)"
+    elif [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
       [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && add_opkg_feed_once "openwrt_core" "$OW_USE/targets/$SYS_TARGET/packages"
       add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
       add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
@@ -979,9 +988,6 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
       add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "已追加匹配的 OpenWrt 依赖源 ($OW_USE / $SYS_ARCH)"
-    elif [ "$NEED_PW_USERSPACE_DEPS" = "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
-      add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
-      info "系统源缺少 PassWall 必需依赖，已补充 userspace packages 源 ($OW_USE / $SYS_ARCH)"
     elif [ "$SYS_SOURCE_OK" = "1" ]; then
       # 系统源完整时清理旧版残留；不碰 distfeeds.conf 中的系统源。
       if [ -f /etc/opkg/customfeeds.conf ]; then
