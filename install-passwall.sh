@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.27 (修正 5.4 内核固件用户态源线与重复安装)
+# VERSION: 20260912.28 (修复 OpenClash 源兜底与依赖校验)
 #==============================================
-VERSION="20260912.27"
+VERSION="20260912.28"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1032,9 +1032,15 @@ else
   err "系统源不可用，保留原系统源，仅追加 OpenWrt 镜像源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     if [ -n "$OW_USE" ]; then
-      # 绝不注释原系统源：iStoreOS/第三方固件需要保留自带 feeds；只往 customfeeds 追加兜底源。
-      cp /etc/opkg/distfeeds.conf /tmp/distfeeds.conf.bak 2>/dev/null || true
-      { echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
+      # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
+      cp /etc/opkg/customfeeds.conf /tmp/customfeeds.po-bak 2>/dev/null || true
+      : > /tmp/customfeeds.po-new
+      if [ -f /etc/opkg/customfeeds.conf ]; then
+        grep -vE '^[[:space:]]*src(/gz)?[[:space:]]+openwrt_(core|base|luci|packages|routing|telephony)[[:space:]]' \
+          /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-new 2>/dev/null || true
+      fi
+      {
+        echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
         if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
           echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages"
         fi
@@ -1043,8 +1049,10 @@ else
         echo "src/gz openwrt_packages $OW_USE/packages/$SYS_ARCH/packages"
         echo "src/gz openwrt_routing $OW_USE/packages/$SYS_ARCH/routing"
         echo "src/gz openwrt_telephony $OW_USE/packages/$SYS_ARCH/telephony"
-      } > /etc/opkg/customfeeds.conf
-      ok "已配置 OpenWrt 镜像源 ($OW_USE)"
+      } >> /tmp/customfeeds.po-new
+      cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
+      rm -f /tmp/customfeeds.po-new
+      ok "已配置 OpenWrt 镜像源，保留现有 customfeeds ($OW_USE)"
     else
       err "无可用镜像源，系统源保持不动（未修改）"
     fi
@@ -2639,23 +2647,35 @@ if [ "$INSTALL_SSR" = "1" ]; then
 fi
 
 install_openclash_dependencies() {
-  local log=/tmp/openclash-deps.log deps rc missing="" dep_total=0 dep_done=0 installed
+  local log=/tmp/openclash-deps.log user_deps kernel_deps deps rc missing="" user_missing="" kernel_missing="" dep_total=0 dep_done=0 installed
   [ "$INSTALL_OC" = "1" ] || return 0
-  deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base kmod-tun kmod-inet-diag"
+  user_deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
+  kernel_deps="kmod-tun kmod-inet-diag"
   if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
-    deps="$deps kmod-nft-tproxy"
+    kernel_deps="$kernel_deps kmod-nft-tproxy"
   elif [ "$PKG_MGR" = "opkg" ]; then
-    deps="$deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
+    kernel_deps="$kernel_deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
   fi
+  deps="$user_deps $kernel_deps"
   info "按 OpenClash 官方指引安装依赖..."
-  info "依赖清单: $deps"
+  info "用户态依赖: $user_deps"
+  info "内核/防火墙依赖: $kernel_deps"
   for pkg in $deps; do dep_total=$((dep_total + 1)); done
+  : > "$log"
   if [ "$PKG_MGR" = "opkg" ]; then
-    opkg install $deps > "$log" 2>&1
+    opkg install $user_deps >> "$log" 2>&1
     rc=$?
   else
-    apk add --upgrade --latest --force-overwrite --clean-protected $deps > "$log" 2>&1
+    apk add --upgrade --latest --force-overwrite --clean-protected $user_deps >> "$log" 2>&1
     rc=$?
+  fi
+  # 内核模块必须由当前固件匹配源提供；不使用 --force-depends 掩盖 hash/依赖错误。
+  if [ "$PKG_MGR" = "opkg" ]; then
+    opkg install $kernel_deps >> "$log" 2>&1
+    kernel_rc=$?
+  else
+    apk add --upgrade --latest --force-overwrite --clean-protected $kernel_deps >> "$log" 2>&1
+    kernel_rc=$?
   fi
   for pkg in $deps; do
     if [ "$PKG_MGR" = "opkg" ]; then
@@ -2668,17 +2688,22 @@ install_openclash_dependencies() {
       printf "  [%s/%s] ✓ %s\n" "$dep_done" "$dep_total" "$pkg"
     else
       missing="$missing $pkg"
+      echo "$kernel_deps" | grep -qw "$pkg" && kernel_missing="$kernel_missing $pkg" || user_missing="$user_missing $pkg"
       printf "  [%s/%s] ✗ %s\n" "$((dep_done + 1))" "$dep_total" "$pkg"
     fi
   done
-  if [ "$rc" != "0" ] || [ -n "$missing" ]; then
+  if [ "$rc" != "0" ] || [ -n "$user_missing" ]; then
     grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR|WARNING|unable|conflict|breaks" "$log" 2>/dev/null || true
     rm -f "$log"
-    err "OpenClash 官方依赖未完全就绪:$missing"
+    err "OpenClash 用户态依赖未完全就绪:$user_missing"
     return 1
   fi
+  if [ "$kernel_rc" != "0" ] || [ -n "$kernel_missing" ]; then
+    info "OpenClash 内核/防火墙依赖安装失败；通常是厂商内核源或 kernel hash 不匹配"
+    grep -E "kmod-|incompatible|kernel|hash|Unknown package|ERROR|WARNING|unable" "$log" 2>/dev/null || true
+  fi
   rm -f "$log"
-  ok "OpenClash 官方依赖已就绪 ($dep_done/$dep_total)"
+  ok "OpenClash 用户态依赖已就绪"
   return 0
 }
 
@@ -3054,6 +3079,31 @@ get_oc_latest() {
   done
   return 1
 }
+
+# GitHub 不可达时的 OPKG 兜底：先预检，再安装；不强行忽略依赖错误。
+install_openclash_immortal_fallback() {
+  local old_ver="$1" log=/tmp/po-openclash-immortal.log rc nver
+  [ "$PKG_MGR" = "opkg" ] && [ "$IW_OK" = "1" ] || return 1
+  opkg install --noaction luci-app-openclash --force-downgrade --force-overwrite > "$log" 2>&1
+  rc=$?
+  if [ "$rc" != "0" ]; then
+    err "immortalwrt OpenClash 依赖预检失败"
+    grep -E "cannot find dependency|incompatible|kmod-|No space|Unknown package|Collected errors|ERROR" "$log" || cat "$log"
+    info "OpenClash 诊断日志: $log"
+    return 1
+  fi
+  opkg install luci-app-openclash --force-downgrade --force-overwrite > "$log" 2>&1
+  rc=$?
+  grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+  nver=$(get_version "luci-app-openclash")
+  if [ "$rc" = "0" ] && [ -n "$nver" ] && { [ -z "$old_ver" ] || [ "$nver" != "$old_ver" ]; }; then
+    ok "OpenClash $nver ✓ (immortalwrt 源)"
+    return 0
+  fi
+  err "immortalwrt 源未完成 OpenClash 安装/升级 (当前 ${nver:-未安装})"
+  info "OpenClash 诊断日志: $log"
+  return 1
+}
 if [ "$INSTALL_AGH" = "1" ]; then
   install_adguardhome
 fi
@@ -3266,15 +3316,7 @@ if [ "$INSTALL_OC" = "1" ]; then
   if [ -z "$OC_LATEST_NUM" ]; then
     info "GitHub API 不可达（直连+代理均失败），尝试 immortalwrt 源安装/升级..."
     if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-      opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
-      nver=$(get_version "luci-app-openclash")
-      if [ -n "$nver" ] && [ "$nver" != "$OC_VER" ]; then
-        ok "OpenClash $nver ✓ (immortalwrt 源升级)"
-      elif check_installed "luci-app-openclash"; then
-        ok "OpenClash $nver ✓ (immortalwrt 源)"
-      else
-        err "OpenClash 安装/升级失败"
-      fi
+      install_openclash_immortal_fallback "$OC_VER" || true
     else
       err "无可用降级源 (immortalwrt 源不可用或 APK 系统)"
     fi
@@ -3341,16 +3383,7 @@ if [ "$INSTALL_OC" = "1" ]; then
       else
         err "GitHub 全部通道失败或下载内容无效，降级尝试 immortalwrt 源..."
         if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-          opkg install luci-app-openclash --force-downgrade --force-overwrite --force-depends 2>&1 | grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" || true
-          # 验证降级源是否真的提供了新版本 (immortalwrt 源可能滞后, 只有旧版 → 不算成功)
-          nver=$(get_version "luci-app-openclash")
-          if [ -n "$nver" ] && [ "$nver" != "$OC_VER" ]; then
-            ok "OpenClash $nver ✓ (immortalwrt 源升级)"
-          elif [ -n "$nver" ] && [ "$nver" = "$OC_LATEST_NUM" ]; then
-            ok "OpenClash $nver ✓ (immortalwrt 源)"
-          else
-            err "immortalwrt 源无新版 (仍为 $nver)，OpenClash 保持当前版本"
-          fi
+          install_openclash_immortal_fallback "$OC_VER" || true
         else
           err "无可用降级源 (immortalwrt 源不可用或 APK 系统)，OpenClash 未安装"
         fi
