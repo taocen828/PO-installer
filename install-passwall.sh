@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.3 (修复 Geo 用户态包被错误 kmod 预检拦截)
+# VERSION: 20260912.4 (补装 PassWall iptables 透明代理依赖)
 #==============================================
-VERSION="20260912.3"
+VERSION="20260912.4"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1977,6 +1977,29 @@ update_xray_official_mips() {
   rm -f "$tmp" /tmp/xray_version.log
 }
 
+install_passwall_iptables_compat() {
+  [ "$PKG_MGR" = "opkg" ] || return 0
+  # Kiddin' 旧版固件可能没有完整 fw4/nft 环境，PassWall 会回退 iptables。
+  # 这些是用户态 iptables 扩展包；逐个交给 opkg 安装，不绕过真实依赖检查。
+  local pkg desc rc
+  for pkg in iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra; do
+    if check_installed "$pkg"; then
+      ok "$pkg 已安装"
+      continue
+    fi
+    info "安装 PassWall 兼容依赖: $pkg..."
+    opkg install "$pkg" >/tmp/po_iptables_compat.log 2>&1
+    rc=$?
+    if [ "$rc" = "0" ] && check_installed "$pkg"; then
+      ok "$pkg 安装成功"
+    else
+      err "$pkg 安装失败（需要匹配当前固件的 kmod/iptables 源）"
+      grep -E "cannot find dependency|incompatible|Unknown package|Collected errors|No space|ERROR" /tmp/po_iptables_compat.log 2>/dev/null || true
+    fi
+  done
+  rm -f /tmp/po_iptables_compat.log
+}
+
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
   pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
@@ -1988,6 +2011,7 @@ if [ "$INSTALL_PW" = "1" ]; then
     pkginstall "xray-core" "Xray 内核" || true
   fi
   update_xray_official_mips
+  install_passwall_iptables_compat
 fi
 
 # PassWall2
