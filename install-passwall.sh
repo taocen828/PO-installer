@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.12 (修复 Xray 已存在误判与中文文件验证)
+# VERSION: 20260912.13 (官方 24.10 filogic 固定官方依赖源)
 #==============================================
-VERSION="20260912.12"
+VERSION="20260912.13"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -273,6 +273,13 @@ if [ -r /etc/openwrt_release ]; then . /etc/openwrt_release; fi
 SYS_RELEASE="$DISTRIB_RELEASE"; SYS_DESC="$DISTRIB_DESCRIPTION"
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE=$(cat /etc/version 2>/dev/null | head -1)
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE="unknown"
+# 官方 OpenWrt 标准固件：使用官方 target/packages 源，不混入 ImmortalWrt
+# 或第三方完整 userspace 源。GL-MT6000/filogic 24.10.4 属于此类。
+OFFICIAL_STANDARD=0
+if echo "$SYS_DESC" | grep -qi '^OpenWrt ' && [ "$SYS_RELEASE" = "24.10.4" ] && { [ "$DISTRIB_TARGET" = "mediatek/filogic" ] || [ "$SYS_TARGET" = "mediatek/filogic" ]; }; then
+  OFFICIAL_STANDARD=1
+  info "检测到官方 OpenWrt 24.10.4 mediatek/filogic，锁定官方 userspace/kmod 源"
+fi
 ok "系统: $SYS_DESC ($SYS_RELEASE)"
 
 PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(2[0-9]\.[0-9]*\).*/\1/p')
@@ -1049,9 +1056,8 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     else
       info "未追加 OpenWrt 依赖源：未探测到匹配版本；将仅使用系统默认源"
     fi
-    # 1) 国内 immortalwrt 源（探测到即可用，优先写入，opkg/下载 URL 均先走国内）
-    # 旧版 OPKG 已有同系列 SourceForge 包线时不混入 ImmortalWrt 补充源，避免 21/22.03 的依赖被 23.05 包覆盖。
-    if [ "$IW_OK" = "1" ] && { [ "$LEGACY_OPKG" != "1" ] || [ "$SF_OK" != "1" ]; }; then
+    # 1) 国内 immortalwrt 源仅用于非官方标准固件；官方 OpenWrt 必须保持单一官方依赖栈。
+    if [ "$OFFICIAL_STANDARD" != "1" ] && [ "$IW_OK" = "1" ] && { [ "$LEGACY_OPKG" != "1" ] || [ "$SF_OK" != "1" ]; }; then
       echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
       echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
     fi
