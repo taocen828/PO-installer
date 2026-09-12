@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.10 (Geo 用户态 IPK 不被无关 kmod 依赖阻断)
+# VERSION: 20260912.11 (校验中文包实际文件是否落盘)
 #==============================================
-VERSION="20260912.10"
+VERSION="20260912.11"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1891,6 +1891,24 @@ uninstall_selected_only() {
   exit 0
 }
 
+verify_package_installed() {
+  local pkg="$1" path files
+  check_installed "$pkg" || return 1
+  # OPKG 可能只更新了 status 数据库，但实际 IPK 解包失败；
+  # 对中文语言包必须再确认至少有一个登记文件真实存在。
+  if [ "$PKG_MGR" = "opkg" ]; then
+    case "$pkg" in
+      luci-i18n-passwall-zh-cn|luci-i18n-passwall2-zh-cn)
+        files=$(opkg files "$pkg" 2>/dev/null | awk '/^\// {print; exit}')
+        [ -n "$files" ] || return 1
+        path="$files"
+        [ -e "$path" ] || return 1
+        ;;
+    esac
+  fi
+  return 0
+}
+
 # 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
@@ -1923,7 +1941,12 @@ pkginstall() {
   else
     info "安装 $desc..."
     apk_install "$pkg"
-    check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+    if verify_package_installed "$pkg"; then
+      ok "$desc $(get_version "$pkg") ✓"
+    else
+      err "$desc 安装失败（包已登记但文件未落盘）"
+      return 1
+    fi
   fi
 }
 
@@ -1960,7 +1983,12 @@ pkgupgrade() {
   else
     info "安装 $desc..."
     apk_install "$pkg"
-    check_installed "$pkg" && ok "$desc $(get_version $pkg) ✓" || err "$desc 安装失败"
+    if verify_package_installed "$pkg"; then
+      ok "$desc $(get_version "$pkg") ✓"
+    else
+      err "$desc 安装失败（包已登记但文件未落盘）"
+      return 1
+    fi
   fi
 }
 
