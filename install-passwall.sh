@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.23 (OpenClash 依赖安装显示进度)
+# VERSION: 20260912.24 (APK 本地 OpenClash 包允许非仓库安装)
 #==============================================
-VERSION="20260912.23"
+VERSION="20260912.24"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -3272,7 +3272,11 @@ if [ "$INSTALL_OC" = "1" ]; then
             [ "$OC_RC" != "0" ] && info "OpenClash 安装日志: $OC_LOG"
           fi
         else
-          apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$OC_PKG" 2>&1 | grep -v "^WARNING.*opening" || true
+          OC_LOG=/tmp/po-openclash-apk-install.log
+          apk add --upgrade --force-non-repository --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "$OC_PKG" > "$OC_LOG" 2>&1
+          OC_RC=$?
+          grep -v "^WARNING.*opening" "$OC_LOG" || true
+          [ "$OC_RC" != "0" ] && info "OpenClash 安装日志: $OC_LOG"
         fi
         rm -f "$OC_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
