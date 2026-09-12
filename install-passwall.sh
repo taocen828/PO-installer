@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.32 (修复返回主菜单权限错误)
+# VERSION: 20260912.33 (避免 APK 重装已存在依赖触发假失败)
 #==============================================
-VERSION="20260912.32"
+VERSION="20260912.33"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2664,7 +2664,7 @@ if [ "$INSTALL_SSR" = "1" ]; then
 fi
 
 install_openclash_dependencies() {
-  local log=/tmp/openclash-deps.log user_deps kernel_deps deps rc missing="" user_missing="" kernel_missing="" dep_total=0 dep_done=0 installed
+  local log=/tmp/openclash-deps.log user_deps kernel_deps deps user_install="" kernel_install="" rc=0 kernel_rc=0 missing="" user_missing="" kernel_missing="" dep_total=0 dep_done=0 installed pkg
   [ "$INSTALL_OC" = "1" ] || return 0
   user_deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
   kernel_deps="kmod-tun kmod-inet-diag"
@@ -2678,21 +2678,43 @@ install_openclash_dependencies() {
   info "用户态依赖: $user_deps"
   info "内核/防火墙依赖: $kernel_deps"
   for pkg in $deps; do dep_total=$((dep_total + 1)); done
+  # 先筛出真正缺少的包。APK 对已安装包再次执行批量 add，可能因无关 world
+  # 约束返回 2，即使目标依赖全部正常，也会制造假错误。
+  for pkg in $user_deps; do
+    if [ "$PKG_MGR" = "apk" ]; then
+      apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-"
+    else
+      check_installed "$pkg"
+    fi
+    [ "$?" = "0" ] || user_install="$user_install $pkg"
+  done
+  for pkg in $kernel_deps; do
+    if [ "$PKG_MGR" = "apk" ]; then
+      apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-"
+    else
+      check_installed "$pkg"
+    fi
+    [ "$?" = "0" ] || kernel_install="$kernel_install $pkg"
+  done
   : > "$log"
-  if [ "$PKG_MGR" = "opkg" ]; then
-    opkg install $user_deps >> "$log" 2>&1
-    rc=$?
-  else
-    apk add --upgrade --latest --force-overwrite --clean-protected $user_deps >> "$log" 2>&1
-    rc=$?
+  if [ -n "$user_install" ]; then
+    if [ "$PKG_MGR" = "opkg" ]; then
+      opkg install $user_install >> "$log" 2>&1
+      rc=$?
+    else
+      apk add --upgrade --latest --force-overwrite --clean-protected $user_install >> "$log" 2>&1
+      rc=$?
+    fi
   fi
   # 内核模块必须由当前固件匹配源提供；不使用 --force-depends 掩盖 hash/依赖错误。
-  if [ "$PKG_MGR" = "opkg" ]; then
-    opkg install $kernel_deps >> "$log" 2>&1
-    kernel_rc=$?
-  else
-    apk add --upgrade --latest --force-overwrite --clean-protected $kernel_deps >> "$log" 2>&1
-    kernel_rc=$?
+  if [ -n "$kernel_install" ]; then
+    if [ "$PKG_MGR" = "opkg" ]; then
+      opkg install $kernel_install >> "$log" 2>&1
+      kernel_rc=$?
+    else
+      apk add --upgrade --latest --force-overwrite --clean-protected $kernel_install >> "$log" 2>&1
+      kernel_rc=$?
+    fi
   fi
   for pkg in $deps; do
     if [ "$PKG_MGR" = "opkg" ]; then
