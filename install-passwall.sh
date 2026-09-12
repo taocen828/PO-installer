@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.37 (退出删除临时脚本时静默)
+# VERSION: 20260912.38 (补齐 Firewall3 iptables 依赖)
 #==============================================
-VERSION="20260912.37"
+VERSION="20260912.38"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2680,12 +2680,15 @@ fi
 install_openclash_dependencies() {
   local log=/tmp/openclash-deps.log user_deps kernel_deps deps user_install="" kernel_install="" rc=0 kernel_rc=0 missing="" user_missing="" kernel_missing="" dep_total=0 dep_done=0 installed pkg
   [ "$INSTALL_OC" = "1" ] || return 0
-  user_deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
+  user_deps="bash dnsmasq-full curl ca-bundle ipset ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
   kernel_deps="kmod-tun kmod-inet-diag"
   if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
     kernel_deps="$kernel_deps kmod-nft-tproxy"
   elif [ "$PKG_MGR" = "opkg" ]; then
-    kernel_deps="$kernel_deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
+    # Firewall3/iptables 官方依赖与 Firewall4/nftables 不同。
+    # kmod-ipt-nat、ip6tables-mod-nat 不能省略，否则 OpenClash
+    # 可能能安装但透明代理/IPv6 NAT 无法工作。
+    kernel_deps="$kernel_deps iptables ipset iptables-mod-tproxy iptables-mod-extra kmod-ipt-nat ip6tables-mod-nat"
   fi
   deps="$user_deps $kernel_deps"
   info "按 OpenClash 官方指引安装依赖..."
