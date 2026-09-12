@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.31 (修复 APK OpenClash 依赖假失败)
+# VERSION: 20260912.32 (修复返回主菜单权限错误)
 #==============================================
-VERSION="20260912.31"
+VERSION="20260912.32"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -3634,13 +3634,14 @@ case "$THIS_SCRIPT" in
     if [ -f "$THIS_SCRIPT" ] && [ -r "$THIS_SCRIPT" ]; then
       echo ""
       info "返回主菜单..."
-      exec "$THIS_SCRIPT"
+      # /tmp 下的脚本可能没有执行权限；显式交给 sh 重新解释，避免 Permission denied。
+      exec sh "$THIS_SCRIPT"
     fi
     ;;
 esac
 if [ -f "$THIS_SCRIPT" ] && [ -r "$THIS_SCRIPT" ] && [ "$THIS_SCRIPT" != "sh" ] && [ "$THIS_SCRIPT" != "-sh" ]; then
   echo ""
   info "返回主菜单..."
-  exec "$THIS_SCRIPT"
+  exec sh "$THIS_SCRIPT"
 fi
 info "当前为管道执行模式，安装流程结束；请重新运行 opinstall 进入主菜单。"
