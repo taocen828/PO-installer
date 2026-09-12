@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.29 (修复全部卸载时手动安装的 iStore 清理)
+# VERSION: 20260912.30 (安装完成后返回主菜单)
 #==============================================
-VERSION="20260912.29"
+VERSION="20260912.30"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -3620,10 +3620,21 @@ echo ""
 echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
 echo ""
 
-# 自动清理
+# 安装完成后返回主菜单。
+# 直接执行脚本时可以重新进入当前脚本；管道执行没有可重入的脚本文件，只能提示用户重新运行。
 THIS_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
 case "$THIS_SCRIPT" in
   /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
-    rm -f "$THIS_SCRIPT" 2>/dev/null
+    if [ -f "$THIS_SCRIPT" ] && [ -r "$THIS_SCRIPT" ]; then
+      echo ""
+      info "返回主菜单..."
+      exec "$THIS_SCRIPT"
+    fi
     ;;
 esac
+if [ -f "$THIS_SCRIPT" ] && [ -r "$THIS_SCRIPT" ] && [ "$THIS_SCRIPT" != "sh" ] && [ "$THIS_SCRIPT" != "-sh" ]; then
+  echo ""
+  info "返回主菜单..."
+  exec "$THIS_SCRIPT"
+fi
+info "当前为管道执行模式，安装流程结束；请重新运行 opinstall 进入主菜单。"
