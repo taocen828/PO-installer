@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.2 (合并 SourceForge 下载进度条)
+# VERSION: 20260912.3 (修复 Geo 用户态包被错误 kmod 预检拦截)
 #==============================================
-VERSION="20260912.2"
+VERSION="20260912.3"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1405,9 +1405,9 @@ opkg_preflight_installable() {
     pkg_luci-i18n-passwall2-zh-cn*.ipk|luci-i18n-passwall2-zh-cn*.ipk)
       check_installed luci-app-passwall2 && return 0
       ;;
-    pkg_xray-core*.ipk|xray-core*.ipk)
-      # xray-core 是用户态二进制，不依赖 kmod；Kiddin' 固件缺少
-      # PassWall 的 nft kmod 时，不能让全局旧依赖状态阻断它。
+    pkg_xray-core*.ipk|xray-core*.ipk|pkg_chinadns-ng*.ipk|chinadns-ng*.ipk|pkg_v2ray-geoip*.ipk|v2ray-geoip*.ipk|pkg_v2ray-geosite*.ipk|v2ray-geosite*.ipk|pkg_geoview*.ipk|geoview*.ipk)
+      # 这些是用户态程序/Geo 数据包，不应被其它包的 kmod 索引错误阻断；
+      # 最终仍由真实 opkg install 检查它们自己的依赖。
       return 0
       ;;
   esac
