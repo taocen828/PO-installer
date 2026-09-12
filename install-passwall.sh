@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.22 (OpenClash 内核按官方 core_version/alpha 版本)
+# VERSION: 20260912.23 (OpenClash 依赖安装显示进度)
 #==============================================
-VERSION="20260912.22"
+VERSION="20260912.23"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -858,7 +858,6 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
   ok "Overlay 可用: ${OVERLAY_SPACE}MB"
   info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
-  info "不按固定预估值拦截，新安装/升级均由包管理器按实际新增空间判断"
 fi
 
 #==============================================
@@ -2592,52 +2591,46 @@ if [ "$INSTALL_SSR" = "1" ]; then
 fi
 
 install_openclash_dependencies() {
-  local log=/tmp/openclash-deps.log deps rc missing=""
+  local log=/tmp/openclash-deps.log deps rc missing="" dep_total=0 dep_done=0 installed
   [ "$INSTALL_OC" = "1" ] || return 0
+  deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base kmod-tun kmod-inet-diag"
+  if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
+    deps="$deps kmod-nft-tproxy"
+  elif [ "$PKG_MGR" = "opkg" ]; then
+    deps="$deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
+  fi
+  info "按 OpenClash 官方指引安装依赖..."
+  info "依赖清单: $deps"
+  for pkg in $deps; do dep_total=$((dep_total + 1)); done
   if [ "$PKG_MGR" = "opkg" ]; then
-    deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base kmod-tun kmod-inet-diag"
-    if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
-      deps="$deps kmod-nft-tproxy"
-    else
-      deps="$deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
-    fi
-    info "按 OpenClash 官方指引安装依赖..."
     opkg install $deps > "$log" 2>&1
     rc=$?
-    if [ "$rc" != "0" ]; then
-      grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR" "$log" 2>/dev/null || true
-    fi
-    for pkg in bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base; do
-      opkg list-installed 2>/dev/null | grep -q "^$pkg " || missing="$missing $pkg"
-    done
-    rm -f "$log"
-    if [ -n "$missing" ]; then
-      err "OpenClash 官方用户态依赖未就绪:$missing"
-      return 1
-    fi
-    # kmod 必须匹配当前内核；不使用 --force-depends 绕过。
-    if ! opkg list-installed 2>/dev/null | grep -q '^kmod-tun '; then
-      err "OpenClash 依赖 kmod-tun 未安装，当前内核源可能不匹配"
-      return 1
-    fi
   else
-    deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base kmod-tun kmod-inet-diag"
-    if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
-      deps="$deps kmod-nft-tproxy"
-    else
-      deps="$deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
-    fi
-    info "按 OpenClash 官方指引安装依赖..."
     apk add --upgrade --latest --force-overwrite --clean-protected $deps > "$log" 2>&1
     rc=$?
-    if [ "$rc" != "0" ]; then
-      grep -E "ERROR|WARNING|unable|not found|conflict|breaks|No space" "$log" 2>/dev/null || true
-      rm -f "$log"
-      return 1
-    fi
-    rm -f "$log"
   fi
-  ok "OpenClash 官方依赖已就绪"
+  for pkg in $deps; do
+    if [ "$PKG_MGR" = "opkg" ]; then
+      opkg list-installed 2>/dev/null | grep -q "^$pkg " && installed=1 || installed=0
+    else
+      apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-" && installed=1 || installed=0
+    fi
+    if [ "$installed" = "1" ]; then
+      dep_done=$((dep_done + 1))
+      printf "  [%s/%s] ✓ %s\n" "$dep_done" "$dep_total" "$pkg"
+    else
+      missing="$missing $pkg"
+      printf "  [%s/%s] ✗ %s\n" "$((dep_done + 1))" "$dep_total" "$pkg"
+    fi
+  done
+  if [ "$rc" != "0" ] || [ -n "$missing" ]; then
+    grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR|WARNING|unable|conflict|breaks" "$log" 2>/dev/null || true
+    rm -f "$log"
+    err "OpenClash 官方依赖未完全就绪:$missing"
+    return 1
+  fi
+  rm -f "$log"
+  ok "OpenClash 官方依赖已就绪 ($dep_done/$dep_total)"
   return 0
 }
 
