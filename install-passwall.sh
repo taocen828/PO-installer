@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.34 (静默刷新 PassWall LuCI 后端)
+# VERSION: 20260912.35 (增加退出选项)
 #==============================================
-VERSION="20260912.34"
+VERSION="20260912.35"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -770,8 +770,9 @@ echo "  6) iStore 商店"
 echo "  7) 全部安装"
 echo "  8) 卸载插件"
 echo "  9) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
+echo "  0) 退出"
 echo ""
-printf "请输入选项 (1/2/3/4/5/6/7/8/9): "
+printf "请输入选项 (0/1/2/3/4/5/6/7/8/9): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -782,11 +783,12 @@ while :; do
   # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
-    1|2|3|4|5|6|7|8|9) break ;;
-    *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8/9): " ;;
+    0|1|2|3|4|5|6|7|8|9) break ;;
+    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
+  0) info "已退出"; exit 0 ;;
   1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
   2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
   3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
