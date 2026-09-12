@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.28 (修复 OpenClash 源兜底与依赖校验)
+# VERSION: 20260912.29 (修复全部卸载时手动安装的 iStore 清理)
 #==============================================
-VERSION="20260912.28"
+VERSION="20260912.29"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1892,7 +1892,7 @@ clean_apk_broken_installed() {
 remove_pkg_keep_config() {
   local pkg="$1" desc="$2" log="/tmp/po_remove.log" rc=0
   if ! check_installed "$pkg"; then
-    info "$desc 未登记安装，跳过包管理器卸载"
+    info "$desc 未登记安装，跳过包管理器卸载（继续清理程序文件）"
     return 0
   fi
   info "卸载 $desc（$(config_action_text)）..."
@@ -1956,6 +1956,21 @@ remove_adguardhome_keep_config() {
   fi
   rm -rf "$tmp"
 }
+remove_istore_manual_files_keep_config() {
+  # APK/手动解包安装的 iStore 不一定登记在包管理器中，仍需清理实际文件。
+  /etc/init.d/istore stop >/dev/null 2>&1 || true
+  /etc/init.d/tasks stop >/dev/null 2>&1 || true
+  rm -f /bin/is-opkg /usr/libexec/taskd /etc/init.d/istore /etc/init.d/tasks \
+        /etc/uci-defaults/luci-app-store \
+        /usr/share/rpcd/acl.d/luci-app-store.json \
+        /usr/share/ucitrack/luci-app-store.json 2>/dev/null || true
+  rm -rf /www/luci-static/istore /usr/lib/lua/luci/controller/store.lua \
+         /usr/lib/lua/luci/model/cbi/store /usr/lib/lua/luci/view/store \
+         /usr/lib/lua/luci/controller/taskd.lua /usr/lib/lua/luci/model/cbi/taskd \
+         /usr/lib/lua/luci/view/taskd /usr/lib/lua/luci/model/cbi/xterm \
+         /usr/lib/lua/luci/view/xterm /usr/share/istore /usr/share/taskd \
+         /usr/share/xterm /usr/libexec/luci-taskd 2>/dev/null || true
+}
 remove_plugin_config() {
   local plugin="$1"
   [ "$UNINSTALL_KEEP_CONFIG" = "0" ] || return 0
@@ -2015,6 +2030,7 @@ force_reinstall_selected() {
     remove_pkg_keep_config "luci-lib-taskd" "iStore taskd 库" || true
     remove_pkg_keep_config "luci-lib-xterm" "iStore xterm 库" || true
     remove_pkg_keep_config "taskd" "iStore taskd" || true
+    remove_istore_manual_files_keep_config
     remove_plugin_config "istore"
     ok "iStore 商店已清理（$(config_action_text)）"
   fi
@@ -2053,6 +2069,7 @@ uninstall_selected_only() {
     remove_pkg_keep_config "luci-lib-taskd" "iStore taskd 库" || true
     remove_pkg_keep_config "luci-lib-xterm" "iStore xterm 库" || true
     remove_pkg_keep_config "taskd" "iStore taskd" || true
+    remove_istore_manual_files_keep_config
     remove_plugin_config "istore"
     ok "iStore 商店已清理（$(config_action_text)）"
   fi
