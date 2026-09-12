@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.6 (刷新同名 custom feed，避免沿用旧源卡住)
+# VERSION: 20260912.7 (增强 OPKG 架构检测兜底)
 #==============================================
-VERSION="20260912.6"
+VERSION="20260912.7"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -223,8 +223,19 @@ APK_FORCE_REINSTALL_OPT=""
 
 SYS_ARCH=""
 if [ "$PKG_MGR" = "opkg" ]; then
-  # 通用提取：任意架构（不限于白名单），取第一个非 all/noarch/any 的架构
-  SYS_ARCH=$(opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -vE '^(all|noarch|any)$' | head -1)
+  # 优先读取 opkg 的架构表；部分厂商固件的 opkg print-architecture
+  # 输出为空/格式异常，不能因此直接终止脚本。
+  SYS_ARCH=$(opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -vE '^(all|noarch|any)$' | head -1)
+  # 备用：从 distfeeds 的 packages/<arch>/路径提取架构。
+  [ -z "$SYS_ARCH" ] && SYS_ARCH=$(grep -hoE 'packages/[A-Za-z0-9_.-]+/(base|luci|packages|routing|telephony)' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | sed -n 's#packages/\([^/]*\)/.*#\1#p' | grep -vE '^(all|noarch|any)$' | head -1)
+  # 最后按运行时架构兜底；aarch64 厂商固件通常使用 cortex-a53 用户态架构。
+  [ -z "$SYS_ARCH" ] && case "$(uname -m 2>/dev/null)" in
+    aarch64) SYS_ARCH="aarch64_cortex-a53" ;;
+    armv7*) SYS_ARCH="arm_cortex-a7_neon-vfpv4" ;;
+    mipsel*) SYS_ARCH="mipsel_24kc" ;;
+    mips*) SYS_ARCH="mips_24kc" ;;
+    x86_64) SYS_ARCH="x86_64" ;;
+  esac
 else
   SYS_ARCH=$(apk info --print-arch 2>/dev/null)
   [ -z "$SYS_ARCH" ] && SYS_ARCH=$(cat /etc/apk/arch 2>/dev/null)
