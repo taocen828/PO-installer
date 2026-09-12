@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.13 (官方 24.10 filogic 固定官方依赖源)
+# VERSION: 20260912.14 (系统源优先，第三方仅作为 PassWall 备用)
 #==============================================
-VERSION="20260912.13"
+VERSION="20260912.14"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1028,7 +1028,11 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       fi
     fi
     if [ "$INSTALL_PW$INSTALL_PW2" != "00" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; then
-    if { [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; } && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+    if [ "$OFFICIAL_STANDARD" = "1" ]; then
+      # 官方固件已有完整匹配源：不因 PassWall 专用包缺少若干依赖而
+      # 追加另一套完整 userspace 源，避免 libc/架构/版本混用。
+      info "官方系统源正常，保留官方 userspace/kmod 源；不追加第三方依赖源"
+    elif { [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; } && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
       # 系统源能访问不等于依赖完整：iStoreOS/厂商源可能缺 coreutils-timeout、libyaml、lyaml。
       # 只要 PassWall 依赖探测缺包，就必须追加匹配系列 userspace 源。
       add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
@@ -1056,8 +1060,10 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     else
       info "未追加 OpenWrt 依赖源：未探测到匹配版本；将仅使用系统默认源"
     fi
-    # 1) 国内 immortalwrt 源仅用于非官方标准固件；官方 OpenWrt 必须保持单一官方依赖栈。
-    if [ "$OFFICIAL_STANDARD" != "1" ] && [ "$IW_OK" = "1" ] && { [ "$LEGACY_OPKG" != "1" ] || [ "$SF_OK" != "1" ]; }; then
+    # 1) PassWall 备用源：系统源健康时只补 PassWall 专用源；
+    # 不把 ImmortalWrt userspace 源混入基础依赖解析。只有 SourceForge 不可用时，
+    # 才使用 ImmortalWrt 的 PassWall/LuCI 源兜底。
+    if [ "$IW_OK" = "1" ] && [ "$SF_OK" != "1" ]; then
       echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
       echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
     fi
