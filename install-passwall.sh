@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.10 (空间检测改为升级可继续、重装严格检查)
+# VERSION: 20260911.11 (新安装与升级均由包管理器实际空间判断)
 #==============================================
-VERSION="20260911.10"
+VERSION="20260911.11"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -812,7 +812,7 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
 fi
 
 #==============================================
-# 3.5 空间检测（新装/强制重装严格检查；直接升级不因估算值拦截）
+# 3.5 空间检测（仅提示，不用固定估算值拦截安装）
 #==============================================
 if [ "$UNINSTALL_ONLY" != "1" ]; then
   hdr "空间检测"
@@ -827,35 +827,8 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
   OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
   ok "Overlay 可用: ${OVERLAY_SPACE}MB"
-  info "新装/重装预估需要: ${REQUIRED_SPACE_MB}MB"
-
-  # 直接安装/升级时，opkg/apk 会复用已安装文件；上面的“完整插件体积”
-  # 不是升级所需的新增空间，不能据此阻止本来可以成功的更新。
-  # 强制重装则会先删除主程序，仍按完整预估严格检查。
-  INSTALLED_SELECTED=0
-  if [ "$PKG_MGR" = "opkg" ]; then
-    [ "$INSTALL_PW" = "1" ] && opkg status luci-app-passwall 2>/dev/null | grep -q '^Status: install ok installed' && INSTALLED_SELECTED=1
-    [ "$INSTALL_PW2" = "1" ] && opkg status luci-app-passwall2 2>/dev/null | grep -q '^Status: install ok installed' && INSTALLED_SELECTED=1
-    [ "$INSTALL_OC" = "1" ] && opkg status luci-app-openclash 2>/dev/null | grep -q '^Status: install ok installed' && INSTALLED_SELECTED=1
-    [ "$INSTALL_SSR" = "1" ] && opkg status luci-app-ssr-plus 2>/dev/null | grep -q '^Status: install ok installed' && INSTALLED_SELECTED=1
-    [ "$INSTALL_ISTORE" = "1" ] && opkg status luci-app-store 2>/dev/null | grep -q '^Status: install ok installed' && INSTALLED_SELECTED=1
-  else
-    apk list --installed 2>/dev/null | grep -qE '^(luci-app-passwall|luci-app-passwall2|luci-app-openclash|luci-app-ssr-plus|luci-app-store)-' && INSTALLED_SELECTED=1
-  fi
-
-  if [ "$FORCE_REINSTALL" = "1" ] || [ "$INSTALLED_SELECTED" = "0" ]; then
-    if [ "$OVERLAY_SPACE" -lt "$REQUIRED_SPACE_MB" ]; then
-      err "空间不足，已停止安装；请先释放 Overlay 空间后重试"
-      exit 1
-    fi
-    ok "空间预检通过"
-  else
-    if [ "$OVERLAY_SPACE" -lt "$REQUIRED_SPACE_MB" ]; then
-      info "检测到已安装插件，当前为直接升级：不按完整安装体积拦截，将由包管理器按实际新增空间判断"
-    else
-      ok "空间充足"
-    fi
-  fi
+  info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
+  info "不按固定预估值拦截，新安装/升级均由包管理器按实际新增空间判断"
 fi
 
 #==============================================
