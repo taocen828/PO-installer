@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.13 (统一使用自定义版本比较选择最高源版本)
+# VERSION: 20260911.14 (语言包预检不重复解析已安装主包的内核依赖)
 #==============================================
-VERSION="20260911.13"
+VERSION="20260911.14"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1386,6 +1386,17 @@ opkg_preflight_installable() {
   # 第三方/厂商固件常见: 普通 packages 源可用，但 targets/kmod 源不匹配，出现 kmod-nft-core / nftables-json incompatible。
   local target="$1" log="/tmp/opkg_preflight.log"
   [ "$PKG_MGR" = "opkg" ] || return 0
+  # 中文语言包只依赖对应主包。主包可能已经安装，但其自身存在
+  # 固件定制 kmod 依赖未满足；此时不应让语言包的预检重复解析主包
+  # 的全部依赖并被 kmod-nft-* 阻断。
+  case "$target" in
+    luci-i18n-passwall-zh-cn|luci-i18n-passwall-zh-cn_*.ipk)
+      opkg status luci-app-passwall 2>/dev/null | grep -q '^Status: install ok installed' && return 0
+      ;;
+    luci-i18n-passwall2-zh-cn|luci-i18n-passwall2-zh-cn_*.ipk)
+      opkg status luci-app-passwall2 2>/dev/null | grep -q '^Status: install ok installed' && return 0
+      ;;
+  esac
   opkg install --noaction "$target" --force-downgrade --force-overwrite > "$log" 2>&1
   local preflight_rc=$?
   if [ "$preflight_rc" != "0" ] || grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:" "$log" 2>/dev/null; then
