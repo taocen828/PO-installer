@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.1 (自动安装 Xray 官方更新所需 unzip)
+# VERSION: 20260912.2 (合并 SourceForge 下载进度条)
 #==============================================
-VERSION="20260912.1"
+VERSION="20260912.2"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1363,6 +1363,15 @@ apk_installed_exact() {
   apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$ver"
 }
 
+# 预先解析重定向后的最终地址，再显示一次下载进度。
+# SourceForge 的 -L 会对原地址和镜像地址各打印一条进度，造成“两个进度条”。
+curl_download_progress() {
+  local url="$1" out="$2" final
+  final=$(curl -fsSL --max-time 30 -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null)
+  [ -n "$final" ] || final="$url"
+  curl -fL --progress-bar -o "$out" "$final"
+}
+
 # 预下载的 .apk 可能因 SourceForge 跳转/镜像不同步变成 HTML/错误页。
 # apk add 返回码不能直接代表目标包已升级；必须安装后读回精确版本，失败再走仓库精确版本兜底。
 apk_add_repo_exact() {
@@ -1470,7 +1479,7 @@ apk_install() {
       else
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
-        if curl -fL $prog -o "/tmp/pkg_$pkg.ipk" "$url"; then
+        if curl_download_progress "$url" "/tmp/pkg_$pkg.ipk"; then
           if ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
             rc=2
           else
