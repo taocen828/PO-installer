@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.8 (仅无 fw4 时安装 iptables 兼容依赖)
+# VERSION: 20260912.9 (按实际源架构注册并清理旧索引)
 #==============================================
-VERSION="20260912.8"
+VERSION="20260912.9"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1083,7 +1083,25 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
         err "SSR Plus 源不可用或无 luci-app-ssr-plus ($SSR_BASE)"
       fi
     fi
-    # SourceForge/immortalwrt 索引已由实际下载校验或国内源探测验证；统一 opkg update 只刷新一次。
+    ensure_opkg_feed_arches() {
+      [ "$PKG_MGR" = "opkg" ] || return 0
+      local arch changed=0
+      for arch in $(grep -hoE 'packages/[A-Za-z0-9_.-]+/(base|luci|packages|routing|telephony)' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | sed -n 's#packages/\([^/]*\)/.*#\1#p' | sort -u); do
+        echo "$arch" | grep -qE '^(all|noarch|any)$' && continue
+        if ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx "$arch"; then
+          echo "arch $arch 5" >> /etc/opkg.conf
+          changed=1
+        fi
+      done
+      [ "$changed" = "1" ] && info "已注册软件源架构，避免 OPKG 忽略索引包"
+    }
+    # 源已写入后再注册源路径里的架构；不能只依赖 uname/opkg 的本机架构名。
+    ensure_opkg_feed_arches
+    # 清理上一次运行留下的索引：旧索引可能来自 25.12/6.6 或错误架构，
+    # 即使 customfeeds 已改正，opkg 仍会继续读取 /var/opkg-lists 中的旧包。
+    # 先全部清空，随后用当前固件对应的源重新刷新，避免“no valid architecture”。
+    rm -f /var/opkg-lists/* 2>/dev/null || true
+    info "已清理旧 OPKG 索引，按当前固件源重新刷新..."
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 第三方 SNAPSHOT 的 opkg 有时不会将新 customfeed 的索引落盘。若补了完整 userspace packages 源，
     # 直接缓存 Packages.gz，使 OPKG 能解析所有递归依赖（而不是按 coreutils-timeout/libyaml 逐个特判）。
