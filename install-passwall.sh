@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.4 (补装 PassWall iptables 透明代理依赖)
+# VERSION: 20260912.5 (补充 aarch64_generic 兼容架构)
 #==============================================
-VERSION="20260912.4"
+VERSION="20260912.5"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -247,7 +247,14 @@ ensure_opkg_common_arches() {
     echo "arch noarch 1" >> /etc/opkg.conf
     changed=1
   fi
-  [ "$changed" = "1" ] && info "已补齐 OPKG 通用架构: all/noarch"
+  # SourceForge/ImmortalWrt 的 21.02 aarch64 包通常标记为
+  # aarch64_generic，而厂商固件只注册 aarch64_cortex-a53；
+  # 两者 ABI 兼容，需要让 opkg 接受 generic 用户态包。
+  if [ "$SYS_ARCH" = "aarch64_cortex-a53" ] && ! opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -qx 'aarch64_generic'; then
+    echo "arch aarch64_generic 5" >> /etc/opkg.conf
+    changed=1
+  fi
+  [ "$changed" = "1" ] && info "已补齐 OPKG 通用架构: all/noarch${SYS_ARCH:+/$SYS_ARCH兼容架构}"
 }
 ensure_opkg_common_arches
 
