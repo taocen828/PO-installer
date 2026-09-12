@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.11 (新安装与升级均由包管理器实际空间判断)
+# VERSION: 20260911.12 (修复 PassWall git 版本与数字版本比较)
 #==============================================
-VERSION="20260911.11"
+VERSION="20260911.12"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1290,6 +1290,14 @@ version_newer() {
   [ "$a" = "$b" ] && return 1
   an=$(echo "$a" | sed 's/^v//; s/-r[0-9][0-9]*$//')
   bn=$(echo "$b" | sed 's/^v//; s/-r[0-9][0-9]*$//')
+  # PassWall 旧包常用 git-YY.MMDD.build 格式；不能直接和 26.9.9
+  # 用 sort -V 比较，否则 sort 会把 git-25... 错排在 26.9.9 后面。
+  case "$an" in
+    git-[0-9][0-9].*) an=$(echo "$an" | sed -n 's/^git-\([0-9][0-9]\.[0-9][0-9]*\).*/\1/p') ;;
+  esac
+  case "$bn" in
+    git-[0-9][0-9].*) bn=$(echo "$bn" | sed -n 's/^git-\([0-9][0-9]\.[0-9][0-9]*\).*/\1/p') ;;
+  esac
   # ChinaDNS-NG 旧版会显示 v1.0-beta.25，而新源是 2025.08.09-r1。
   # sort -V 会把带 v/beta 的旧版本排到日期版本后面，需先把日期版判为新上游格式。
   case "$an|$bn" in
