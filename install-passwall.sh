@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.36 (退出时删除临时脚本)
+# VERSION: 20260912.37 (退出删除临时脚本时静默)
 #==============================================
-VERSION="20260912.36"
+VERSION="20260912.37"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -794,7 +794,6 @@ case "$MAIN_CHOICE" in
     case "$EXIT_SCRIPT" in
       /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
         rm -f "$EXIT_SCRIPT" 2>/dev/null || true
-        info "临时安装脚本已删除，已退出"
         ;;
       *)
         info "已退出（保留当前脚本）"
