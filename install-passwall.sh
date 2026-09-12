@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.20 (校验系统源与本地插件包架构)
+# VERSION: 20260912.22 (OpenClash 内核按官方 core_version/alpha 版本)
 #==============================================
-VERSION="20260912.20"
+VERSION="20260912.22"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -14,13 +14,15 @@ hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
 # 206(Partial Content)=成功归一化为200; 000/空=DNS失败/超时/无curl, 输出诊断
 check_url() {
   local code url="$1"
-  if command -v curl >/dev/null 2>&1; then
+  # command -v 只代表文件存在；损坏的动态链接 curl 仍会通过 command -v。
+  # 必须先实际执行 --version，失败时改用可运行的 wget。
+  if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; then
     code=$(curl -sL -o /dev/null -r 0-1024 -w "%{http_code}" "$url" --max-time 8 2>/dev/null)
-  elif command -v wget >/dev/null 2>&1; then
+  elif command -v wget >/dev/null 2>&1 && wget --version >/dev/null 2>&1; then
     code=$(wget -q --spider --timeout=8 -O /dev/null "$url" 2>/dev/null; echo $?)
     [ "$code" = "0" ] && code="200" || code="000"
   else
-    echo "  [探测] 无 curl/wget 可用!" >&2
+    echo "  [探测] curl/wget 均不可运行!" >&2
     echo "000"; return
   fi
   # 206=Range 成功；SourceForge 常返回 301/302/303/307/308 跳转，也算可达
@@ -142,10 +144,14 @@ echo ""
 #==============================================
 hdr "系统检测"
 
+# 判断网络工具是否真的可执行，避免损坏的动态链接 curl 被 command -v 误判为可用。
+curl_works() { command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; }
+wget_works() { command -v wget >/dev/null 2>&1 && wget --version >/dev/null 2>&1; }
+
 # 修复 wget 损坏（apk 内部依赖 wget 下载文件）
 # 用"能否运行"判断而非文件头检测（ELF 二进制/symlink 会误判）
 WGET_FIXED=0
-if ! command -v wget >/dev/null 2>&1 || ! wget --version >/dev/null 2>&1; then
+if ! wget_works; then
   if [ -w /usr/bin ]; then
     cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
     cat > /usr/bin/wget << 'WGETEOF'
@@ -2843,9 +2849,73 @@ install_adguardhome() {
 }
 
 
-# 获取 Mihomo 最新版本和匹配当前架构的下载地址
-# 不再手拼文件名：MetaCubeX 会为 amd64 提供多种 v1/v2/v3/goXXX 变体，
-# mips/mipsel 也区分 hardfloat/softfloat；手拼容易拿错或拿不到最新版资产。
+# OpenClash 官方内核：按 OpenClash core 分支的 core_version 和 meta 包安装。
+# 不能使用 MetaCubeX Releases 的 v1.x；OpenClash 页面显示的是 alpha-ge... 版本。
+openclash_core_cpu_model() {
+  case "$SYS_ARCH" in
+    x86_64|amd64) echo "linux-amd64-v1" ;;
+    aarch64*|arm64) echo "linux-arm64" ;;
+    arm_cortex-a7*|armv7*) echo "linux-armv7" ;;
+    arm_cortex-a5*|arm_cortex-a8*|arm_cortex-a9*|arm*) echo "linux-armv7" ;;
+    mipsel*) echo "linux-mipsle-softfloat" ;;
+    mips*) echo "linux-mips-softfloat" ;;
+    i386*|386) echo "linux-386" ;;
+    *) echo "" ;;
+  esac
+}
+openclash_core_branch="master"
+openclash_core_version_url() {
+  echo "https://raw.githubusercontent.com/vernesong/OpenClash/core/$openclash_core_branch/core_version"
+}
+get_openclash_core_latest() {
+  local u v
+  for u in $(gh_candidates "$(openclash_core_version_url)"); do
+    v=$(curl -fsSL --max-time 20 "$u" 2>/dev/null | sed -n '1p' | tr -d '\r')
+    [ -n "$v" ] && { echo "$v"; return 0; }
+  done
+  return 1
+}
+openclash_core_version() {
+  "$1" -v 2>&1 | sed -n 's/.*\(alpha-[A-Za-z0-9._-]*\).*/\1/p' | head -1
+}
+install_openclash_core() {
+  local dest="$1" model="$2" url u tarball work nver
+  [ -n "$model" ] || { err "当前架构 $SYS_ARCH 没有匹配的 OpenClash 内核"; return 1; }
+  url="https://raw.githubusercontent.com/vernesong/OpenClash/core/$openclash_core_branch/meta/clash-$model.tar.gz"
+  info "下载 OpenClash 官方内核 $OPENCLASH_CORE_LATEST ($model)..."
+  tarball=/tmp/openclash-core.tar.gz
+  work=/tmp/openclash-core.$$
+  rm -rf "$tarball" "$work"
+  mkdir -p "$work" || return 1
+  for u in $(gh_candidates "$url"); do
+    curl -fsL --connect-timeout 10 --max-time 120 -o "$tarball" "$u" 2>/dev/null || { rm -f "$tarball"; continue; }
+    tar -tzf "$tarball" >/dev/null 2>&1 || { rm -f "$tarball"; continue; }
+    break
+  done
+  if [ ! -s "$tarball" ] || ! tar -xzf "$tarball" -C "$work" >/dev/null 2>&1; then
+    err "OpenClash 官方内核下载或解压失败"
+    rm -rf "$tarball" "$work"
+    return 1
+  fi
+  [ -s "$work/clash" ] || { err "OpenClash 内核包缺少 clash 文件"; rm -rf "$tarball" "$work"; return 1; }
+  chmod 755 "$work/clash"
+  nver=$(openclash_core_version "$work/clash")
+  [ -n "$nver" ] && [ "$nver" = "$OPENCLASH_CORE_LATEST" ] || {
+    err "OpenClash 内核版本校验失败: ${nver:-未知}，期望 $OPENCLASH_CORE_LATEST"
+    rm -rf "$tarball" "$work"
+    return 1
+  }
+  mkdir -p "$(dirname "$dest")"
+  mv "$work/clash" "$dest" || { err "OpenClash 内核写入失败"; rm -rf "$tarball" "$work"; return 1; }
+  chmod 755 "$dest"
+  ok "OpenClash 官方内核已安装 ($nver)"
+  rm -rf "$tarball" "$work"
+  return 0
+}
+
+# 保留旧函数名仅供其它代码兼容，但实际改为 OpenClash 官方内核流程。
+mihomo_version_matches() { [ "$1" = "$2" ] || [ "$(openclash_core_version "$1")" = "$2" ]; }
+
 mihomo_arch_pattern() {
   case "$SYS_ARCH" in
     x86_64|amd64) echo 'mihomo-linux-amd64(-v[123])?(-go[0-9]+)?-v[0-9.]+\.gz' ;;
@@ -3247,42 +3317,23 @@ if [ "$INSTALL_OC" = "1" ]; then
     ok "OpenClash 已是最新版 ($OC_VER)"
   fi
 
-  # 2) Clash 内核: 文件存在且非空 = 已装, 不反复下载
-  # 注意: OpenClash 的 GitHub release 只有 ipk/apk 主程序, 没有内核资产!
-  #       内核需从 mihomo (Clash Meta) 官方 release 下载, 命名 mihomo-linux-<arch>-v<ver>.gz
-  info "Clash 内核检查..."
-  # 检测已装内核文件 (clash_meta / clash / clash_tun, 非空才算)
-  CORE_FILE=""
-  INSTALLED_MIHOMO=""
-  for c in /etc/openclash/core/clash_meta /etc/openclash/core/clash /etc/openclash/core/clash_tun; do
-    if [ -f "$c" ] && [ -s "$c" ]; then
-      CORE_FILE="$c"
-      break
-    fi
-  done
-  if [ -n "$CORE_FILE" ]; then
-    # 尝试解析版本 (mihomo -v 输出到 stderr, 需 2>&1; 解析失败也视为已装)
-    INSTALLED_MIHOMO=$("$CORE_FILE" -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    [ -z "$INSTALLED_MIHOMO" ] && INSTALLED_MIHOMO=$("$CORE_FILE" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    if [ -n "$INSTALLED_MIHOMO" ]; then
-      ok "Clash 内核已安装 ($(mihomo_ver_tag "$INSTALLED_MIHOMO"))"
-    else
-      ok "Clash 内核已安装，但版本不可解析，自动刷新到最新内核"
-    fi
-    # 获取最新版本用于对比 (官方 API)
-    MIHOMO_VER=$(get_mihomo_latest_ver)
-    # 已装版本不可解析，或版本落后/不同 → 自动刷新到 latest，不再询问
-    if [ -n "$MIHOMO_VER" ] && { [ -z "$INSTALLED_MIHOMO" ] || ! mihomo_version_matches "$INSTALLED_MIHOMO" "$MIHOMO_VER"; }; then
-      info "Clash 内核自动升级: ${INSTALLED_MIHOMO:-未知} → $MIHOMO_VER"
-      install_mihomo_core "$CORE_FILE"
-    elif [ -n "$INSTALLED_MIHOMO" ] && [ -n "$MIHOMO_VER" ]; then
-      ok "Clash 内核已是最新 ($MIHOMO_VER)"
-    elif [ -z "$MIHOMO_VER" ]; then
-      err "无法获取 Clash Meta 最新版本，保留当前内核"
-    fi
+  # 2) OpenClash 官方 Meta 内核：使用 core_version 中的 alpha-ge... 版本，
+  # 不再使用 MetaCubeX Releases 的 v1.x 内核。
+  info "OpenClash 官方内核检查..."
+  OPENCLASH_CORE_LATEST=$(get_openclash_core_latest)
+  OPENCLASH_CORE_MODEL=$(openclash_core_cpu_model)
+  CORE_FILE="/etc/openclash/core/clash_meta"
+  INSTALLED_OPENCLASH_CORE=""
+  if [ -s "$CORE_FILE" ]; then
+    INSTALLED_OPENCLASH_CORE=$(openclash_core_version "$CORE_FILE")
+  fi
+  if [ -n "$OPENCLASH_CORE_LATEST" ] && [ "$INSTALLED_OPENCLASH_CORE" = "$OPENCLASH_CORE_LATEST" ]; then
+    ok "OpenClash 官方内核已是最新 ($INSTALLED_OPENCLASH_CORE)"
+  elif [ -n "$OPENCLASH_CORE_LATEST" ]; then
+    info "OpenClash 官方内核更新: ${INSTALLED_OPENCLASH_CORE:-未安装} → $OPENCLASH_CORE_LATEST"
+    install_openclash_core "$CORE_FILE" "$OPENCLASH_CORE_MODEL" || true
   else
-    # 无内核 → 自动下载，不再询问
-    install_mihomo_core /etc/openclash/core/clash_meta
+    err "无法获取 OpenClash 官方内核版本，保留当前内核"
   fi
 fi
 
