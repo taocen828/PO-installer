@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.11 (校验中文包实际文件是否落盘)
+# VERSION: 20260912.12 (修复 Xray 已存在误判与中文文件验证)
 #==============================================
-VERSION="20260912.11"
+VERSION="20260912.12"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1895,14 +1895,14 @@ verify_package_installed() {
   local pkg="$1" path files
   check_installed "$pkg" || return 1
   # OPKG 可能只更新了 status 数据库，但实际 IPK 解包失败；
-  # 对中文语言包必须再确认至少有一个登记文件真实存在。
+  # 中文语言包必须确认至少一个实际的普通文件已经落盘。
   if [ "$PKG_MGR" = "opkg" ]; then
     case "$pkg" in
       luci-i18n-passwall-zh-cn|luci-i18n-passwall2-zh-cn)
         files=$(opkg files "$pkg" 2>/dev/null | awk '/^\// {print; exit}')
         [ -n "$files" ] || return 1
         path="$files"
-        [ -e "$path" ] || return 1
+        [ -f "$path" ] || return 1
         ;;
     esac
   fi
@@ -1912,6 +1912,12 @@ verify_package_installed() {
 # 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
+  # Xray 官方/手动更新可能已经放置 /usr/bin/xray，但 opkg 数据库没有
+  # xray-core 记录；不要因此重复走错误的仓库安装路径。
+  if [ "$pkg" = "xray-core" ] && command -v xray >/dev/null 2>&1; then
+    ok "$desc 已存在 ($(xray version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 未知) ✓"
+    return 0
+  fi
   if check_installed "$pkg"; then
     local ver=$(get_version "$pkg")
     local repo_ver=$(get_repo_version "$pkg")
