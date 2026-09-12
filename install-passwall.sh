@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.5 (补充 aarch64_generic 兼容架构)
+# VERSION: 20260912.6 (刷新同名 custom feed，避免沿用旧源卡住)
 #==============================================
-VERSION="20260912.5"
+VERSION="20260912.6"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -954,10 +954,17 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       rm -f /tmp/customfeeds.tmp
     fi
     add_opkg_feed_once() {
-      local name="$1" url="$2"
+      local name="$1" url="$2" tmp
       [ -n "$name" ] && [ -n "$url" ] || return 0
-      # 如果 distfeeds/customfeeds 已有同名或同 URL 源，不再重复追加，避免 opkg Duplicate src declaration 刷屏。
-      grep -hE "^src/gz[[:space:]]+$name[[:space:]]|^src[[:space:]]+$name[[:space:]]" /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -q . && return 0
+      # 同名 custom feed 可能是上一次运行留下的旧架构/旧版本地址；
+      # 不能直接 return，否则脚本看似追加成功，实际仍使用错误源。
+      if [ -f /etc/opkg/customfeeds.conf ]; then
+        tmp="/tmp/customfeeds.$$.tmp"
+        grep -vE "^src/gz[[:space:]]+$name[[:space:]]|^src[[:space:]]+$name[[:space:]]" /etc/opkg/customfeeds.conf > "$tmp" 2>/dev/null || true
+        cat "$tmp" > /etc/opkg/customfeeds.conf 2>/dev/null || true
+        rm -f "$tmp"
+      fi
+      # distfeeds 中的系统源不修改；若 URL 已存在于任一配置，不重复追加。
       awk '/^src\/gz |^src / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -Fxq "$url" && return 0
       echo "src/gz $name $url" >> /etc/opkg/customfeeds.conf
     }
