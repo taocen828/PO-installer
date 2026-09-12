@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.9 (按实际源架构注册并清理旧索引)
+# VERSION: 20260912.10 (Geo 用户态 IPK 不被无关 kmod 依赖阻断)
 #==============================================
-VERSION="20260912.9"
+VERSION="20260912.10"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1526,10 +1526,17 @@ apk_install() {
           if ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
             rc=2
           else
-            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
+            # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
+            # 直链校验下载，安装时允许 opkg 忽略无关的未满足依赖，不能让
+            # kmod-nft-* 阻断 chinadns-ng/v2ray-geo*。
+            local local_force_depends=""
+            case "$pkg" in
+              chinadns-ng|v2ray-geoip|v2ray-geosite|geoview|xray-core) local_force_depends="--force-depends" ;;
+            esac
+            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite $local_force_depends > "$log" 2>&1
             rc=$?
             cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
-            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
