@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.14 (系统源优先，第三方仅作为 PassWall 备用)
+# VERSION: 20260912.16 (PassWall 默认核心与 Geo 组件，协议核心可选)
 #==============================================
-VERSION="20260912.14"
+VERSION="20260912.16"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -779,8 +779,9 @@ case "$MAIN_CHOICE" in
     ;;
 esac
 
-# 用户选择完成后才探测 SourceForge/ImmortalWrt；OpenClash/iStore 单独安装不访问代理插件源。
-if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+# 用户选择完成后：PassWall 直接探测官方插件源；PassWall2 的 APK 按官方推荐使用
+# SourceForge 仓库，OPKG 则先走 GitHub Release，只有失败/缺依赖时才探测并追加 SF 源。
+if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || { [ "$INSTALL_PW2" = "1" ] && [ "$PKG_MGR" = "apk" ]; }; }; then
   probe_proxy_sources
 fi
 
@@ -2104,6 +2105,63 @@ install_passwall_iptables_compat() {
   rm -f /tmp/po_iptables_compat.log
 }
 
+# PassWall2 官方 Release 安装：主包按官方 README 从 GitHub 获取；
+# 依赖仍由包管理器解析，缺失时使用前面配置的 PassWall 源兜底。
+get_passwall2_release_asset() {
+  local ext="$1" api json u pattern
+  api="https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall2/releases/latest"
+  for u in $(gh_candidates "$api"); do
+    json=$(curl -fsSL --connect-timeout 10 --max-time 30 "$u" 2>/dev/null) || continue
+    if [ "$ext" = "ipk" ]; then
+      pattern='https://[^" ]*/luci-app-passwall2_[^" ]*_all\.ipk'
+    else
+      pattern='https://[^" ]*/luci-app-passwall2-[^" ]*\.apk'
+    fi
+    printf '%s\n' "$json" | grep -oE "$pattern" | head -1 && return 0
+  done
+  return 1
+}
+install_passwall2_release() {
+  local ext="$1" url u pkgfile rc=1 oldver newver magic
+  pkgfile="/tmp/luci-app-passwall2.$ext"
+  url=$(get_passwall2_release_asset "$ext") || { err "无法获取 PassWall2 官方 Release ($ext)"; return 1; }
+  oldver=$(get_version "luci-app-passwall2")
+  info "下载 PassWall2 官方 Release ($ext)..."
+  rm -f "$pkgfile"
+  for u in $(gh_candidates "$url"); do
+    curl -fL --connect-timeout 10 --max-time 120 -o "$pkgfile" "$u" 2>/dev/null || { rm -f "$pkgfile"; continue; }
+    [ -s "$pkgfile" ] || { rm -f "$pkgfile"; continue; }
+    if [ "$ext" = "apk" ]; then
+      magic=$(dd if="$pkgfile" bs=1 count=4 2>/dev/null); [ "$magic" = "ADBd" ] || { rm -f "$pkgfile"; continue; }
+    else
+      magic=$(dd if="$pkgfile" bs=1 count=4 2>/dev/null)
+      [ "$magic" = "!<ar" ] || { magic=$(dd if="$pkgfile" bs=1 count=2 2>/dev/null); [ "$magic" = "$(printf '\037\213')" ] || { rm -f "$pkgfile"; continue; }; }
+    fi
+    break
+  done
+  [ -s "$pkgfile" ] || { err "PassWall2 官方 Release 下载失败"; return 1; }
+  if [ "$ext" = "apk" ]; then
+    apk add --upgrade --allow-untrusted --force-broken-world "$pkgfile" >/tmp/passwall2-release.log 2>&1
+    rc=$?
+  else
+    opkg install "$pkgfile" >/tmp/passwall2-release.log 2>&1
+    rc=$?
+  fi
+  grep -E "ERROR|warning|cannot find|Unknown package|incompatible|No space|Collected errors" /tmp/passwall2-release.log 2>/dev/null || true
+  rm -f "$pkgfile" /tmp/passwall2-release.log
+  newver=$(get_version "luci-app-passwall2")
+  if [ "$rc" = "0" ] && [ -n "$newver" ]; then
+    if [ -n "$oldver" ] && [ "$newver" = "$oldver" ]; then
+      ok "PassWall2 $newver ✓ (官方 Release，已是当前版本)"
+    else
+      ok "PassWall2: ${oldver:-未安装} → $newver ✓ (官方 Release)"
+    fi
+    return 0
+  fi
+  err "PassWall2 官方 Release 安装失败（当前版本: ${newver:-未安装}）"
+  return 1
+}
+
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
   pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
@@ -2119,22 +2177,28 @@ if [ "$INSTALL_PW" = "1" ]; then
 fi
 
 # PassWall2
-# PassWall2（注意: 国内 immortalwrt 源不含 PassWall2，仅 SourceForge 有）
-# SF 某些版本/架构构建残缺(架构不兼容)时, 明确提示改用 PassWall 经典版
+# 按 PassWall2 官方 README：OPKG 先安装 GitHub Release 主包；
+# APK 优先使用官方推荐的 SourceForge APK 仓库。依赖由包管理器自动解析，
+# 只有主包安装失败时才回退到另一条官方路径。
 if [ "$INSTALL_PW2" = "1" ]; then
-  if [ "$SF_OK" = "1" ]; then
-    pkginstall "luci-app-passwall2" "PassWall2"
-    pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包"
-  else
-    info "跳过 PassWall2: 当前 PassWall 源为国内 immortalwrt 镜像，不含 PassWall2 包（PassWall 经典版不受影响）"
-  fi
-  # 与 PassWall 路径保持一致：旧 MIPS 仓库 Xray 失败或过期时，仍继续走官方 softfloat。
-  if [ "$INSTALL_PW" != "1" ]; then
-    if [ "$PKG_MGR" = "opkg" ] && echo "$SYS_ARCH" | grep -q '^mipsel' && check_installed xray-core; then
-      info "MIPS 已跳过过期的仓库 Xray 更新，改用官方 mips32le softfloat"
-    else
-      pkginstall "xray-core" "Xray 内核" || true
+  if [ "$PKG_MGR" = "opkg" ]; then
+    if ! install_passwall2_release "ipk"; then
+      info "PassWall2 官方 IPK 安装失败，探测官方 PassWall 源后回退包源安装..."
+      probe_proxy_sources
+      pkginstall "luci-app-passwall2" "PassWall2" || true
     fi
+  else
+    if ! pkginstall "luci-app-passwall2" "PassWall2"; then
+      info "PassWall2 APK 仓库安装失败，回退 GitHub 官方 APK..."
+      install_passwall2_release "apk" || true
+    fi
+  fi
+  # 中文包是可选语言包，不应阻断 PassWall2 主程序安装。
+  pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
+  if [ "$INSTALL_PW" != "1" ]; then
+    # 核心依赖由主包自动解析；仅在包管理器源明确提供时安装，
+    # 不再无条件强行升级 Xray，避免覆盖用户已有核心版本。
+    pkginstall "xray-core" "Xray 内核" || true
     update_xray_official_mips
   fi
 fi
@@ -3071,18 +3135,18 @@ install_geoview_fallback() {
 }
 
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
-  hdr "Geo 数据库"
-  # geoview 并非所有旧版/第三方架构都有预编译包（21.02 mipsel_24kc 的 SF、官方、ImmortalWrt 均无）。
-  # 它不是 PassWall 启动必需项；无包时明确跳过，不能把“Unknown package”当作安装失败。
+  hdr "默认核心组件"
+  # PassWall/PassWall2 默认安装 Xray、ChinaDNS-NG、GeoView 和 Geo 数据库。
+  pkginstall "xray-core" "Xray 内核" || true
   for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
-    pkgupgrade "$pkg" "$pkg"
+    pkgupgrade "$pkg" "$pkg" || true
   done
   if check_installed geoview && command -v geoview >/dev/null 2>&1; then
-    pkgupgrade "geoview" "geoview"
-  elif install_geoview_fallback; then
-    ok "geoview $(get_version geoview) ✓"
+    pkgupgrade "geoview" "GeoView" || true
+  elif [ "$PKG_MGR" = "opkg" ] && install_geoview_fallback; then
+    ok "GeoView $(get_version geoview) ✓"
   else
-    err "geoview 安装失败：当前架构没有可用完整预编译包"
+    pkginstall "geoview" "GeoView" || true
   fi
 fi
 
@@ -3208,6 +3272,10 @@ fi
 #==============================================
 # 9. 刷新 LuCI
 #==============================================
+if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
+  /etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true
+  ok "PassWall LuCI 后端已刷新"
+fi
 if command -v luci-reload >/dev/null 2>&1; then
   luci-reload 2>/dev/null || true
   ok "LuCI 已刷新"
