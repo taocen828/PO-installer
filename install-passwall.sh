@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.35 (增加退出选项)
+# VERSION: 20260912.36 (退出时删除临时脚本)
 #==============================================
-VERSION="20260912.35"
+VERSION="20260912.36"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -788,7 +788,20 @@ while :; do
   esac
 done
 case "$MAIN_CHOICE" in
-  0) info "已退出"; exit 0 ;;
+  0)
+    # 仅删除 /tmp 中的临时安装脚本，绝不删除仓库或其它位置的脚本。
+    EXIT_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    case "$EXIT_SCRIPT" in
+      /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
+        rm -f "$EXIT_SCRIPT" 2>/dev/null || true
+        info "临时安装脚本已删除，已退出"
+        ;;
+      *)
+        info "已退出（保留当前脚本）"
+        ;;
+    esac
+    exit 0
+    ;;
   1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
   2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
   3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
