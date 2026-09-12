@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.25 (OpenClash APK 本地安装兼容实际版本)
+# VERSION: 20260912.27 (修正 5.4 内核固件用户态源线与重复安装)
 #==============================================
-VERSION="20260912.25"
+VERSION="20260912.27"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -414,16 +414,15 @@ ARCH_TARGETS=$(arch_to_targets "$SYS_ARCH")
 KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 [ -n "$KERNEL_VER" ] && ok "内核版本: $KERNEL_VER"
 
-# 旧版 OPKG 兼容策略：5.4 内核固定使用 21.02 包线，5.10 使用 22.03 包线。
-# 不把 23.05/24.10 的 userspace 包混入旧系统，避免 ruby/lua/iptables 等依赖跨发行版解析。
+# 旧版内核不等于旧版用户态：厂商固件可能是 24.10 用户态 + 5.4 内核。
+# 用户态 PassWall 源优先跟随 DISTRIB_RELEASE；只有 target/kmod 检查使用内核版本。
 LEGACY_OPKG=0
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$KERNEL_VER" in
-    5.4.*) LEGACY_OPKG=1; LEGACY_PW_SERIES="21.02" ;;
-    5.10.*) LEGACY_OPKG=1; LEGACY_PW_SERIES="22.03" ;;
-    5.15.*) LEGACY_PW_SERIES="23.05" ;;
+    5.4.*|5.10.*) LEGACY_OPKG=1 ;;
   esac
-  [ "$LEGACY_OPKG" = "1" ] && info "旧版 OPKG 兼容模式: 内核 $KERNEL_VER → PassWall $LEGACY_PW_SERIES 包线"
+  # 旧内核只限制 kmod；用户态 PassWall 版本跟随 SYS_RELEASE。
+  [ "$LEGACY_OPKG" = "1" ] && info "旧内核 $KERNEL_VER 仅限制 kmod，不切换用户态包线"
 fi
 
 # 版本系列链（按内核主线；4.14→19.07, 5.4→21.02, 6.12→25.12 优先(24.10.5 也用过 6.12), 6.x 兜底 24.10/snapshots）
@@ -437,14 +436,13 @@ case "$KERNEL_VER" in
   6.*)    SERIES_CHAIN="24.10 snapshots" ;;
   *)      SERIES_CHAIN="snapshots" ;;
 esac
-# opkg 系统: 官方 25.12/snapshots 已切 APK 索引(packages.adb), 无 Packages.gz
-# 第三方 25.12-SNAPSHOT 仍带 opkg 的固件只能用 24.10 opkg 源作 best-effort 普通包源
+# opkg 固件的用户态包线优先以固件声明版本为准；内核版本只用于 kmod 兼容性判断。
 if [ "$PKG_MGR" = "opkg" ]; then
-  SERIES_CHAIN=$(echo "$SERIES_CHAIN" | tr ' ' '\n' | grep -v -E '^(25\.12|snapshots)$' | tr '\n' ' ')
-  [ -z "$SERIES_CHAIN" ] && SERIES_CHAIN="24.10"
-  # 去尾随空格 (tr 换行→空格会产生)
-  SERIES_CHAIN=${SERIES_CHAIN% }
-  info "opkg 系统: 官方 25.12/snapshots 为 apk 格式，源链过滤为 opkg 可用系列 → $SERIES_CHAIN"
+  case "$PW_VER" in
+    19.07|21.02|22.03|23.05|24.10) SERIES_CHAIN="$PW_VER" ;;
+    *) SERIES_CHAIN="24.10" ;;
+  esac
+  info "opkg 系统: 按固件用户态版本选择可用包线 → $SERIES_CHAIN"
 fi
 
 # 源探测/下载安装依赖路由器自身出网；如果客户端电脑能上网但路由器 SSH 内 ping 不通，先自动修复一次。
@@ -579,8 +577,12 @@ SF_ARCH="$SYS_ARCH"
 case "$SYS_ARCH" in
   aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76) SF_ARCH="aarch64_generic" ;;
 esac
-# 旧内核固件禁止被探测到的其它系列覆盖：SourceForge 同时维护 21.02/22.03/23.05/24.10 包线。
-[ "$LEGACY_OPKG" = "1" ] && SF_PW_VER="$LEGACY_PW_SERIES"
+# 厂商固件如果明确声明为 24.10-SNAPSHOT，优先使用对应 24.10 userspace 包线；
+# 不因 5.4 内核把整个用户态错误切到 21.02。
+[ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
+[ -z "$SF_PW_VER" ] && SF_PW_VER="${SYS_RELEASE%.*}"
+[ "$SF_PW_VER" = "unknown" ] && SF_PW_VER="24.10"
+# SourceForge 的 21/22 旧目录兼容 aarch64 generic，但不能覆盖明确的 24.10。
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
     25.12|snapshots) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12/snapshots
@@ -1083,6 +1085,8 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] &&
    [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
   OFFICIAL_PASSWALL_MODE=1
   SF_PW_VER="${SYS_RELEASE%.*}"
+  # 24.10-SNAPSHOT 仍是 24.10 用户态包线，不再因 5.4 内核退回 21.02。
+  echo "$SYS_RELEASE" | grep -q '^24\.10' && SF_PW_VER="24.10"
   SF_ARCH="$SYS_ARCH"
   SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
   SF_MIRROR_QUERY=""
@@ -1626,7 +1630,7 @@ opkg_preflight_installable() {
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
-    local url prog log=/tmp/opkg_install.log repo_ver
+    local url prog log="/tmp/opkg_install.log" repo_ver
     url=$(find_pkg_url "$pkg")
     repo_ver=$(get_repo_version "$pkg")
     # 预解析依赖清单 (模拟安装), 用于显示包名级进度; 排除主包自身(后面单独处理)
@@ -1673,8 +1677,10 @@ apk_install() {
           opkg install "$pkg" --force-downgrade --force-overwrite > "$log" 2>&1
           rc=$?
         fi
-        grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-        grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+        if [ -f "$log" ]; then
+          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+        fi
         rm -f "$log"
       else
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
@@ -1703,8 +1709,10 @@ apk_install() {
             opkg install "$pkg" --force-downgrade --force-overwrite > "$log" 2>&1
             rc=$?
           fi
-          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          if [ -f "$log" ]; then
+            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+            grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          fi
           rm -f "$log"
         fi
       fi
@@ -1736,8 +1744,10 @@ apk_install() {
           rc=$?
         fi
       fi
-      grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
-      grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+      if [ -f "$log" ]; then
+        grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
+        grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+      fi
       rm -f "$log"
     fi
     if [ "$rc" != "0" ]; then
@@ -2309,13 +2319,6 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
   pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
-  # MIPS 的仓库 xray-core 常是陈旧/失效条目（可能声明 1.7.5 但 IPK 已 404）；
-  # 已安装时跳过该仓库更新，直接走下面的官方 mips32le softfloat。首次安装仍由 OPKG 提供基础包。
-  if [ "$PKG_MGR" = "opkg" ] && echo "$SYS_ARCH" | grep -q '^mipsel' && check_installed xray-core; then
-    info "MIPS 已跳过过期的仓库 Xray 更新，改用官方 mips32le softfloat"
-  else
-    pkginstall "xray-core" "Xray 内核" || true
-  fi
   update_xray_official_mips
   install_passwall_iptables_compat
 fi
@@ -2338,10 +2341,8 @@ if [ "$INSTALL_PW2" = "1" ]; then
   fi
   # 中文包是可选语言包，不应阻断 PassWall2 主程序安装。
   pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
-  if [ "$INSTALL_PW" != "1" ]; then
-    # 核心依赖由主包自动解析；仅在包管理器源明确提供时安装，
-    # 不再无条件强行升级 Xray，避免覆盖用户已有核心版本。
-    pkginstall "xray-core" "Xray 内核" || true
+  # PassWall/PassWall2 默认核心统一在后面的“默认核心组件”阶段安装，避免重复安装。
+  if [ "$INSTALL_PW$INSTALL_PW2" = "10" ]; then
     update_xray_official_mips
   fi
 fi
