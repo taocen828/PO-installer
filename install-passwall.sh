@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.15 (修复语言包与 Xray 本地包预检识别)
+# VERSION: 20260912.1 (自动安装 Xray 官方更新所需 unzip)
 #==============================================
-VERSION="20260911.15"
+VERSION="20260912.1"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1914,7 +1914,18 @@ update_xray_official_mips() {
   [ "$PKG_MGR" = "opkg" ] || return 0
   case "$SYS_ARCH" in mipsel_*|mipsel) ;; *) return 0;; esac
   command -v curl >/dev/null 2>&1 || { info "跳过 Xray 官方更新：缺少 curl"; return 0; }
-  command -v unzip >/dev/null 2>&1 || { info "跳过 Xray 官方更新：缺少 unzip"; return 0; }
+  if ! command -v unzip >/dev/null 2>&1; then
+    info "Xray 官方更新需要 unzip，尝试安装..."
+    opkg install unzip >/tmp/po_unzip_install.log 2>&1
+    if ! command -v unzip >/dev/null 2>&1; then
+      err "unzip 安装失败，跳过 Xray 官方更新"
+      grep -E "ERROR|Collected errors|cannot find|No space|failed" /tmp/po_unzip_install.log 2>/dev/null || true
+      rm -f /tmp/po_unzip_install.log
+      return 0
+    fi
+    ok "unzip 已安装"
+    rm -f /tmp/po_unzip_install.log
+  fi
   local api json tag url u cur new bin=/usr/bin/xray tmp=/tmp/xray-mips.zip newbin=/tmp/xray-new
   cur=$($bin version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
