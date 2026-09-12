@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.24 (APK 本地 OpenClash 包允许非仓库安装)
+# VERSION: 20260912.25 (OpenClash APK 本地安装兼容实际版本)
 #==============================================
-VERSION="20260912.24"
+VERSION="20260912.25"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -144,9 +144,56 @@ echo ""
 #==============================================
 hdr "系统检测"
 
-# 判断网络工具是否真的可执行，避免损坏的动态链接 curl 被 command -v 误判为可用。
-curl_works() { command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; }
-wget_works() { command -v wget >/dev/null 2>&1 && wget --version >/dev/null 2>&1; }
+# 记录真实网络工具路径；后续即使创建兼容包装器，也不递归调用包装器。
+CURL_REAL=$(command -v curl 2>/dev/null || true)
+WGET_REAL=$(command -v wget 2>/dev/null || true)
+curl_works() { [ -n "$CURL_REAL" ] && "$CURL_REAL" --version >/dev/null 2>&1; }
+wget_works() { [ -n "$WGET_REAL" ] && "$WGET_REAL" --version >/dev/null 2>&1; }
+
+# curl 动态库损坏时，使用 wget 兼容常见 curl 下载/管道调用。
+# 这样不会因 /usr/bin/curl 文件存在但无法启动而中断整个安装流程。
+if ! curl_works && wget_works; then
+  curl() {
+    local out="" url="" quiet=0 opt write_out="" range="" fail=0
+    while [ "$#" -gt 0 ]; do
+      opt="$1"; shift
+      case "$opt" in
+        -o|--output) [ "$#" -gt 0 ] && { out="$1"; shift; } ;;
+        -O|--remote-name) out="__REMOTE_NAME__" ;;
+        -r|--range) [ "$#" -gt 0 ] && { range="$1"; shift; } ;;
+        -w|--write-out) [ "$#" -gt 0 ] && { write_out="$1"; shift; } ;;
+        -s|-S|-L|-k|-I|-#|-N|-nc|-c|-q) [ "$opt" = "-s" ] && quiet=1; [ "$opt" = "-I" ] && write_out="%{http_code}" ;;
+        -f) fail=1 ;;
+        -sS|-fsL|-fL|-sfL|--silent|--show-error|--fail|--location|--compressed|--no-check-certificate) quiet=1; case "$opt" in *f*) fail=1;; esac ;;
+        --max-time|--connect-timeout|--retry|--retry-delay|-H|--header|--user-agent|--retry-all-errors) [ "$#" -gt 0 ] && shift ;;
+        --max-time=*|--connect-timeout=*|--retry=*|--retry-delay=*|--retry-all-errors) ;;
+        http://*|https://*) url="$opt" ;;
+        *) case "$opt" in -*) ;; *) url="$opt" ;; esac ;;
+      esac
+    done
+    [ -n "$url" ] || return 2
+    local tmp="/tmp/curl-wget.$$" rc=0
+    if [ "$write_out" = "%{http_code}" ] || [ "$write_out" = "%{url_effective}" ]; then
+      "$WGET_REAL" -q --spider "$url" >/dev/null 2>&1; rc=$?
+      [ "$rc" = "0" ] || return "$rc"
+      [ "$write_out" = "%{url_effective}" ] && printf '%s' "$url" || printf '200'
+      return 0
+    fi
+    if [ "$out" = "__REMOTE_NAME__" ]; then
+      "$WGET_REAL" $([ "$quiet" = "1" ] && printf '%s' '-q') "$url"
+    elif [ -n "$out" ]; then
+      "$WGET_REAL" $([ "$quiet" = "1" ] && printf '%s' '-q') -O "$out" "$url"
+    else
+      "$WGET_REAL" $([ "$quiet" = "1" ] && printf '%s' '-q') -O - "$url"
+    fi
+    rc=$?
+    rm -f "$tmp"
+    return "$rc"
+  }
+  info "检测到 curl 动态库/符号损坏，临时使用可用 wget 兼容下载"
+elif ! curl_works && ! wget_works; then
+  info "curl 和 wget 均不可运行，网络下载将无法进行"
+fi
 
 # 修复 wget 损坏（apk 内部依赖 wget 下载文件）
 # 用"能否运行"判断而非文件头检测（ELF 二进制/symlink 会误判）
