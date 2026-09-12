@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.7 (增强 OPKG 架构检测兜底)
+# VERSION: 20260912.8 (仅无 fw4 时安装 iptables 兼容依赖)
 #==============================================
-VERSION="20260912.7"
+VERSION="20260912.8"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2004,9 +2004,17 @@ update_xray_official_mips() {
 
 install_passwall_iptables_compat() {
   [ "$PKG_MGR" = "opkg" ] || return 0
+  # 24.10 正常使用 fw4/nftables 时不需要旧版 iptables 透明代理扩展。
+  # 只有检测到 fw4 缺失、PassWall 会回退 iptables 时才补装，避免在
+  # 正常 nft 环境中额外引入旧版兼容依赖和不必要的 kmod 冲突。
+  if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
+    info "检测到 fw4/nftables 环境，跳过旧版 iptables 兼容依赖"
+    return 0
+  fi
+  info "未检测到 fw4，PassWall 将回退 iptables，检查兼容依赖..."
   # Kiddin' 旧版固件可能没有完整 fw4/nft 环境，PassWall 会回退 iptables。
   # 这些是用户态 iptables 扩展包；逐个交给 opkg 安装，不绕过真实依赖检查。
-  local pkg desc rc
+  local pkg rc
   for pkg in iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra; do
     if check_installed "$pkg"; then
       ok "$pkg 已安装"
