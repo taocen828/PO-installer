@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260911.12 (修复 PassWall git 版本与数字版本比较)
+# VERSION: 20260911.13 (统一使用自定义版本比较选择最高源版本)
 #==============================================
-VERSION="20260911.12"
+VERSION="20260911.13"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1217,7 +1217,7 @@ find_pkg_meta() {
     feed=$(basename "$idx"); feed=${feed%.gz}
     url=$(grep -h "^src/gz $feed \|^src $feed " /etc/opkg/customfeeds.conf /etc/opkg/distfeeds.conf 2>/dev/null | head -1 | awk '{print $3}')
     [ -n "$url" ] || continue
-    if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort -V | tail -1)" = "$ver" ]; then
+    if [ -z "$best_ver" ] || version_newer "$ver" "$best_ver"; then
       best_ver="$ver"; best_feed="$feed"; best_fn="$fn"; best_url="$url"
     fi
   done
@@ -1234,7 +1234,7 @@ find_pkg_meta() {
       ')
       [ -z "$sf_meta" ] && continue
       sf_ver=${sf_meta%%|*}; sf_fn=${sf_meta#*|}
-      if [ -n "$sf_ver" ] && { [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$sf_ver" | sort -V | tail -1)" = "$sf_ver" ]; }; then
+      if [ -n "$sf_ver" ] && { [ -z "$best_ver" ] || version_newer "$sf_ver" "$best_ver"; }; then
         best_ver="$sf_ver"; best_feed="$sf_feed"; best_fn="$sf_fn"; best_url="$SF_BASE/$sf_feed"
       fi
     done
@@ -1252,7 +1252,7 @@ find_pkg_meta() {
     ')
     if [ -n "$ssr_meta" ]; then
       ssr_ver=${ssr_meta%%|*}; ssr_fn=${ssr_meta#*|}
-      if [ -n "$ssr_ver" ] && { [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ssr_ver" | sort -V | tail -1)" = "$ssr_ver" ]; }; then
+      if [ -n "$ssr_ver" ] && { [ -z "$best_ver" ] || version_newer "$ssr_ver" "$best_ver"; }; then
         best_ver="$ssr_ver"; best_feed="openwrt_ai_kiddin9"; best_fn="$ssr_fn"; best_url="$SSR_BASE"
       fi
     fi
