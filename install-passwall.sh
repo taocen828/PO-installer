@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.17 (PassWall 默认核心与 Geo 组件，协议核心可选)
+# VERSION: 20260912.20 (校验系统源与本地插件包架构)
 #==============================================
-VERSION="20260912.17"
+VERSION="20260912.20"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -861,6 +861,77 @@ fi
 if [ "$UNINSTALL_ONLY" != "1" ]; then
 hdr "软件源配置"
 info "快速检测系统默认源..."
+validate_source_path_compatibility() {
+  local file="$1" url series arch bad=0
+  series=$(echo "$SYS_RELEASE" | sed -n 's/^\(19\.07\|21\.02\|22\.03\|23\.05\|24\.10\|25\.12\)\..*/\1/p')
+  [ -n "$series" ] || series=$(echo "$SYS_RELEASE" | sed -n 's/^\(19\.07\|21\.02\|22\.03\|23\.05\|24\.10\|25\.12\).*/\1/p')
+  while read -r url; do
+    [ -n "$url" ] || continue
+    # 明确写了 releases/packages-X.Y 的源必须与当前固件系列一致。
+    case "$url" in
+      */releases/packages-[0-9]*.[0-9]*/*)
+        src_series=$(printf '%s\n' "$url" | sed -n 's#.*releases/packages-\([0-9]*\.[0-9]*\)/.*#\1#p')
+        if [ -n "$series" ] && [ "$src_series" != "$series" ]; then
+          err "检测到版本不匹配的软件源: $url (固件系列 $series)"
+          bad=1
+        fi
+        ;;
+    esac
+    # OpenWrt 官方包源路径中的架构必须等于当前系统架构；all/noarch 例外。
+    arch=$(printf '%s\n' "$url" | sed -n 's#.*/packages/\([^/]*\)/\(base\|luci\|packages\|routing\|telephony\).*#\1#p')
+    if [ -n "$arch" ] && [ "$arch" != "$SYS_ARCH" ] && ! echo "$arch" | grep -qE '^(all|noarch|any)$'; then
+      err "检测到架构不匹配的软件源: $url (当前架构 $SYS_ARCH)"
+      bad=1
+    fi
+  done < "$file"
+  return "$bad"
+}
+validate_opkg_system_source() {
+  local log=/tmp/po_system_opkg_update.log
+  opkg update > "$log" 2>&1
+  local rc=$?
+  if [ "$rc" != "0" ] || grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$log" 2>/dev/null; then
+    err "OPKG 系统源更新失败或存在错误"
+    grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
+    rm -f "$log"
+    return 1
+  fi
+  awk '!/^#/ && /^src(\/gz)?[[:space:]]/ {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | sort -u > /tmp/po_opkg_source_urls
+  validate_source_path_compatibility /tmp/po_opkg_source_urls || { rm -f "$log" /tmp/po_opkg_source_urls; return 1; }
+  # 索引必须至少能提供当前系统的基础用户态包，不能只凭 URL/HTTP 200 判定可用。
+  for pkg in base-files libc luci-base; do
+    opkg list "$pkg" 2>/dev/null | grep -q "^$pkg " || {
+      err "OPKG 索引缺少基础包: $pkg"
+      rm -f "$log" /tmp/po_opkg_source_urls
+      return 1
+    }
+  done
+  rm -f "$log" /tmp/po_opkg_source_urls
+  return 0
+}
+validate_apk_system_source() {
+  local log=/tmp/po_system_apk_update.log
+  apk update > "$log" 2>&1
+  local rc=$?
+  if [ "$rc" != "0" ] || grep -qE 'ERROR|WARNING.*(architecture|not found|failed)|UNTRUST|No such' "$log" 2>/dev/null; then
+    err "APK 系统源更新失败或存在错误"
+    grep -E 'ERROR|WARNING|UNTRUST|failed|not found|No such' "$log" 2>/dev/null || true
+    rm -f "$log"
+    return 1
+  fi
+  cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null | awk '!/^#/ && NF {print $1}' | sort -u > /tmp/po_apk_source_urls
+  validate_source_path_compatibility /tmp/po_apk_source_urls || { rm -f "$log" /tmp/po_apk_source_urls; return 1; }
+  for pkg in base-files libc luci-base; do
+    apk search --exact "$pkg" 2>/dev/null | grep -q "$pkg" || {
+      err "APK 索引缺少基础包: $pkg"
+      rm -f "$log" /tmp/po_apk_source_urls
+      return 1
+    }
+  done
+  rm -f "$log" /tmp/po_apk_source_urls
+  return 0
+}
+
 SYS_SOURCE_OK=0
 if [ "$PKG_MGR" = "opkg" ]; then
   # 早期版本可能注释过系统源；先恢复，避免 iStoreOS 商店被旧状态卡住。
@@ -875,16 +946,9 @@ if [ "$PKG_MGR" = "opkg" ]; then
     fi
     grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
   fi
-  # 抽样检测任意未注释的 src/gz；不能只匹配 /base|/luci，iStoreOS 使用 /repo/all/compat。
-  for src in $(awk '!/^#/ && /^src\/gz / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | head -5); do
-    [ -n "$src" ] || continue
-    [ "$(check_url "$src/Packages.gz")" = "200" ] && SYS_SOURCE_OK=1 && break
-  done
-  # 不因外部 best-effort 镜像可用而把版本不匹配的官方源当作系统源。
-  # iStoreOS compat 源可单独证明商店源可用，但仍需保留其自带 distfeeds。
+  validate_opkg_system_source && SYS_SOURCE_OK=1
 else
-  # APK update 相对较快；保留真实验证。
-  apk update >/dev/null 2>&1 && SYS_SOURCE_OK=1
+  validate_apk_system_source && SYS_SOURCE_OK=1
 fi
 
 if [ "$SYS_SOURCE_OK" = "1" ]; then
@@ -959,9 +1023,34 @@ fi
 echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
   info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
 
-# 安装源准备完成后，再探测 PassWall 官方源；系统源异常时，上面的逻辑已先追加匹配兜底源。
-if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
-  probe_proxy_sources
+# 系统源正常时按官方教程直接配置 PassWall 源，不做镜像测速、索引手工兜底或 ImmortalWrt 探测。
+# 系统源异常时才进入完整兼容探测流程。
+OFFICIAL_PASSWALL_MODE=0
+if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] &&
+   [ "$INSTALL_OC" = "0" ] && [ "$INSTALL_SSR" = "0" ] &&
+   [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
+  OFFICIAL_PASSWALL_MODE=1
+  SF_PW_VER="${SYS_RELEASE%.*}"
+  SF_ARCH="$SYS_ARCH"
+  SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
+  SF_MIRROR_QUERY=""
+  if [ "$PKG_MGR" = "apk" ]; then
+    if echo "$SYS_RELEASE" | grep -qiE 'snapshot|snapshots|SNAPSHOT'; then
+      SF_PATH="snapshots/packages/$SYS_ARCH"
+    else
+      SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
+    fi
+  else
+    SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
+  fi
+  SF_BASE="$SF_PREFIX/$SF_PATH"
+  SF_OK=1
+  IW_OK=0
+  ok "按官方教程配置 PassWall 源 ($SF_PATH)"
+else
+  if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+    probe_proxy_sources
+  fi
 fi
 
 # 添加代理插件源（PassWall/PassWall2/SSR Plus/OpenClash 均有需要；OpenClash 用 GitHub 下载，
@@ -1199,12 +1288,6 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     fi
   fi
 fi
-fi
-
-# PassWall/PassWall2 官方源：仅在选择对应插件时配置。
-# PassWall2 OPKG 主包已优先尝试 GitHub Release；这里主要为依赖和失败兜底。
-if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
-  probe_proxy_sources
 fi
 
 #==============================================
@@ -2192,8 +2275,7 @@ fi
 if [ "$INSTALL_PW2" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     if ! install_passwall2_release "ipk"; then
-      info "PassWall2 官方 IPK 安装失败，探测官方 PassWall 源后回退包源安装..."
-      probe_proxy_sources
+      info "PassWall2 官方 IPK 安装失败，使用已配置的 PassWall 源回退安装..."
       pkginstall "luci-app-passwall2" "PassWall2" || true
     fi
   else
@@ -2503,8 +2585,89 @@ if [ "$INSTALL_SSR" = "1" ]; then
   fi
 fi
 
-# OpenClash
-# 下载函数: 官方直连；带代理则 curl 自动走代理
+install_openclash_dependencies() {
+  local log=/tmp/openclash-deps.log deps rc missing=""
+  [ "$INSTALL_OC" = "1" ] || return 0
+  if [ "$PKG_MGR" = "opkg" ]; then
+    deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base kmod-tun kmod-inet-diag"
+    if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
+      deps="$deps kmod-nft-tproxy"
+    else
+      deps="$deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
+    fi
+    info "按 OpenClash 官方指引安装依赖..."
+    opkg install $deps > "$log" 2>&1
+    rc=$?
+    if [ "$rc" != "0" ]; then
+      grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR" "$log" 2>/dev/null || true
+    fi
+    for pkg in bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base; do
+      opkg list-installed 2>/dev/null | grep -q "^$pkg " || missing="$missing $pkg"
+    done
+    rm -f "$log"
+    if [ -n "$missing" ]; then
+      err "OpenClash 官方用户态依赖未就绪:$missing"
+      return 1
+    fi
+    # kmod 必须匹配当前内核；不使用 --force-depends 绕过。
+    if ! opkg list-installed 2>/dev/null | grep -q '^kmod-tun '; then
+      err "OpenClash 依赖 kmod-tun 未安装，当前内核源可能不匹配"
+      return 1
+    fi
+  else
+    deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base kmod-tun kmod-inet-diag"
+    if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
+      deps="$deps kmod-nft-tproxy"
+    else
+      deps="$deps iptables ipset iptables-mod-tproxy iptables-mod-extra"
+    fi
+    info "按 OpenClash 官方指引安装依赖..."
+    apk add --upgrade --latest --force-overwrite --clean-protected $deps > "$log" 2>&1
+    rc=$?
+    if [ "$rc" != "0" ]; then
+      grep -E "ERROR|WARNING|unable|not found|conflict|breaks|No space" "$log" 2>/dev/null || true
+      rm -f "$log"
+      return 1
+    fi
+    rm -f "$log"
+  fi
+  ok "OpenClash 官方依赖已就绪"
+  return 0
+}
+
+opkg_prepare_local_package_arches() {
+  [ "$PKG_MGR" = "opkg" ] || return 0
+  local changed=0
+  if ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx 'all'; then
+    echo "arch all 1" >> /etc/opkg.conf
+    changed=1
+  fi
+  if ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx 'noarch'; then
+    echo "arch noarch 1" >> /etc/opkg.conf
+    changed=1
+  fi
+  if [ -n "$SYS_ARCH" ] && ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx "$SYS_ARCH"; then
+    echo "arch $SYS_ARCH 1" >> /etc/opkg.conf
+    changed=1
+  fi
+  [ "$changed" = "1" ] && info "已补齐本地 IPK 架构: all/noarch/$SYS_ARCH"
+}
+openclash_ipk_architecture() {
+  local ipk="$1" arch=""
+  if command -v ar >/dev/null 2>&1; then
+    arch=$(ar p "$ipk" control.tar.gz 2>/dev/null | gzip -dc 2>/dev/null | tar -xO ./control 2>/dev/null | sed -n 's/^Architecture:[[:space:]]*//p' | head -1)
+  fi
+  printf '%s\n' "$arch"
+}
+
+if [ "$INSTALL_OC" = "1" ]; then
+  hdr "OpenClash 依赖"
+  install_openclash_dependencies || info "OpenClash 依赖未完全就绪，继续尝试主程序安装以输出详细诊断"
+fi
+
+# OpenClash 安装
+# 再预检依赖；不能让用户自定义 feeds 的架构表误伤官方 all 架构主包。
+
 # 返回 0=成功 1=全部失败
 # 验证下载内容: ipk 为 gzip/ar, apk 为 APK v3 adb(ADBd), gz 为 gzip
 # (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
@@ -3022,6 +3185,16 @@ if [ "$INSTALL_OC" = "1" ]; then
       OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
       if dl_with_mirror "$OC_URL" "$OC_PKG"; then
         if [ "$PKG_MGR" = "opkg" ]; then
+          opkg_prepare_local_package_arches
+          OC_IPK_ARCH=$(openclash_ipk_architecture "$OC_PKG")
+          case "$OC_IPK_ARCH" in
+            all|noarch|"$SYS_ARCH") ;;
+            *)
+              err "OpenClash IPK 架构不匹配: ${OC_IPK_ARCH:-未知}（当前 $SYS_ARCH）"
+              rm -f "$OC_PKG"
+              continue
+              ;;
+          esac
           OC_LOG=/tmp/po-openclash-install.log
           opkg install --noaction "$OC_PKG" --force-downgrade --force-overwrite > "$OC_LOG" 2>&1
           OC_PRE_RC=$?
