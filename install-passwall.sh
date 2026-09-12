@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.33 (避免 APK 重装已存在依赖触发假失败)
+# VERSION: 20260912.34 (静默刷新 PassWall LuCI 后端)
 #==============================================
-VERSION="20260912.33"
+VERSION="20260912.34"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -3630,11 +3630,9 @@ fi
 #==============================================
 if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
   /etc/init.d/rpcd restart >/dev/null 2>&1 || /etc/init.d/rpcd reload >/dev/null 2>&1 || true
-  ok "PassWall LuCI 后端已刷新"
 fi
 if command -v luci-reload >/dev/null 2>&1; then
   luci-reload 2>/dev/null || true
-  ok "LuCI 已刷新"
 fi
 
 #==============================================
