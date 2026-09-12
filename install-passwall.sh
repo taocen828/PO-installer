@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.16 (PassWall 默认核心与 Geo 组件，协议核心可选)
+# VERSION: 20260912.17 (PassWall 默认核心与 Geo 组件，协议核心可选)
 #==============================================
-VERSION="20260912.16"
+VERSION="20260912.17"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -646,7 +646,9 @@ SF_BASE="$SF_PREFIX/$SF_PATH"
 # 注意: 始终探测(不只在 SF 失败时)——SF 某些版本/架构构建残缺(如 21.02 aarch64 缺 passwall2/geoview),
 #       immortalwrt 作为补充源可兜底。版本优先匹配当前系列, 无则用 23.05.4 兜底。
 IW_OK=0; IW_USE=""; IW_VER=""
-if [ "$PKG_MGR" = "opkg" ]; then
+# SourceForge 官方 PassWall 源可用时，不再额外探测 ImmortalWrt，避免
+# 24.10.6 等补充源被误认为 PassWall 安装候选，也避免混入第三方依赖。
+if [ "$PKG_MGR" = "opkg" ] && [ "$SF_OK" != "1" ]; then
   info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
   # 按内核系列选择同系列 ImmortalWrt 用户态源；旧版不能用 23.05 依赖混装。
   case "$SF_PW_VER" in
@@ -779,12 +781,8 @@ case "$MAIN_CHOICE" in
     ;;
 esac
 
-# 用户选择完成后：PassWall 直接探测官方插件源；PassWall2 的 APK 按官方推荐使用
-# SourceForge 仓库，OPKG 则先走 GitHub Release，只有失败/缺依赖时才探测并追加 SF 源。
-if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || { [ "$INSTALL_PW2" = "1" ] && [ "$PKG_MGR" = "apk" ]; }; }; then
-  probe_proxy_sources
-fi
-
+# 用户选择完成后先进入安装模式；软件源检测/PassWall官方源配置必须按顺序执行。
+# PassWall2 OPKG 主包优先走 GitHub Release；源仅用于依赖和失败兜底。
 if [ "$UNINSTALL_ONLY" = "1" ]; then
   echo ""
   echo "卸载配置："
@@ -960,6 +958,11 @@ fi
 # 自编译固件提示（Kiddin'/immortalwrt 等：kmod 内核模块可能不匹配官方源）
 echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
   info "提示: 自编译固件 ($SYS_DESC) 的 kmod 内核模块可能不匹配官方源，普通软件包不受影响"
+
+# 安装源准备完成后，再探测 PassWall 官方源；系统源异常时，上面的逻辑已先追加匹配兜底源。
+if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+  probe_proxy_sources
+fi
 
 # 添加代理插件源（PassWall/PassWall2/SSR Plus/OpenClash 均有需要；OpenClash 用 GitHub 下载，
 # 但 GitHub 不可达时降级走 immortalwrt 源 opkg 安装，所以 OpenClash-only 也必须写入 iw 源）
@@ -1196,6 +1199,12 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     fi
   fi
 fi
+fi
+
+# PassWall/PassWall2 官方源：仅在选择对应插件时配置。
+# PassWall2 OPKG 主包已优先尝试 GitHub Release；这里主要为依赖和失败兜底。
+if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+  probe_proxy_sources
 fi
 
 #==============================================
