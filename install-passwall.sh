@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.30 (安装完成后返回主菜单)
+# VERSION: 20260912.31 (修复 APK OpenClash 依赖假失败)
 #==============================================
-VERSION="20260912.30"
+VERSION="20260912.31"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -2709,11 +2709,17 @@ install_openclash_dependencies() {
       printf "  [%s/%s] ✗ %s\n" "$((dep_done + 1))" "$dep_total" "$pkg"
     fi
   done
-  if [ "$rc" != "0" ] || [ -n "$user_missing" ]; then
+  if [ -n "$user_missing" ]; then
     grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR|WARNING|unable|conflict|breaks" "$log" 2>/dev/null || true
     rm -f "$log"
     err "OpenClash 用户态依赖未完全就绪:$user_missing"
     return 1
+  fi
+  if [ "$rc" != "0" ]; then
+    # APK 可能因 world 中无关的残留约束返回非零，但目标依赖已实际落盘；
+    # 不能把这种事务噪音误报成 OpenClash 用户态依赖失败。
+    info "APK 依赖事务返回 $rc，但 OpenClash 用户态依赖已全部落盘，继续安装"
+    grep -E "ERROR|WARNING|unable|conflict|breaks" "$log" 2>/dev/null || true
   fi
   if [ "$kernel_rc" != "0" ] || [ -n "$kernel_missing" ]; then
     info "OpenClash 内核/防火墙依赖安装失败；通常是厂商内核源或 kernel hash 不匹配"
