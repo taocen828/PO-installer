@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.3 (修复 Firewall4 不应强制依赖 ipset)
+# VERSION: 20260913.4 (避免源重复添加并区分可选 telephony 源故障)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 [ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
 VERSION="${VERSION_DATE}.${VERSION_SEQ}"
@@ -962,12 +962,17 @@ validate_opkg_system_source() {
   local log=/tmp/po_system_opkg_update.log
   opkg update > "$log" 2>&1
   local rc=$?
-  if [ "$rc" != "0" ] || grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$log" 2>/dev/null; then
+  # 部分镜像没有 telephony 索引，但 base/luci/packages/routing 已正常；
+  # 这类可选 feed 故障不能把整个系统源判为不可用。
+  local fatal_log=/tmp/po_system_opkg_fatal.log
+  grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$log" > "$fatal_log" 2>/dev/null || true
+  if [ "$rc" != "0" ] && grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
     err "OPKG 系统源更新失败或存在错误"
     grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
-    rm -f "$log"
+    rm -f "$log" "$fatal_log"
     return 1
   fi
+  rm -f "$fatal_log"
   awk '!/^#/ && /^src(\/gz)?[[:space:]]/ {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | sort -u > /tmp/po_opkg_source_urls
   validate_source_path_compatibility /tmp/po_opkg_source_urls || { rm -f "$log" /tmp/po_opkg_source_urls; return 1; }
   # 索引必须至少能提供当前系统的基础用户态包，不能只凭 URL/HTTP 200 判定可用。
@@ -1057,17 +1062,29 @@ else
         grep -vE '^[[:space:]]*src(/gz)?[[:space:]]+openwrt_(core|base|luci|packages|routing|telephony)[[:space:]]' \
           /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-new 2>/dev/null || true
       fi
+      add_fallback_opkg_feed() {
+        local name="$1" url="$2" existing
+        existing=$(awk -v n="$name" '$1=="src/gz" && $2==n {print $3; exit}' \
+          /etc/opkg/distfeeds.conf /etc/opkg/compatfeeds.conf /tmp/customfeeds.po-new 2>/dev/null)
+        if [ -n "$existing" ]; then
+          if [ "$existing" = "$url" ]; then
+            return 0
+          fi
+          info "已存在同名源 $name，跳过重复追加（当前: $existing）"
+          return 0
+        fi
+        printf 'src/gz %s %s\n' "$name" "$url" >> /tmp/customfeeds.po-new
+      }
       {
         echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
-        if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
-          echo "src/gz openwrt_core $OW_USE/targets/$SYS_TARGET/packages"
-        fi
-        echo "src/gz openwrt_base $OW_USE/packages/$SYS_ARCH/base"
-        echo "src/gz openwrt_luci $OW_USE/packages/$SYS_ARCH/luci"
-        echo "src/gz openwrt_packages $OW_USE/packages/$SYS_ARCH/packages"
-        echo "src/gz openwrt_routing $OW_USE/packages/$SYS_ARCH/routing"
-        echo "src/gz openwrt_telephony $OW_USE/packages/$SYS_ARCH/telephony"
       } >> /tmp/customfeeds.po-new
+      [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && \
+        add_fallback_opkg_feed openwrt_core "$OW_USE/targets/$SYS_TARGET/packages"
+      add_fallback_opkg_feed openwrt_base "$OW_USE/packages/$SYS_ARCH/base"
+      add_fallback_opkg_feed openwrt_luci "$OW_USE/packages/$SYS_ARCH/luci"
+      add_fallback_opkg_feed openwrt_packages "$OW_USE/packages/$SYS_ARCH/packages"
+      add_fallback_opkg_feed openwrt_routing "$OW_USE/packages/$SYS_ARCH/routing"
+      add_fallback_opkg_feed openwrt_telephony "$OW_USE/packages/$SYS_ARCH/telephony"
       cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
       rm -f /tmp/customfeeds.po-new
       ok "已配置 OpenWrt 镜像源，保留现有 customfeeds ($OW_USE)"
