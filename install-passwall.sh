@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.12 (iStoreOS 优先使用专用源)
+# VERSION: 20260913.13 (按系统源状态选择 iStoreOS 备用源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="12"
+VERSION_SEQ="13"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -335,15 +335,21 @@ SYS_RELEASE="$DISTRIB_RELEASE"; SYS_DESC="$DISTRIB_DESCRIPTION"
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE="unknown"
 
 # iStoreOS 专用源：compat 提供商店兼容包，nas 提供架构相关的 NAS 包。
-# 先加入专用源，再做系统源检查；这样 iStoreOS 不会优先误用通用 OpenWrt 源。
+# 只在系统源不可用时调用；系统源正常时绝不添加其它源。
 configure_istoreos_feeds() {
   [ "$PKG_MGR" = "opkg" ] || return 0
   echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' || return 0
-  local nas_arch="$SYS_ARCH" file tmp
+  local nas_arch="$SYS_ARCH" file tmp compat_url nas_url
   case "$nas_arch" in
     x86_64|aarch64_cortex-a53|aarch64_generic) ;;
     *) info "iStoreOS 暂无架构专用 nas 源: $nas_arch"; nas_arch="" ;;
   esac
+  compat_url="https://istore.istoreos.com/repo/all/compat/Packages.gz"
+  [ "$(check_url "$compat_url")" = "200" ] || return 1
+  if [ -n "$nas_arch" ]; then
+    nas_url="https://istore.istoreos.com/repo/$nas_arch/nas/Packages.gz"
+    [ "$(check_url "$nas_url")" = "200" ] || return 1
+  fi
   mkdir -p /etc/opkg
   file=/etc/opkg/compatfeeds.conf
   tmp=/tmp/compatfeeds.istoreos.$$
@@ -353,8 +359,8 @@ configure_istoreos_feeds() {
   [ -n "$nas_arch" ] && printf 'src/gz is_nas https://istore.istoreos.com/repo/%s/nas\n' "$nas_arch" >> "$file"
   rm -f "$tmp"
   ok "iStoreOS 专用源已优先配置: compat${nas_arch:+ + $nas_arch/nas}"
+  return 0
 }
-configure_istoreos_feeds
 # 官方 OpenWrt 标准固件：使用官方 target/packages 源，不混入 ImmortalWrt
 # 或第三方完整 userspace 源。GL-MT6000/filogic 24.10.4 属于此类。
 OFFICIAL_STANDARD=0
@@ -1092,18 +1098,6 @@ validate_apk_system_source() {
 
 SYS_SOURCE_OK=0
 if [ "$PKG_MGR" = "opkg" ]; then
-  # 早期版本可能注释过系统源；先恢复，避免 iStoreOS 商店被旧状态卡住。
-  if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos"; then
-    sed -i 's/^#\(src\/gz \)/\1/' /etc/opkg/distfeeds.conf 2>/dev/null || true
-    mkdir -p /etc/opkg
-    if [ -f /etc/opkg/compatfeeds.conf ]; then
-      last_char=$(tail -c 1 /etc/opkg/compatfeeds.conf 2>/dev/null | tr -d '\n' 2>/dev/null)
-      [ -n "$last_char" ] && printf '\n' >> /etc/opkg/compatfeeds.conf
-    else
-      : > /etc/opkg/compatfeeds.conf
-    fi
-    grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null || printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
-  fi
   validate_opkg_system_source && SYS_SOURCE_OK=1
 else
   validate_apk_system_source && SYS_SOURCE_OK=1
@@ -1111,31 +1105,14 @@ fi
 
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
-  # iStoreOS 的 iStore 商店依赖独立的 compat 源；系统源正常不代表商店源正常。
-  if echo "$SYS_DESC" | grep -qiE "iStoreOS|istoreos" && [ "$PKG_MGR" = "opkg" ]; then
-    mkdir -p /etc/opkg
-    istore_feed_changed=0
-    if [ -f /etc/opkg/compatfeeds.conf ]; then
-      last_char=$(tail -c 1 /etc/opkg/compatfeeds.conf 2>/dev/null | tr -d '\n' 2>/dev/null)
-      [ -n "$last_char" ] && printf '\n' >> /etc/opkg/compatfeeds.conf && istore_feed_changed=1
-    else
-      : > /etc/opkg/compatfeeds.conf
-      istore_feed_changed=1
-    fi
-    if ! grep -qE '^src/gz istore_compat ' /etc/opkg/compatfeeds.conf 2>/dev/null; then
-      printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> /etc/opkg/compatfeeds.conf
-      istore_feed_changed=1
-    fi
-    if [ "$istore_feed_changed" = "1" ]; then
-      ok "iStoreOS 软件源配置已修复"
-    else
-      ok "iStoreOS 软件源配置正常"
-    fi
-  fi
 else
   err "系统源不可用，保留原系统源，仅追加 OpenWrt 镜像源..."
   if [ "$PKG_MGR" = "opkg" ]; then
-    if [ -n "$OW_USE" ]; then
+    ISTORE_FALLBACK_OK=0
+    if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
+      opkg update >/dev/null 2>&1 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || err "iStoreOS 专用源更新失败"
+    fi
+    if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ -n "$OW_USE" ]; then
       # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
       cp /etc/opkg/customfeeds.conf /tmp/customfeeds.po-bak 2>/dev/null || true
       : > /tmp/customfeeds.po-new
@@ -1169,9 +1146,11 @@ else
       cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
       rm -f /tmp/customfeeds.po-new
       ok "已配置 OpenWrt 镜像源，保留现有 customfeeds ($OW_USE)"
-    else
-      err "无可用镜像源，系统源保持不动（未修改）"
-    fi
+      elif [ "$ISTORE_FALLBACK_OK" = "1" ]; then
+        ok "已使用 iStoreOS 专用源，不添加通用兜底源"
+      else
+        err "无可用镜像源，系统源保持不动（未修改）"
+      fi
   else
     if [ -n "$OW_USE" ]; then
       # 绝不注释原 APK 系统源；只追加兜底源，避免 iStore/系统源状态被破坏。
