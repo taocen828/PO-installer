@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.5 (压缩可选组件菜单空行)
+# VERSION: 20260913.6 (修复 OpenClash IPK 架构识别与依赖预检)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="5"
+VERSION_SEQ="6"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 [ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
 VERSION="${VERSION_DATE}.${VERSION_SEQ}"
@@ -2700,7 +2700,9 @@ fi
 install_openclash_dependencies() {
   local log=/tmp/openclash-deps.log user_deps kernel_deps deps user_install="" kernel_install="" rc=0 kernel_rc=0 missing="" user_missing="" kernel_missing="" dep_total=0 dep_done=0 installed pkg
   [ "$INSTALL_OC" = "1" ] || return 0
-  user_deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
+  # 以 OpenClash 官方 IPK 的 Depends 为准；luci/luci-compat/luci-base
+  # 不是主包依赖，且 Kwrt 可能没有名为 luci 的元包，不能把它们当硬依赖。
+  user_deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip"
   kernel_deps="kmod-tun kmod-inet-diag"
   if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
     kernel_deps="$kernel_deps kmod-nft-tproxy"
@@ -2809,8 +2811,19 @@ opkg_prepare_local_package_arches() {
 }
 openclash_ipk_architecture() {
   local ipk="$1" arch=""
+  # 官方 OpenClash 主包文件名明确为 _all.ipk；兼容包无需依赖
+  # busybox tar/ar 的 control.tar.gz 解包能力来判断架构。
+  case "$(basename "$ipk")" in
+    *_all.ipk) echo "all"; return 0 ;;
+  esac
+  # OpenWrt 的 .ipk 既可能是传统 ar 包，也可能是 gzip 压缩的
+  # tar 包（当前 OpenClash release 即为后者）。先按 ar 读取，失败后
+  # 再按 gzip/tar 读取；不能把 gzip 外层误报成“未知架构”。
   if command -v ar >/dev/null 2>&1; then
     arch=$(ar p "$ipk" control.tar.gz 2>/dev/null | gzip -dc 2>/dev/null | tar -xO ./control 2>/dev/null | sed -n 's/^Architecture:[[:space:]]*//p' | head -1)
+  fi
+  if [ -z "$arch" ]; then
+    arch=$(tar -xOzf "$ipk" ./control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null | sed -n 's/^Architecture:[[:space:]]*//p' | head -1)
   fi
   printf '%s\n' "$arch"
 }
