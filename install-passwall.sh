@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.13 (按系统源状态选择 iStoreOS 备用源)
+# VERSION: 20260913.14 (统一按固件类型选择备用源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="13"
+VERSION_SEQ="14"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -345,10 +345,12 @@ configure_istoreos_feeds() {
     *) info "iStoreOS 暂无架构专用 nas 源: $nas_arch"; nas_arch="" ;;
   esac
   compat_url="https://istore.istoreos.com/repo/all/compat/Packages.gz"
+  # compat 是 iStoreOS 的核心专用源；nas 源按架构可选，不能因为某个
+  # 架构没有 nas 目录而放弃整个 iStoreOS 专用源。
   [ "$(check_url "$compat_url")" = "200" ] || return 1
   if [ -n "$nas_arch" ]; then
     nas_url="https://istore.istoreos.com/repo/$nas_arch/nas/Packages.gz"
-    [ "$(check_url "$nas_url")" = "200" ] || return 1
+    [ "$(check_url "$nas_url")" = "200" ] || nas_arch=""
   fi
   mkdir -p /etc/opkg
   file=/etc/opkg/compatfeeds.conf
@@ -1106,7 +1108,7 @@ fi
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
 else
-  err "系统源不可用，保留原系统源，仅追加 OpenWrt 镜像源..."
+  err "系统源不可用，已注释失败源，开始选择对应固件专用源..."
   if [ "$PKG_MGR" = "opkg" ]; then
     ISTORE_FALLBACK_OK=0
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
@@ -1145,7 +1147,7 @@ else
       add_fallback_opkg_feed openwrt_telephony "$OW_USE/packages/$SYS_ARCH/telephony"
       cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
       rm -f /tmp/customfeeds.po-new
-      ok "已配置 OpenWrt 镜像源，保留现有 customfeeds ($OW_USE)"
+      ok "已配置对应固件备用源，保留现有 customfeeds ($OW_USE)"
       elif [ "$ISTORE_FALLBACK_OK" = "1" ]; then
         ok "已使用 iStoreOS 专用源，不添加通用兜底源"
       else
