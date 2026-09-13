@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.4 (避免源重复添加并区分可选 telephony 源故障)
+# VERSION: 20260913.5 (压缩可选组件菜单空行)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="4"
+VERSION_SEQ="5"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 [ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
 VERSION="${VERSION_DATE}.${VERSION_SEQ}"
@@ -3610,7 +3610,6 @@ opt_pkginstall() {
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "可选组件"
   echo "可选组件列表："
-  echo ""
   i=1
   for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
     comp="${comp_desc%%:*}"
@@ -3634,7 +3633,6 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     eval "OPT_DESC_$i=\"$desc\""
     i=$((i + 1))
   done
-  echo ""
   echo "输入序号安装（多个用空格隔开，回车跳过）: "
   echo -n "> "
   read -r OPT_CHOICES
