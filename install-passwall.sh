@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.9 (增加 Kwrt 软件源备用支持)
+# VERSION: 20260913.10 (ImmortalWrt 优先使用官方源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="9"
+VERSION_SEQ="10"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -522,7 +522,7 @@ probe_ow_ver() {
 # 索引文件类型按包管理器判断：opkg→Packages.gz（24.10及以下），apk→packages.adb（25.12/snapshots）
 PKG_FILE="Packages.gz"
 [ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
-MIR_BASES="https://downloads.openwrt.org https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.immortalwrt.com"
+MIR_BASES="https://downloads.openwrt.org https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.immortalwrt.org"
 # ImmortalWrt 固件: immortalwrt 镜像排最前 (自编译/官方 iStoreOS 等)
 if echo "$SYS_DESC $DISTRIB_ID" | grep -qi immortalwrt; then
   MIR_BASES="https://downloads.immortalwrt.org https://mirror.sjtu.edu.cn/immortalwrt https://mirrors.vsean.net/immortalwrt $MIR_BASES"
