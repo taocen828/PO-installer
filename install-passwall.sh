@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.11 (完善 ImmortalWrt 多版本探测)
+# VERSION: 20260913.12 (iStoreOS 优先使用专用源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="11"
+VERSION_SEQ="12"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -333,6 +333,28 @@ if [ -r /etc/openwrt_release ]; then . /etc/openwrt_release; fi
 SYS_RELEASE="$DISTRIB_RELEASE"; SYS_DESC="$DISTRIB_DESCRIPTION"
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE=$(cat /etc/version 2>/dev/null | head -1)
 [ -z "$SYS_RELEASE" ] && SYS_RELEASE="unknown"
+
+# iStoreOS 专用源：compat 提供商店兼容包，nas 提供架构相关的 NAS 包。
+# 先加入专用源，再做系统源检查；这样 iStoreOS 不会优先误用通用 OpenWrt 源。
+configure_istoreos_feeds() {
+  [ "$PKG_MGR" = "opkg" ] || return 0
+  echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' || return 0
+  local nas_arch="$SYS_ARCH" file tmp
+  case "$nas_arch" in
+    x86_64|aarch64_cortex-a53|aarch64_generic) ;;
+    *) info "iStoreOS 暂无架构专用 nas 源: $nas_arch"; nas_arch="" ;;
+  esac
+  mkdir -p /etc/opkg
+  file=/etc/opkg/compatfeeds.conf
+  tmp=/tmp/compatfeeds.istoreos.$$
+  grep -vE '^[[:space:]]*src/gz[[:space:]]+(istore_compat|is_nas)[[:space:]]' "$file" 2>/dev/null > "$tmp" || true
+  cat "$tmp" > "$file"
+  printf '%s\n' 'src/gz istore_compat https://istore.istoreos.com/repo/all/compat' >> "$file"
+  [ -n "$nas_arch" ] && printf 'src/gz is_nas https://istore.istoreos.com/repo/%s/nas\n' "$nas_arch" >> "$file"
+  rm -f "$tmp"
+  ok "iStoreOS 专用源已优先配置: compat${nas_arch:+ + $nas_arch/nas}"
+}
+configure_istoreos_feeds
 # 官方 OpenWrt 标准固件：使用官方 target/packages 源，不混入 ImmortalWrt
 # 或第三方完整 userspace 源。GL-MT6000/filogic 24.10.4 属于此类。
 OFFICIAL_STANDARD=0
