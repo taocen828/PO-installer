@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.8 (修复动态版本显示)
+# VERSION: 20260913.9 (增加 Kwrt 软件源备用支持)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="8"
+VERSION_SEQ="9"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -522,15 +522,37 @@ probe_ow_ver() {
 # 索引文件类型按包管理器判断：opkg→Packages.gz（24.10及以下），apk→packages.adb（25.12/snapshots）
 PKG_FILE="Packages.gz"
 [ "$PKG_MGR" = "apk" ] && PKG_FILE="packages.adb"
-MIR_BASES="https://downloads.openwrt.org https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.immortalwrt.org"
+MIR_BASES="https://downloads.openwrt.org https://mirrors.aliyun.com/openwrt https://mirrors.tuna.tsinghua.edu.cn/openwrt https://downloads.immortalwrt.com"
 # ImmortalWrt 固件: immortalwrt 镜像排最前 (自编译/官方 iStoreOS 等)
 if echo "$SYS_DESC $DISTRIB_ID" | grep -qi immortalwrt; then
   MIR_BASES="https://downloads.immortalwrt.org https://mirror.sjtu.edu.cn/immortalwrt https://mirrors.vsean.net/immortalwrt $MIR_BASES"
   info "检测到 ImmortalWrt 固件，优先使用 immortalwrt 镜像"
 fi
+# Kwrt 软件源与官方 OpenWrt 目录结构兼容，但 Kwrt 的 release 目录通常
+# 只有 24.10/25.12 两级版本，且 manifest 文件名使用 kwrt-日期格式。
+# 仅在系统源失败后的 fallback 阶段实际写入，避免影响正常固件的系统源。
+KWRT_FIRMWARE=0
+if echo "$SYS_DESC $DISTRIB_ID $DISTRIB_NAME" | grep -qiE '(^|[^a-z])kwrt([^a-z]|$)'; then
+  KWRT_FIRMWARE=1
+  # dl.openwrt.ai 的 Kwrt 25.12 仍提供 opkg Packages.gz 索引。
+  # 不按本机 apk-tools 判断，否则会错误探测 packages.adb。
+  PKG_FILE="Packages.gz"
+  MIR_BASES="https://dl.openwrt.ai $MIR_BASES"
+  info "检测到 Kwrt 固件，优先探测 Kwrt 软件源 (https://dl.openwrt.ai/releases/)"
+fi
 MIR_USE=""; OW_VER=""
 for m in $MIR_BASES; do
   [ "$(check_url $m/releases/)" = "200" ] || continue
+  # Kwrt 的 release 目录是 24.10/25.12，不是官方的 24.10.x。
+  if [ "$KWRT_FIRMWARE" = "1" ] && [ "$m" = "https://dl.openwrt.ai" ]; then
+    for s in $SERIES_CHAIN; do
+      if [ "$(check_url "$m/releases/$s/packages/$SYS_ARCH/base/$PKG_FILE")" = "200" ]; then
+        MIR_USE="$m"; OW_VER="$s"
+        ok "Kwrt 源 ✓ ($MIR_USE/releases/$OW_VER)"
+        break 2
+      fi
+    done
+  fi
   # 优先: DISTRIB_RELEASE 精确匹配（最准，如 25.12.4）
   V=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10|25\.12)\.[0-9]+' | head -1)
   if [ -n "$V" ] && [ "$(check_url $m/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
@@ -741,7 +763,7 @@ OW_OK=0; TARGET_OK=0
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   # OW_VER 为数字版本号 → releases；否则（snapshots）→ snapshots 目录
   case "$OW_VER" in
-    [0-9]*.[0-9]*.[0-9]*) OW_BASE="$MIR_USE/releases/$OW_VER" ;;
+    [0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) OW_BASE="$MIR_USE/releases/$OW_VER" ;;
     *) OW_BASE="$MIR_USE/snapshots" ;;
   esac
   OW_OK=1
