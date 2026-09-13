@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.6 (修复 OpenClash IPK 架构识别与依赖预检)
+# VERSION: 20260913.7 (失败系统源自动注释并切换镜像)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="6"
+VERSION_SEQ="7"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 [ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
 VERSION="${VERSION_DATE}.${VERSION_SEQ}"
@@ -958,6 +958,36 @@ validate_source_path_compatibility() {
   done < "$file"
   return "$bad"
 }
+# 将本次更新明确失败的 OPKG 源注释掉，避免后续刷新持续访问坏源。
+disable_failed_opkg_feeds() {
+  local log="$1" file tmp line url changed
+  [ -s "$log" ] || return 0
+  for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
+    [ -f "$file" ] || continue
+    tmp="/tmp/$(basename "$file").po-disabled"
+    changed=0
+    : > "$tmp"
+    while IFS= read -r line; do
+      case "$line" in
+        src/gz\ *|src\ *)
+          url=$(printf '%s\n' "$line" | awk '{print $3}')
+          if [ -n "$url" ] && grep -F "$url" "$log" 2>/dev/null | grep -qE 'Failed|failed|ERROR|404|wget returned|Collected errors|Signature check failed'; then
+            printf '# PO-installer disabled failed feed: %s\n' "$line" >> "$tmp"
+            changed=1
+            continue
+          fi
+          ;;
+      esac
+      printf '%s\n' "$line" >> "$tmp"
+    done < "$file"
+    if [ "$changed" = "1" ]; then
+      cat "$tmp" > "$file"
+      info "已注释本次刷新失败的 OPKG 源: $file"
+    fi
+    rm -f "$tmp"
+  done
+}
+
 validate_opkg_system_source() {
   local log=/tmp/po_system_opkg_update.log
   opkg update > "$log" 2>&1
@@ -969,6 +999,7 @@ validate_opkg_system_source() {
   if [ "$rc" != "0" ] && grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
     err "OPKG 系统源更新失败或存在错误"
     grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
+    disable_failed_opkg_feeds "$log"
     rm -f "$log" "$fatal_log"
     return 1
   fi
