@@ -2,9 +2,9 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.38 (补齐 Firewall3 iptables 依赖)
+# VERSION: 20260912.39 (避免正常系统源清空全部 OPKG 索引)
 #==============================================
-VERSION="20260912.38"
+VERSION="20260912.39"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
@@ -1280,11 +1280,10 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     }
     # 源已写入后再注册源路径里的架构；不能只依赖 uname/opkg 的本机架构名。
     ensure_opkg_feed_arches
-    # 清理上一次运行留下的索引：旧索引可能来自 25.12/6.6 或错误架构，
-    # 即使 customfeeds 已改正，opkg 仍会继续读取 /var/opkg-lists 中的旧包。
-    # 先全部清空，随后用当前固件对应的源重新刷新，避免“no valid architecture”。
-    rm -f /var/opkg-lists/* 2>/dev/null || true
-    info "已清理旧 OPKG 索引，按当前固件源重新刷新..."
+    # 只清理脚本管理过的插件/兜底索引；不要清空全部 /var/opkg-lists。
+    # 系统源正常时，base/luci 等官方索引无需删除，清空会造成不必要的全量重下。
+    rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* 2>/dev/null || true
+    info "已刷新插件及兜底源索引，保留系统源索引..."
     opkg update > /tmp/po_opkg_update.log 2>&1 || true
     # 第三方 SNAPSHOT 的 opkg 有时不会将新 customfeed 的索引落盘。若补了完整 userspace packages 源，
     # 直接缓存 Packages.gz，使 OPKG 能解析所有递归依赖（而不是按 coreutils-timeout/libyaml 逐个特判）。
