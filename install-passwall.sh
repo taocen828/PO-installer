@@ -2,9 +2,13 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260912.39 (避免正常系统源清空全部 OPKG 索引)
+# VERSION: 20260913.1 (版本日期随设备当前日期生成)
 #==============================================
-VERSION="20260912.39"
+# 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
+VERSION_SEQ="1"
+VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
+[ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
+VERSION="${VERSION_DATE}.${VERSION_SEQ}"
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
