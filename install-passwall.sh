@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.1 (版本日期随设备当前日期生成)
+# VERSION: 20260913.2 (安装完成后删除脚本退出)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="1"
+VERSION_SEQ="2"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 [ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
 VERSION="${VERSION_DATE}.${VERSION_SEQ}"
@@ -3666,22 +3666,11 @@ echo ""
 echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
 echo ""
 
-# 安装完成后返回主菜单。
-# 直接执行脚本时可以重新进入当前脚本；管道执行没有可重入的脚本文件，只能提示用户重新运行。
+# 安装完成后删除临时脚本并退出，不返回主菜单。
 THIS_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
 case "$THIS_SCRIPT" in
   /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
-    if [ -f "$THIS_SCRIPT" ] && [ -r "$THIS_SCRIPT" ]; then
-      echo ""
-      info "返回主菜单..."
-      # /tmp 下的脚本可能没有执行权限；显式交给 sh 重新解释，避免 Permission denied。
-      exec sh "$THIS_SCRIPT"
-    fi
+    rm -f "$THIS_SCRIPT" 2>/dev/null || true
     ;;
 esac
-if [ -f "$THIS_SCRIPT" ] && [ -r "$THIS_SCRIPT" ] && [ "$THIS_SCRIPT" != "sh" ] && [ "$THIS_SCRIPT" != "-sh" ]; then
-  echo ""
-  info "返回主菜单..."
-  exec sh "$THIS_SCRIPT"
-fi
-info "当前为管道执行模式，安装流程结束；请重新运行 opinstall 进入主菜单。"
+exit 0
