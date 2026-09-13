@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.2 (安装完成后删除脚本退出)
+# VERSION: 20260913.3 (修复 Firewall4 不应强制依赖 ipset)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="2"
+VERSION_SEQ="3"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 [ -n "$VERSION_DATE" ] || VERSION_DATE="20260913"
 VERSION="${VERSION_DATE}.${VERSION_SEQ}"
@@ -2683,7 +2683,7 @@ fi
 install_openclash_dependencies() {
   local log=/tmp/openclash-deps.log user_deps kernel_deps deps user_install="" kernel_install="" rc=0 kernel_rc=0 missing="" user_missing="" kernel_missing="" dep_total=0 dep_done=0 installed pkg
   [ "$INSTALL_OC" = "1" ] || return 0
-  user_deps="bash dnsmasq-full curl ca-bundle ipset ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
+  user_deps="bash dnsmasq-full curl ca-bundle ip-full ruby ruby-yaml unzip luci-compat luci luci-base"
   kernel_deps="kmod-tun kmod-inet-diag"
   if command -v fw4 >/dev/null 2>&1 || [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
     kernel_deps="$kernel_deps kmod-nft-tproxy"
@@ -2692,6 +2692,7 @@ install_openclash_dependencies() {
     # kmod-ipt-nat、ip6tables-mod-nat 不能省略，否则 OpenClash
     # 可能能安装但透明代理/IPv6 NAT 无法工作。
     kernel_deps="$kernel_deps iptables ipset iptables-mod-tproxy iptables-mod-extra kmod-ipt-nat ip6tables-mod-nat"
+    user_deps="$user_deps ipset"
   fi
   deps="$user_deps $kernel_deps"
   info "按 OpenClash 官方指引安装依赖..."
