@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.10 (ImmortalWrt 优先使用官方源)
+# VERSION: 20260913.11 (完善 ImmortalWrt 多版本探测)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="10"
+VERSION_SEQ="11"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -468,7 +468,10 @@ SF_OK=0; OW_OK=0; OW_USE=""
 
 # 列出镜像上某系列的所有小版本（从新到旧）
 list_series_vers() {
-  curl -sL --max-time 10 "$1/releases/" 2>/dev/null | grep -oE "$2\.[0-9]+/" | tr -d '/' | sort -uVr
+  # 支持 18.06/21.02/23.05/24.10/25.12 等全部发布系列，
+  # 也保留 -SNAPSHOT 和 rc 版本，不能只匹配两个最新系列。
+  curl -sL --max-time 10 "$1/releases/" 2>/dev/null |
+    grep -oE "${2}([.-][0-9]+|[-]SNAPSHOT)/" | tr -d '/' | sort -uVr
 }
 
 # 动态探测精确源版本 + 目标平台：用内核版本精确匹配官方 manifest
@@ -480,7 +483,7 @@ probe_ow_ver() {
   mfname="openwrt"
   echo "$MIR" | grep -q "immortalwrt" && mfname="immortalwrt"
   # 1) DISTRIB_RELEASE 直接给出（最准，但需验证镜像上确实存在该版本——镜像可能滞后）
-  V=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10|25\.12)\.[0-9]+' | head -1)
+  V=$(echo "$SYS_RELEASE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   if [ -n "$V" ] && [ "$(check_url $MIR/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="$V"; return 0
   fi
@@ -493,7 +496,7 @@ probe_ow_ver() {
   #    userspace Packages.gz，避免在低性能 MIPS 上按多个 target 逐个下载 manifest 而卡数分钟。
   #    这一步只用于普通用户态包；kmod 源仍在后面按目标平台单独严格验证。
   for s in $SERIES_CHAIN; do
-    for v in $(list_series_vers "$MIR" "$s" | head -1); do
+    for v in $(list_series_vers "$MIR" "$s"); do
       if [ "$(check_url "$MIR/releases/$v/packages/$SYS_ARCH/base/$PKG_FILE")" = "200" ]; then
         OW_VER="$v"; return 0
       fi
@@ -554,7 +557,7 @@ for m in $MIR_BASES; do
     done
   fi
   # 优先: DISTRIB_RELEASE 精确匹配（最准，如 25.12.4）
-  V=$(echo "$SYS_RELEASE" | grep -oE '^(19\.07|21\.02|22\.03|23\.05|24\.10|25\.12)\.[0-9]+' | head -1)
+  V=$(echo "$SYS_RELEASE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   if [ -n "$V" ] && [ "$(check_url $m/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     MIR_USE=$m; OW_VER=$V
     ok "OpenWrt 镜像 ✓ ($MIR_USE, 版本 $OW_VER)"
