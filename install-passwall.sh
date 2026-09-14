@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.19 (SourceForge 主包优先与三插件状态汇总)
+# VERSION: 20260914.20 (修复 OpenClash IPK 架构误报)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="19"
+VERSION_SEQ="20"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2964,11 +2964,14 @@ opkg_prepare_local_package_arches() {
   [ "$changed" = "1" ] && info "已补齐本地 IPK 架构: all/noarch/$SYS_ARCH"
 }
 openclash_ipk_architecture() {
-  local ipk="$1" arch=""
-  # 官方 OpenClash 主包文件名明确为 _all.ipk；兼容包无需依赖
-  # busybox tar/ar 的 control.tar.gz 解包能力来判断架构。
+  local ipk="$1" asset_name="$2" arch=""
+  # 官方 OpenClash 主包是 all 架构。下载时临时文件名会被改成
+  # /tmp/luci-app-openclash.ipk，因此必须同时检查原始 Release 资产名。
+  case "$asset_name" in
+    *_all.ipk) printf '%s\n' "all"; return 0 ;;
+  esac
   case "$(basename "$ipk")" in
-    *_all.ipk) echo "all"; return 0 ;;
+    *_all.ipk) printf '%s\n' "all"; return 0 ;;
   esac
   # OpenWrt 的 .ipk 既可能是传统 ar 包，也可能是 gzip 压缩的
   # tar 包（当前 OpenClash release 即为后者）。先按 ar 读取，失败后
@@ -2977,7 +2980,7 @@ openclash_ipk_architecture() {
     arch=$(ar p "$ipk" control.tar.gz 2>/dev/null | gzip -dc 2>/dev/null | tar -xO ./control 2>/dev/null | sed -n 's/^Architecture:[[:space:]]*//p' | head -1)
   fi
   if [ -z "$arch" ]; then
-    arch=$(tar -xOzf "$ipk" ./control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null | sed -n 's/^Architecture:[[:space:]]*//p' | head -1)
+    arch=$(tar -xOzf "$ipk" ./control.tar.gz 2>/dev/null | gzip -dc 2>/dev/null | tar -xO ./control 2>/dev/null | sed -n 's/^Architecture:[[:space:]]*//p' | head -1)
   fi
   printf '%s\n' "$arch"
 }
@@ -3619,11 +3622,19 @@ if [ "$INSTALL_OC" = "1" ]; then
       if dl_with_mirror "$OC_URL" "$OC_PKG"; then
         if [ "$PKG_MGR" = "opkg" ]; then
           opkg_prepare_local_package_arches
-          OC_IPK_ARCH=$(openclash_ipk_architecture "$OC_PKG")
+          OC_ASSET_NAME=$(basename "${OC_URL%%\?*}")
+          OC_IPK_ARCH=$(openclash_ipk_architecture "$OC_PKG" "$OC_ASSET_NAME")
           case "$OC_IPK_ARCH" in
             all|noarch|"$SYS_ARCH") ;;
+            "")
+              err "无法解析 OpenClash IPK 架构，已停止安装（资产: ${OC_ASSET_NAME:-未知}）"
+              rm -f "$OC_PKG"
+              OPENCLASH_INSTALL_OK=0
+              OC_RC=1
+              break
+              ;;
             *)
-              err "OpenClash IPK 架构不匹配: ${OC_IPK_ARCH:-未知}（当前 $SYS_ARCH）"
+              err "OpenClash IPK 架构不匹配: $OC_IPK_ARCH（当前 $SYS_ARCH）"
               rm -f "$OC_PKG"
               OPENCLASH_INSTALL_OK=0
               OC_RC=1
