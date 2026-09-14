@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.16 (代理显式适配与 OPKG 超时保护)
+# VERSION: 20260914.17 (移除不兼容 wget 代理包装器)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="16"
+VERSION_SEQ="17"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -205,10 +205,7 @@ elif ! curl_works && ! wget_works; then
   info "curl 和 wget 均不可运行，网络下载将无法进行"
 fi
 
-# curl 正常时显式指定代理；不记录代理值，也不修改调用方参数。
-if curl_works && [ -n "$PROXY_URL" ]; then
-  curl() { "$CURL_REAL" --proxy "$PROXY_URL" "$@"; }
-fi
+# curl/wget 均通过调用方导出的 http_proxy/https_proxy 环境变量；不把凭据写入脚本或参数。
 
 # 修复 wget 损坏（apk 内部依赖 wget 下载文件）
 # 用"能否运行"判断而非文件头检测（ELF 二进制/symlink 会误判）
@@ -266,24 +263,6 @@ else
   err "无法识别包管理器"; exit 1
 fi
 
-# OPKG 通常由子进程调用 wget；为代理环境创建临时适配器，显式传入
-# use_proxy/http_proxy/https_proxy，不覆盖系统 wget，脚本结束后恢复 PATH。
-OPKG_WGET_WRAP=""
-if [ "$PKG_MGR" = "opkg" ] && [ -n "$PROXY_URL" ] && [ -n "$WGET_REAL" ] && wget_works; then
-  OPKG_WGET_WRAP="/tmp/po-wget-proxy.$$"
-  mkdir -p "$OPKG_WGET_WRAP" 2>/dev/null && {
-    cat > "$OPKG_WGET_WRAP/wget" <<'WGETPROXYEOF'
-#!/bin/sh
-exec "__WGET_REAL__" -e use_proxy=yes -e "http_proxy=__PROXY_URL__" -e "https_proxy=__PROXY_URL__" "$@"
-WGETPROXYEOF
-    sed "s#__WGET_REAL__#$WGET_REAL#g; s#__PROXY_URL__#$PROXY_URL#g" "$OPKG_WGET_WRAP/wget" > "$OPKG_WGET_WRAP/wget.new" && mv "$OPKG_WGET_WRAP/wget.new" "$OPKG_WGET_WRAP/wget"
-    chmod 700 "$OPKG_WGET_WRAP/wget"
-    PATH="$OPKG_WGET_WRAP:$PATH"
-    export PATH
-    trap 'rm -rf "$OPKG_WGET_WRAP" 2>/dev/null || true' EXIT HUP INT TERM
-    info "OPKG wget 已启用临时显式代理适配（不修改系统 wget）"
-  }
-fi
 
 # 早期清理上次运行追加的代理插件源。
 # 必须放在第一次 opkg print-architecture 之前，否则历史 customfeeds 与 distfeeds 重复时，opkg 自身会先刷 Duplicate src declaration。
@@ -345,14 +324,8 @@ ensure_opkg_common_arches() {
     echo "arch noarch 1" >> /etc/opkg.conf
     changed=1
   fi
-  # SourceForge/ImmortalWrt 的 21.02 aarch64 包通常标记为
-  # aarch64_generic，而厂商固件只注册 aarch64_cortex-a53；
-  # 两者 ABI 兼容，需要让 opkg 接受 generic 用户态包。
-  if [ "$SYS_ARCH" = "aarch64_cortex-a53" ] && ! opkg print-architecture 2>/dev/null | awk '{print $2}' | grep -qx 'aarch64_generic'; then
-    echo "arch aarch64_generic 5" >> /etc/opkg.conf
-    changed=1
-  fi
-  [ "$changed" = "1" ] && info "已补齐 OPKG 通用架构: all/noarch${SYS_ARCH:+/$SYS_ARCH兼容架构}"
+  # 不擅自追加 aarch64_generic：厂商 opkg 架构表与索引必须由固件/源
+  # 原生匹配；跨 ABI 注册会导致“no valid architecture”或混源安装。
 }
 ensure_opkg_common_arches
 
@@ -399,13 +372,12 @@ if echo "$SYS_DESC" | grep -qi '^OpenWrt ' && [ "$SYS_RELEASE" = "24.10.4" ] && 
 fi
 ok "系统: $SYS_DESC ($SYS_RELEASE)"
 
-PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(2[0-9]\.[0-9]*\).*/\1/p')
-[ -z "$PW_VER" ] && PW_VER="23.05"
-echo "$PW_VER" | grep -q "^22" && PW_VER="22.03"
-echo "$PW_VER" | grep -q "^23" && PW_VER="23.05"
-echo "$PW_VER" | grep -q "^24" && PW_VER="24.10"
-echo "$PW_VER" | grep -qE "^2[5-9]|^3" && PW_VER="snapshots"
-[ "$PKG_MGR" = "apk" ] && PW_VER="snapshots"
+PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9][0-9]*$/\1/p')
+[ -z "$PW_VER" ] && PW_VER="unknown"
+IS_EXACT_RELEASE=0
+[ "$PW_VER" != "unknown" ] && IS_EXACT_RELEASE=1
+PASSWALL_SOURCE_OK=1
+[ "$PKG_MGR" = "opkg" ] && [ "$IS_EXACT_RELEASE" != "1" ] && PASSWALL_SOURCE_OK=0
 ok "源版本: $PW_VER"
 
 # 架构 → 目标平台映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
@@ -504,9 +476,10 @@ esac
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$PW_VER" in
     19.07|21.02|22.03|23.05|24.10) SERIES_CHAIN="$PW_VER" ;;
-    *) SERIES_CHAIN="24.10" ;;
+    *) SERIES_CHAIN="" ;;
   esac
-  info "opkg 系统: 按固件用户态版本选择可用包线 → $SERIES_CHAIN"
+  [ -n "$SERIES_CHAIN" ] && info "opkg 系统: 按固件用户态版本选择可用包线 → $SERIES_CHAIN" || info "opkg 系统: 未识别正式版本，禁止 release fallback"
+  [ "$IS_EXACT_RELEASE" = "0" ] && SERIES_CHAIN=""
 fi
 
 # 源探测/下载安装依赖路由器自身出网；如果客户端电脑能上网但路由器 SSH 内 ping 不通，先自动修复一次。
@@ -628,14 +601,17 @@ for m in $MIR_BASES; do
     break
   fi
 done
-if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
-  # OW_VER 用途: PassWall 源版本选择 + 系统源不可用时的 fallback 源
+if [ "$PKG_MGR" = "opkg" ] && [ "$IS_EXACT_RELEASE" = "0" ]; then
+  MIR_USE=""; OW_VER=""
+  err "OPKG 固件版本未精确识别，拒绝正式版系统源 fallback"
+elif [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   # 说明: opkg 系统官方 snapshots 已切 apk, 但 25.12 release 仍有 opkg 索引, 可正常匹配
   ok "PassWall 源版本: $OW_VER (官方镜像)"
   [ "$PKG_MGR" = "opkg" ] && info "  └ opkg 系统: 官方 snapshots 为 apk, release 源正常 (系统源不受影响)"
 else
-  # 全局兜底：所有镜像都无精确匹配时，取系列链最新版本（best effort）
+  # 仅在已识别正式版本时尝试系列兜底；snapshot/未知版本禁止套用正式版源。
   err "无精确匹配版本，尝试系列最新版本..."
+  [ -n "$SERIES_CHAIN" ] || { err "版本未精确识别，拒绝 release fallback"; MIR_USE=""; OW_VER=""; }
   for m in $MIR_BASES; do
     [ "$(check_url $m/releases/)" = "200" ] || continue
     for s in $SERIES_CHAIN; do
@@ -666,22 +642,25 @@ SF_ARCH="$SYS_ARCH"
 case "$SYS_ARCH" in
   aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76) SF_ARCH="aarch64_generic" ;;
 esac
-# 厂商固件如果明确声明为 24.10-SNAPSHOT，优先使用对应 24.10 userspace 包线；
-# 不因 5.4 内核把整个用户态错误切到 21.02。
+# Snapshot/厂商自定义版本不得自动套用正式版 userspace 源。
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
-[ -z "$SF_PW_VER" ] && SF_PW_VER="${SYS_RELEASE%.*}"
-[ "$SF_PW_VER" = "unknown" ] && SF_PW_VER="24.10"
+[ -z "$SF_PW_VER" ] && SF_PW_VER="unknown"
 # SourceForge 的 21/22 旧目录兼容 aarch64 generic，但不能覆盖明确的 24.10。
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
-    25.12|snapshots) SF_PW_VER="24.10" ;;  # SF 无 packages-25.12/snapshots
+    25.12|snapshots) SF_PW_VER="" ;;
   esac
-  SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH"
-else
-  SF_PATH="snapshots/packages/$SYS_ARCH"
+  case "$SF_PW_VER" in
+    21.02|22.03|23.05|24.10) SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH" ;;
+    *) SF_PATH=""; SF_OK=0 ;;
+  esac
 fi
 
 # SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
+if [ "$PKG_MGR" = "opkg" ] && [ -z "$SF_PATH" ]; then
+  SF_OK=0
+  info "当前 OPKG 固件无匹配 PassWall release 源，跳过 SourceForge release fallback"
+fi
 # 支持手动指定: SF_MIRROR=downloads/master/jaist/nchc/netix/netcologne/pilotfiber/phoenixnap/versaweb/ixpeering/astuteinternet
 # 说明: SourceForge 镜像参数必须放在完整文件路径后: .../file.ipk?use_mirror=jaist
 sf_pick_node() {
@@ -1240,13 +1219,11 @@ echo "$SYS_DESC" | grep -qiE "kiddin|immortalwrt|koolshare|lede|self" && \
 # 系统源正常时按官方教程直接配置 PassWall 源，不做镜像测速、索引手工兜底或 ImmortalWrt 探测。
 # 系统源异常时才进入完整兼容探测流程。
 OFFICIAL_PASSWALL_MODE=0
-if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] &&
+if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SOURCE_OK" = "1" ] &&
    [ "$INSTALL_OC" = "0" ] && [ "$INSTALL_SSR" = "0" ] &&
    [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
   OFFICIAL_PASSWALL_MODE=1
-  SF_PW_VER="${SYS_RELEASE%.*}"
-  # 24.10-SNAPSHOT 仍是 24.10 用户态包线，不再因 5.4 内核退回 21.02。
-  echo "$SYS_RELEASE" | grep -q '^24\.10' && SF_PW_VER="24.10"
+  SF_PW_VER="$PW_VER"
   SF_ARCH="$SYS_ARCH"
   SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
   SF_MIRROR_QUERY=""
@@ -2496,10 +2473,21 @@ install_passwall2_release() {
 
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
-  pkginstall "luci-app-passwall" "PassWall" && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包"
-  update_xray_official_mips
-  install_passwall_iptables_compat
-fi
+    PASSWALL_INSTALL_OK=0
+    if [ "$PASSWALL_SOURCE_OK" != "1" ]; then
+      err "PassWall 源不可安全匹配当前固件版本，停止安装"
+    else
+      PASSWALL_INSTALL_OK=1
+      pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
+    fi
+    [ "$PASSWALL_INSTALL_OK" = "1" ] && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
+    if [ "$PASSWALL_INSTALL_OK" != "1" ]; then
+      err "PassWall 主程序安装失败，停止其核心组件安装"
+    else
+      update_xray_official_mips
+      install_passwall_iptables_compat
+    fi
+  fi
 
 # PassWall2
 # 按 PassWall2 官方 README：OPKG 先安装 GitHub Release 主包；
@@ -3700,9 +3688,8 @@ install_geoview_fallback() {
   command -v geoview >/dev/null 2>&1
 }
 
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
+if { [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" = "1" ]; } || [ "$INSTALL_PW2" = "1" ]; then
   hdr "默认核心组件"
-  # PassWall/PassWall2 默认安装 Xray、ChinaDNS-NG、GeoView 和 Geo 数据库。
   pkginstall "xray-core" "Xray 内核" || true
   for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
     pkgupgrade "$pkg" "$pkg" || true
@@ -3855,6 +3842,10 @@ echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
 echo ""
 
 RESULT_RC=0
+if [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" != "1" ]; then
+  err "PassWall 安装失败：主程序/依赖预检阶段未通过"
+  RESULT_RC=1
+fi
 if [ "$INSTALL_OC" = "1" ]; then
   if [ "$OPENCLASH_INSTALL_OK" = "1" ] && [ "$OPENCLASH_CORE_OK" = "1" ]; then
     ok "OpenClash 主程序与内核验证通过"
