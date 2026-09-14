@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.22 (修复 Kwrt Snapshot 的 PassWall 源版本识别)
+# VERSION: 20260914.23 (避免空间不足触发 Geo 包 opkg 段错误)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="22"
+VERSION_SEQ="23"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2331,6 +2331,18 @@ pkginstall() {
 # 先比较版本: 已是最新则跳过下载 (避免每次跑脚本都重新下载 geo 包)
 pkgupgrade() {
   local pkg="$1" desc="$2"
+  # Geo 数据包体积较大（v2ray-geoip 约 17MB 解包），Overlay 剩余空间不足时，
+  # opkg 可能在解包阶段段错误(139)，不能让升级事务触发。直接保留旧版。
+  if [ "$PKG_MGR" = "opkg" ] && [ "$pkg" = "v2ray-geoip" ] && check_installed "$pkg"; then
+    local geo_free_kb geo_need_kb
+    geo_free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
+    [ -z "$geo_free_kb" ] && geo_free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
+    geo_need_kb=45000
+    if [ -n "$geo_free_kb" ] && [ "$geo_free_kb" -lt "$geo_need_kb" ]; then
+      info "$desc 跳过升级：Overlay 剩余 ${geo_free_kb}KB，低于安全需求 ${geo_need_kb}KB（保留旧版，避免 opkg 段错误）"
+      return 0
+    fi
+  fi
   if check_installed "$pkg"; then
     local ver=$(get_version "$pkg")
     local repo_ver=$(get_repo_version "$pkg")
