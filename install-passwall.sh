@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.21 (修复 OpenClash 本地 IPK 被预检删除)
+# VERSION: 20260914.22 (修复 Kwrt Snapshot 的 PassWall 源版本识别)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="21"
+VERSION_SEQ="22"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1259,6 +1259,19 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SO
    [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
   OFFICIAL_PASSWALL_MODE=1
   SF_PW_VER="$PW_VER"
+  # Kwrt 的 DISTRIB_RELEASE 通常是 24.10-SNAPSHOT，PW_VER 会被判为
+  # unknown；但其系统源/脚本已探测到的 Kwrt 包线仍可明确对应 24.10。
+  # 不能把 unknown 拼进 SourceForge URL，否则 Packages.gz 必然 404。
+  if [ "$SF_PW_VER" = "unknown" ]; then
+    case "$OW_VER" in
+      21.02*|22.03*|23.05*|24.10*) SF_PW_VER=$(printf '%s' "$OW_VER" | cut -d. -f1-2) ;;
+    esac
+  fi
+  if [ "$SF_PW_VER" = "unknown" ] && [ "$KWRT_FIRMWARE" = "1" ]; then
+    case "$KERNEL_VER" in
+      6.6.*) SF_PW_VER="24.10" ;;
+    esac
+  fi
   SF_ARCH="$SYS_ARCH"
   SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
   SF_MIRROR_QUERY=""
