@@ -381,6 +381,7 @@ IS_EXACT_RELEASE=0
 PASSWALL_SOURCE_OK=1
 NON_RELEASE_OPKG=0
 [ "$PKG_MGR" = "opkg" ] && [ "$IS_EXACT_RELEASE" != "1" ] && NON_RELEASE_OPKG=1
+PASSWALL_PACKAGE_FALLBACK_OK=0
 ok "源版本: $PW_VER"
 
 # 架构 → 目标平台映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
@@ -648,10 +649,16 @@ esac
 # Snapshot/厂商自定义版本不得自动套用正式版 userspace 源。
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
 [ -z "$SF_PW_VER" ] && SF_PW_VER="unknown"
+# SourceForge 这里仅用于 PassWall 用户态主包，不是系统/内核 fallback。
+# 未知或 Snapshot 固件仍可尝试官方包目录；最终由实际 Packages.gz、包名、
+# Architecture 和 Depends 校验决定，绝不据此改写系统源。
+if [ "$PKG_MGR" = "opkg" ] && [ "$SF_PW_VER" = "unknown" ]; then
+  SF_PW_VER="24.10"
+fi
 # SourceForge 的 21/22 旧目录兼容 aarch64 generic，但不能覆盖明确的 24.10。
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
-    25.12|snapshots) SF_PW_VER="" ;;
+    25.12|snapshots) SF_PW_VER="24.10" ;;
   esac
   case "$SF_PW_VER" in
     21.02|22.03|23.05|24.10) SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH" ;;
@@ -2503,11 +2510,16 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
-    if [ "$PASSWALL_SOURCE_OK" != "1" ] || [ "$SYS_SOURCE_OK" != "1" ]; then
-      err "PassWall 源不可安全匹配当前固件版本，停止安装"
-    else
+    if [ "$SYS_SOURCE_OK" = "1" ]; then
       PASSWALL_INSTALL_OK=1
       pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
+    elif [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
+      info "系统源无法提供 PassWall，尝试 SourceForge 官方用户态主包"
+      PASSWALL_PACKAGE_FALLBACK_OK=1
+      PASSWALL_INSTALL_OK=1
+      pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
+    else
+      err "系统源无 PassWall 且 SourceForge 主包源不可用，停止安装"
     fi
     [ "$PASSWALL_INSTALL_OK" = "1" ] && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
     if [ "$PASSWALL_INSTALL_OK" != "1" ]; then
@@ -2523,19 +2535,24 @@ if [ "$INSTALL_PW" = "1" ]; then
 # APK 优先使用官方推荐的 SourceForge APK 仓库。依赖由包管理器自动解析，
 # 只有主包安装失败时才回退到另一条官方路径。
 if [ "$INSTALL_PW2" = "1" ]; then
+  PASSWALL2_INSTALL_OK=0
   if [ "$PKG_MGR" = "opkg" ]; then
-    if ! install_passwall2_release "ipk"; then
+    if install_passwall2_release "ipk"; then
+      PASSWALL2_INSTALL_OK=1
+    else
       info "PassWall2 官方 IPK 安装失败，使用已配置的 PassWall 源回退安装..."
-      pkginstall "luci-app-passwall2" "PassWall2" || true
+      pkginstall "luci-app-passwall2" "PassWall2" && PASSWALL2_INSTALL_OK=1
     fi
   else
-    if ! pkginstall "luci-app-passwall2" "PassWall2"; then
+    if pkginstall "luci-app-passwall2" "PassWall2"; then
+      PASSWALL2_INSTALL_OK=1
+    else
       info "PassWall2 APK 仓库安装失败，回退 GitHub 官方 APK..."
-      install_passwall2_release "apk" || true
+      install_passwall2_release "apk" && PASSWALL2_INSTALL_OK=1
     fi
   fi
   # 中文包是可选语言包，不应阻断 PassWall2 主程序安装。
-  pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
+  [ "$PASSWALL2_INSTALL_OK" = "1" ] && pkginstall "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
   # PassWall/PassWall2 默认核心统一在后面的“默认核心组件”阶段安装，避免重复安装。
   if [ "$INSTALL_PW$INSTALL_PW2" = "10" ]; then
     update_xray_official_mips
@@ -3564,7 +3581,7 @@ fi
 
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 安装"
-  OPENCLASH_INSTALL_OK=1
+  OPENCLASH_INSTALL_OK=0
   OPENCLASH_CORE_OK=1
 
   # 1) 主程序: 已装则自动升级到最新, 未装则直接安装 (无确认)
@@ -3640,8 +3657,10 @@ if [ "$INSTALL_OC" = "1" ]; then
         nver=$(get_version "luci-app-openclash")
         if [ -n "$nver" ] && [ "$nver" = "$OC_LATEST_NUM" ]; then
           ok "OpenClash 已升级到 $nver ✓"
+          OPENCLASH_INSTALL_OK=1
         elif [ -n "$nver" ] && [ "$OC_VER" != "$nver" ]; then
           ok "OpenClash $nver ✓ (源版本与 GitHub 标记不一致)"
+          OPENCLASH_INSTALL_OK=1
         elif check_installed "luci-app-openclash"; then
           err "OpenClash 安装包无效，版本未更新 (仍为 $nver)"
           OPENCLASH_INSTALL_OK=0
@@ -3664,6 +3683,7 @@ if [ "$INSTALL_OC" = "1" ]; then
     fi
   else
     ok "OpenClash 已是最新版 ($OC_VER)"
+    OPENCLASH_INSTALL_OK=1
   fi
 
   # 2) OpenClash 官方 Meta 内核：使用 core_version 中的 alpha-ge... 版本，
@@ -3882,6 +3902,10 @@ if [ "$INSTALL_OC" = "1" ]; then
     err "OpenClash 未完成：主程序状态=$OPENCLASH_INSTALL_OK，内核状态=$OPENCLASH_CORE_OK"
     RESULT_RC=1
   fi
+fi
+if [ "$INSTALL_PW2" = "1" ] && [ "${PASSWALL2_INSTALL_OK:-0}" != "1" ]; then
+  err "PassWall2 安装失败：主程序/依赖预检阶段未通过"
+  RESULT_RC=1
 fi
 
 # 安装完成后删除临时脚本并退出，不返回主菜单。
