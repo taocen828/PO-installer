@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.24 (统一提示插件安装空间不足)
+# VERSION: 20260914.25 (系统源可用时优先使用 SourceForge 插件包)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="24"
+VERSION_SEQ="25"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1290,6 +1290,9 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SO
     esac
   fi
   SF_ARCH="$SYS_ARCH"
+  case "$SYS_ARCH" in
+    aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76) SF_ARCH="aarch64_generic" ;;
+  esac
   SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
   SF_MIRROR_QUERY=""
   if [ "$PKG_MGR" = "apk" ]; then
@@ -1641,7 +1644,9 @@ find_pkg_meta() {
       ')
       [ -z "$sf_meta" ] && continue
       sf_ver=${sf_meta%%|*}; sf_fn=${sf_meta#*|}
-      if [ -n "$sf_ver" ] && { [ -z "$best_ver" ] || version_newer "$sf_ver" "$best_ver"; }; then
+      # SourceForge 是 PassWall 官方插件包源。系统源可用不代表其中有插件包；
+      # 只要 SF 确实提供该包，就优先使用 SF 的包，不因系统源版本更高/更低而跳过。
+      if [ -n "$sf_ver" ]; then
         best_ver="$sf_ver"; best_feed="$sf_feed"; best_fn="$sf_fn"; best_url="$SF_BASE/$sf_feed"
       fi
     done
