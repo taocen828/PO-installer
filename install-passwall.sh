@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260913.14 (统一按固件类型选择备用源)
+# VERSION: 20260914.15 (严格版本/架构匹配与 OpenClash fallback 回滚)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="14"
+VERSION_SEQ="15"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -102,11 +102,13 @@ repair_router_self_network() {
         echo "nameserver 119.29.29.29"
         echo "nameserver 1.1.1.1"
       } > /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null || true
-      [ -L /tmp/resolv.conf ] || {
-        cp /tmp/resolv.conf /tmp/resolv.conf.po-bak 2>/dev/null || true
-        rm -f /tmp/resolv.conf 2>/dev/null || true
-        ln -s /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf 2>/dev/null || true
-      }
+      # 无论原路径是普通文件、有效链接还是指向坏目标的链接，都切换到
+      # 本次生成的 resolv.conf.auto；仅判断 -L 会使坏符号链接原样保留。
+      if [ -e /tmp/resolv.conf ] || [ -L /tmp/resolv.conf ]; then
+        cp -a /tmp/resolv.conf /tmp/resolv.conf.po-bak 2>/dev/null || true
+      fi
+      rm -f /tmp/resolv.conf 2>/dev/null || true
+      ln -s /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf 2>/dev/null || true
       /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
       changed=1
     fi
@@ -761,21 +763,21 @@ SF_BASE="$SF_PREFIX/$SF_PATH"
 # 国内 PassWall 备用源：immortalwrt 官方源自带 passwall 全家桶（luci-app-passwall/xray-core/sing-box 等），
 # 且国内有完整镜像（上海交大/VSean）。
 # 注意: 始终探测(不只在 SF 失败时)——SF 某些版本/架构构建残缺(如 21.02 aarch64 缺 passwall2/geoview),
-#       immortalwrt 作为补充源可兜底。版本优先匹配当前系列, 无则用 23.05.4 兜底。
+#       immortalwrt 仅作为同系列补充源；没有明确同系列版本时拒绝兜底。
 IW_OK=0; IW_USE=""; IW_VER=""
 # SourceForge 官方 PassWall 源可用时，不再额外探测 ImmortalWrt，避免
 # 24.10.6 等补充源被误认为 PassWall 安装候选，也避免混入第三方依赖。
-if [ "$PKG_MGR" = "opkg" ] && [ "$SF_OK" != "1" ]; then
+if [ "$PKG_MGR" = "opkg" ] && { [ "$SF_OK" != "1" ] || [ "$INSTALL_OC" = "1" ]; }; then
   info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
-  # 按内核系列选择同系列 ImmortalWrt 用户态源；旧版不能用 23.05 依赖混装。
+  # 仅根据原始固件版本选择同系列源；未知/snapshot/自定义版本拒绝 fallback。
+  IW_SYSTEM_SERIES=$(printf '%s\n' "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9].*/\1/p')
   case "$SF_PW_VER" in
-    21.02) IW_CAND="21.02.7" ;;
-    22.03) IW_CAND="23.05.4" ;;
-    23.05) IW_CAND="23.05.4" ;;
-    24.10) IW_CAND="24.10.6" ;;
-    *) IW_CAND="23.05.4" ;;
+    21.02) IW_CAND="21.02.7" ;; 22.03) IW_CAND="22.03.7" ;;
+    23.05) IW_CAND="23.05.4" ;; 24.10) IW_CAND="24.10.6" ;;
+    *) IW_CAND=""; info "ImmortalWrt fallback 拒绝：无法精确匹配系统版本 $SYS_RELEASE" ;;
   esac
-  for iw in "https://mirror.sjtu.edu.cn/immortalwrt" "https://mirrors.vsean.net/immortalwrt" "https://downloads.immortalwrt.org"; do
+  if [ -n "$IW_CAND" ] && [ "$IW_SYSTEM_SERIES" = "$SF_PW_VER" ]; then
+    for iw in "https://mirror.sjtu.edu.cn/immortalwrt" "https://mirrors.vsean.net/immortalwrt" "https://downloads.immortalwrt.org"; do
     [ "$(check_url $iw/releases/$IW_CAND/packages/$SYS_ARCH/luci/Packages.gz)" != "200" ] && continue
     IW_USE=$iw; IW_VER="$IW_CAND"
     # 确认 luci feed 有 passwall（.gz 解压后 grep 包名）
@@ -784,7 +786,8 @@ if [ "$PKG_MGR" = "opkg" ] && [ "$SF_OK" != "1" ]; then
       ok "国内 PassWall 源 ✓ (immortalwrt $IW_VER 镜像: $IW_USE)"
       break
     fi
-  done
+    done
+  fi
   [ "$IW_OK" = "0" ] && info "immortalwrt 镜像不可用（仅 SF 源）"
 fi
 
@@ -1054,7 +1057,8 @@ validate_opkg_system_source() {
   # 这类可选 feed 故障不能把整个系统源判为不可用。
   local fatal_log=/tmp/po_system_opkg_fatal.log
   grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$log" > "$fatal_log" 2>/dev/null || true
-  if [ "$rc" != "0" ] && grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
+  # 某些 opkg 对单个 feed 失败仍返回 0，必须始终检查非可选 feed 的错误日志。
+  if grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
     err "OPKG 系统源更新失败或存在错误"
     grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
     disable_failed_opkg_feeds "$log"
@@ -1209,7 +1213,7 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] &&
   IW_OK=0
   ok "按官方教程配置 PassWall 源 ($SF_PATH)"
 else
-  if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+  if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ] || [ "$INSTALL_OC" = "1" ]; }; then
     probe_proxy_sources
   fi
 fi
@@ -1317,7 +1321,9 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     # 1) PassWall 备用源：系统源健康时只补 PassWall 专用源；
     # 不把 ImmortalWrt userspace 源混入基础依赖解析。只有 SourceForge 不可用时，
     # 才使用 ImmortalWrt 的 PassWall/LuCI 源兜底。
-    if [ "$IW_OK" = "1" ] && [ "$SF_OK" != "1" ]; then
+    # OpenClash 的专用源必须等官方下载安装确实失败后再追加；不能因系统源
+    # 失败或预先探测成功而在官方路径前污染配置。
+    if [ "$IW_OK" = "1" ] && [ "$INSTALL_OC" != "1" ] && [ "$SF_OK" != "1" ]; then
       echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
       echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
     fi
@@ -3240,14 +3246,40 @@ get_oc_latest() {
 
 # GitHub 不可达时的 OPKG 兜底：先预检，再安装；不强行忽略依赖错误。
 install_openclash_immortal_fallback() {
-  local old_ver="$1" log=/tmp/po-openclash-immortal.log rc nver
+  local old_ver="$1" log=/tmp/po-openclash-immortal.log rc nver feed_bak=/tmp/po-openclash-customfeeds.bak feed_existed=0
   [ "$PKG_MGR" = "opkg" ] && [ "$IW_OK" = "1" ] || return 1
+  rollback_openclash_feeds() {
+    if [ "$feed_existed" = "1" ] && [ -f "$feed_bak" ]; then
+      cat "$feed_bak" > /etc/opkg/customfeeds.conf
+    else
+      rm -f /etc/opkg/customfeeds.conf
+    fi
+    rm -f /var/opkg-lists/iw_luci /var/opkg-lists/iw_packages \
+      /var/lib/opkg/lists/iw_luci /var/lib/opkg/lists/iw_packages 2>/dev/null || true
+  }
+  if [ "$INSTALL_OC" = "1" ]; then
+    if [ -f /etc/opkg/customfeeds.conf ]; then
+      feed_existed=1
+      cp /etc/opkg/customfeeds.conf "$feed_bak" || return 1
+    fi
+    add_opkg_feed_once "iw_luci" "$IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci"
+    add_opkg_feed_once "iw_packages" "$IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages"
+    opkg update > /tmp/po-openclash-immortal-update.log 2>&1
+    rc=$?
+    if [ "$rc" != "0" ] || grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' /tmp/po-openclash-immortal-update.log 2>/dev/null; then
+      err "immortalwrt OpenClash 源更新失败"
+      rollback_openclash_feeds
+      info "OpenClash 源诊断日志: /tmp/po-openclash-immortal-update.log"
+      return 1
+    fi
+  fi
   opkg install --noaction luci-app-openclash --force-downgrade --force-overwrite > "$log" 2>&1
   rc=$?
   if [ "$rc" != "0" ]; then
     err "immortalwrt OpenClash 依赖预检失败"
     grep -E "cannot find dependency|incompatible|kmod-|No space|Unknown package|Collected errors|ERROR" "$log" || cat "$log"
     info "OpenClash 诊断日志: $log"
+    rollback_openclash_feeds
     return 1
   fi
   opkg install luci-app-openclash --force-downgrade --force-overwrite > "$log" 2>&1
@@ -3260,6 +3292,7 @@ install_openclash_immortal_fallback() {
   fi
   err "immortalwrt 源未完成 OpenClash 安装/升级 (当前 ${nver:-未安装})"
   info "OpenClash 诊断日志: $log"
+  rollback_openclash_feeds
   return 1
 }
 if [ "$INSTALL_AGH" = "1" ]; then
@@ -3463,6 +3496,8 @@ fi
 
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 安装"
+  OPENCLASH_INSTALL_OK=1
+  OPENCLASH_CORE_OK=1
 
   # 1) 主程序: 已装则自动升级到最新, 未装则直接安装 (无确认)
   OC_VER=$(get_version "luci-app-openclash")
@@ -3474,9 +3509,10 @@ if [ "$INSTALL_OC" = "1" ]; then
   if [ -z "$OC_LATEST_NUM" ]; then
     info "GitHub API 不可达（直连+代理均失败），尝试 immortalwrt 源安装/升级..."
     if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-      install_openclash_immortal_fallback "$OC_VER" || true
+      install_openclash_immortal_fallback "$OC_VER" || OPENCLASH_INSTALL_OK=0
     else
       err "无可用降级源 (immortalwrt 源不可用或 APK 系统)"
+      OPENCLASH_INSTALL_OK=0
     fi
   elif [ "$OC_VER" != "$OC_LATEST_NUM" ]; then
     info "OpenClash 更新: $OC_VER → $OC_LATEST..."
@@ -3503,7 +3539,9 @@ if [ "$INSTALL_OC" = "1" ]; then
             *)
               err "OpenClash IPK 架构不匹配: ${OC_IPK_ARCH:-未知}（当前 $SYS_ARCH）"
               rm -f "$OC_PKG"
-              continue
+              OPENCLASH_INSTALL_OK=0
+              OC_RC=1
+              break
               ;;
           esac
           OC_LOG=/tmp/po-openclash-install.log
@@ -3511,6 +3549,7 @@ if [ "$INSTALL_OC" = "1" ]; then
           OC_PRE_RC=$?
           if [ "$OC_PRE_RC" != "0" ]; then
             err "OpenClash 依赖预检失败，未执行安装"
+            OPENCLASH_INSTALL_OK=0
             grep -E "cannot find dependency|incompatible|kmod-|No space|Unknown package|Collected errors|ERROR" "$OC_LOG" || cat "$OC_LOG"
             info "OpenClash 诊断日志: $OC_LOG"
           else
@@ -3518,6 +3557,7 @@ if [ "$INSTALL_OC" = "1" ]; then
             OC_RC=$?
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "remove_obsolesced_files" -e "opkg\.lock" "$OC_LOG" || true
             [ "$OC_RC" != "0" ] && info "OpenClash 安装日志: $OC_LOG"
+            [ "$OC_RC" != "0" ] && OPENCLASH_INSTALL_OK=0
           fi
         else
           OC_LOG=/tmp/po-openclash-apk-install.log
@@ -3525,6 +3565,7 @@ if [ "$INSTALL_OC" = "1" ]; then
           OC_RC=$?
           grep -v "^WARNING.*opening" "$OC_LOG" || true
           [ "$OC_RC" != "0" ] && info "OpenClash 安装日志: $OC_LOG"
+          [ "$OC_RC" != "0" ] && OPENCLASH_INSTALL_OK=0
         fi
         rm -f "$OC_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
@@ -3535,19 +3576,23 @@ if [ "$INSTALL_OC" = "1" ]; then
           ok "OpenClash $nver ✓ (源版本与 GitHub 标记不一致)"
         elif check_installed "luci-app-openclash"; then
           err "OpenClash 安装包无效，版本未更新 (仍为 $nver)"
+          OPENCLASH_INSTALL_OK=0
         else
           err "OpenClash 安装失败"
+          OPENCLASH_INSTALL_OK=0
         fi
       else
         err "GitHub 全部通道失败或下载内容无效，降级尝试 immortalwrt 源..."
         if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
-          install_openclash_immortal_fallback "$OC_VER" || true
+          install_openclash_immortal_fallback "$OC_VER" || OPENCLASH_INSTALL_OK=0
         else
           err "无可用降级源 (immortalwrt 源不可用或 APK 系统)，OpenClash 未安装"
+          OPENCLASH_INSTALL_OK=0
         fi
       fi
     else
       err "无法获取 OpenClash 下载地址 (GitHub 不可达)"
+      OPENCLASH_INSTALL_OK=0
     fi
   else
     ok "OpenClash 已是最新版 ($OC_VER)"
@@ -3567,9 +3612,10 @@ if [ "$INSTALL_OC" = "1" ]; then
     ok "OpenClash 官方内核已是最新 ($INSTALLED_OPENCLASH_CORE)"
   elif [ -n "$OPENCLASH_CORE_LATEST" ]; then
     info "OpenClash 官方内核更新: ${INSTALLED_OPENCLASH_CORE:-未安装} → $OPENCLASH_CORE_LATEST"
-    install_openclash_core "$CORE_FILE" "$OPENCLASH_CORE_MODEL" || true
+    install_openclash_core "$CORE_FILE" "$OPENCLASH_CORE_MODEL" || OPENCLASH_CORE_OK=0
   else
     err "无法获取 OpenClash 官方内核版本，保留当前内核"
+    OPENCLASH_CORE_OK=0
   fi
 fi
 
@@ -3757,6 +3803,16 @@ echo ""
 echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
 echo ""
 
+RESULT_RC=0
+if [ "$INSTALL_OC" = "1" ]; then
+  if [ "$OPENCLASH_INSTALL_OK" = "1" ] && [ "$OPENCLASH_CORE_OK" = "1" ]; then
+    ok "OpenClash 主程序与内核验证通过"
+  else
+    err "OpenClash 未完成：主程序状态=$OPENCLASH_INSTALL_OK，内核状态=$OPENCLASH_CORE_OK"
+    RESULT_RC=1
+  fi
+fi
+
 # 安装完成后删除临时脚本并退出，不返回主菜单。
 THIS_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
 case "$THIS_SCRIPT" in
@@ -3764,4 +3820,4 @@ case "$THIS_SCRIPT" in
     rm -f "$THIS_SCRIPT" 2>/dev/null || true
     ;;
 esac
-exit 0
+exit "$RESULT_RC"
