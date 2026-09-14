@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.25 (系统源可用时优先使用 SourceForge 插件包)
+# VERSION: 20260914.26 (三类插件统一优先使用可用官方包源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="25"
+VERSION_SEQ="26"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -3649,9 +3649,24 @@ if [ "$INSTALL_OC" = "1" ]; then
   if check_installed "luci-app-openclash"; then
     ok "OpenClash 主程序已安装 ($OC_VER)"
   fi
+  # 三类插件统一规则：系统源可用不阻断官方专用源；只要 SourceForge
+  # 实际提供 OpenClash 包，就优先使用它。当前官方 SF 索引通常没有
+  # OpenClash，因此自然继续走 GitHub Release，不强行拼接错误源。
+  OC_SOURCE_FEED=$(find_pkg_meta "luci-app-openclash" feed)
+  if [ "$SF_OK" = "1" ] && echo "$OC_SOURCE_FEED" | grep -q '^passwall'; then
+    info "优先使用 SourceForge 官方 OpenClash 用户态主包"
+    if pkginstall "luci-app-openclash" "OpenClash"; then
+      OC_VER=$(get_version "luci-app-openclash")
+      OPENCLASH_INSTALL_OK=1
+    else
+      info "SourceForge OpenClash 主包安装失败，继续尝试 GitHub Release..."
+    fi
+  fi
   OC_LATEST=$(get_oc_latest)
   OC_LATEST_NUM=$(echo "$OC_LATEST" | sed 's/^v//')
-  if [ -z "$OC_LATEST_NUM" ]; then
+  if [ "$OPENCLASH_INSTALL_OK" = "1" ]; then
+    :
+  elif [ -z "$OC_LATEST_NUM" ]; then
     info "GitHub API 不可达（直连+代理均失败），尝试 immortalwrt 源安装/升级..."
     if [ "$IW_OK" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
       install_openclash_immortal_fallback "$OC_VER" || OPENCLASH_INSTALL_OK=0
