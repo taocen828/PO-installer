@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.15 (严格版本/架构匹配与 OpenClash fallback 回滚)
+# VERSION: 20260914.16 (代理显式适配与 OPKG 超时保护)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="15"
+VERSION_SEQ="16"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -156,6 +156,7 @@ hdr "系统检测"
 # 记录真实网络工具路径；后续即使创建兼容包装器，也不递归调用包装器。
 CURL_REAL=$(command -v curl 2>/dev/null || true)
 WGET_REAL=$(command -v wget 2>/dev/null || true)
+PROXY_URL="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
 curl_works() { [ -n "$CURL_REAL" ] && "$CURL_REAL" --version >/dev/null 2>&1; }
 wget_works() { [ -n "$WGET_REAL" ] && "$WGET_REAL" --version >/dev/null 2>&1; }
 
@@ -202,6 +203,11 @@ if ! curl_works && wget_works; then
   info "检测到 curl 动态库/符号损坏，临时使用可用 wget 兼容下载"
 elif ! curl_works && ! wget_works; then
   info "curl 和 wget 均不可运行，网络下载将无法进行"
+fi
+
+# curl 正常时显式指定代理；不记录代理值，也不修改调用方参数。
+if curl_works && [ -n "$PROXY_URL" ]; then
+  curl() { "$CURL_REAL" --proxy "$PROXY_URL" "$@"; }
 fi
 
 # 修复 wget 损坏（apk 内部依赖 wget 下载文件）
@@ -258,6 +264,25 @@ elif command -v apk >/dev/null 2>&1; then
   PKG_MGR="apk"; ok "包管理器: APK (OpenWrt packages.adb)"
 else
   err "无法识别包管理器"; exit 1
+fi
+
+# OPKG 通常由子进程调用 wget；为代理环境创建临时适配器，显式传入
+# use_proxy/http_proxy/https_proxy，不覆盖系统 wget，脚本结束后恢复 PATH。
+OPKG_WGET_WRAP=""
+if [ "$PKG_MGR" = "opkg" ] && [ -n "$PROXY_URL" ] && [ -n "$WGET_REAL" ] && wget_works; then
+  OPKG_WGET_WRAP="/tmp/po-wget-proxy.$$"
+  mkdir -p "$OPKG_WGET_WRAP" 2>/dev/null && {
+    cat > "$OPKG_WGET_WRAP/wget" <<'WGETPROXYEOF'
+#!/bin/sh
+exec "__WGET_REAL__" -e use_proxy=yes -e "http_proxy=__PROXY_URL__" -e "https_proxy=__PROXY_URL__" "$@"
+WGETPROXYEOF
+    sed "s#__WGET_REAL__#$WGET_REAL#g; s#__PROXY_URL__#$PROXY_URL#g" "$OPKG_WGET_WRAP/wget" > "$OPKG_WGET_WRAP/wget.new" && mv "$OPKG_WGET_WRAP/wget.new" "$OPKG_WGET_WRAP/wget"
+    chmod 700 "$OPKG_WGET_WRAP/wget"
+    PATH="$OPKG_WGET_WRAP:$PATH"
+    export PATH
+    trap 'rm -rf "$OPKG_WGET_WRAP" 2>/dev/null || true' EXIT HUP INT TERM
+    info "OPKG wget 已启用临时显式代理适配（不修改系统 wget）"
+  }
 fi
 
 # 早期清理上次运行追加的代理插件源。
@@ -1049,12 +1074,38 @@ disable_failed_opkg_feeds() {
   done
 }
 
+# 在 BusyBox/GNU 环境下为 OPKG 刷新提供统一超时；保留完整日志，避免
+# 某个慢源让交互流程无限等待。调用方仍需按日志判断具体失败源。
+opkg_update_with_timeout() {
+  local log="$1" seconds="${2:-180}" pid elapsed rc
+  if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then
+    timeout "$seconds" opkg update > "$log" 2>&1
+    rc=$?
+    [ "$rc" = "124" ] && err "OPKG 源刷新超时 (${seconds}s)，详见: $log"
+    return "$rc"
+  fi
+  opkg update > "$log" 2>&1 &
+  pid=$!; elapsed=0
+  while kill -0 "$pid" 2>/dev/null; do
+    [ "$elapsed" -ge "$seconds" ] && {
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+      err "OPKG 源刷新超时 (${seconds}s)，详见: $log"
+      return 124
+    }
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  wait "$pid"; rc=$?
+  return "$rc"
+}
+
 validate_opkg_system_source() {
   local log=/tmp/po_system_opkg_update.log
-  opkg update > "$log" 2>&1
+  opkg_update_with_timeout "$log" 180
   local rc=$?
   # 部分镜像没有 telephony 索引，但 base/luci/packages/routing 已正常；
-  # 这类可选 feed 故障不能把整个系统源判为不可用。
   local fatal_log=/tmp/po_system_opkg_fatal.log
   grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$log" > "$fatal_log" 2>/dev/null || true
   # 某些 opkg 对单个 feed 失败仍返回 0，必须始终检查非可选 feed 的错误日志。
@@ -1116,7 +1167,7 @@ else
   if [ "$PKG_MGR" = "opkg" ]; then
     ISTORE_FALLBACK_OK=0
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
-      opkg update >/dev/null 2>&1 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || err "iStoreOS 专用源更新失败"
+      opkg_update_with_timeout /tmp/po_istore_update.log 180 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { err "iStoreOS 专用源更新失败"; info "iStoreOS 源诊断日志: /tmp/po_istore_update.log"; }
     fi
     if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ -n "$OW_USE" ]; then
       # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
@@ -1176,7 +1227,7 @@ else
   fi
   # 重新验证源
   if [ "$PKG_MGR" = "opkg" ]; then
-    opkg update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
+    opkg_update_with_timeout /tmp/po_fallback_update.log 180 && ok "源更新成功" || { err "源更新失败，请检查网络"; info "源诊断日志: /tmp/po_fallback_update.log"; }
   else
     apk update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
   fi
@@ -1373,7 +1424,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     # 系统源正常时，base/luci 等官方索引无需删除，清空会造成不必要的全量重下。
     rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* 2>/dev/null || true
     info "已刷新插件及兜底源索引，保留系统源索引..."
-    opkg update > /tmp/po_opkg_update.log 2>&1 || true
+    opkg_update_with_timeout /tmp/po_opkg_update.log 180 || true
     # 第三方 SNAPSHOT 的 opkg 有时不会将新 customfeed 的索引落盘。若补了完整 userspace packages 源，
     # 直接缓存 Packages.gz，使 OPKG 能解析所有递归依赖（而不是按 coreutils-timeout/libyaml 逐个特判）。
     if [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; then
@@ -3264,7 +3315,7 @@ install_openclash_immortal_fallback() {
     fi
     add_opkg_feed_once "iw_luci" "$IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci"
     add_opkg_feed_once "iw_packages" "$IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages"
-    opkg update > /tmp/po-openclash-immortal-update.log 2>&1
+    opkg_update_with_timeout /tmp/po-openclash-immortal-update.log 180
     rc=$?
     if [ "$rc" != "0" ] || grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' /tmp/po-openclash-immortal-update.log 2>/dev/null; then
       err "immortalwrt OpenClash 源更新失败"
