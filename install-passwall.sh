@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.18 (保留系统源与网络失败状态传播)
+# VERSION: 20260914.19 (SourceForge 主包优先与三插件状态汇总)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="18"
+VERSION_SEQ="19"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1167,8 +1167,7 @@ fi
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
 elif [ "$SYS_SOURCE_NETWORK_FAIL" = "1" ]; then
-  err "系统源本次刷新失败但未确认失效，保留原源，不注入替代源"
-  info "请检查代理/网络后重试；本次不继续插件安装"
+  info "系统源本次刷新失败但未确认失效，保留原源；允许按需使用 SourceForge 主包 fallback"
   NETWORK_SOURCE_BLOCK=1
 else
   NETWORK_SOURCE_BLOCK=0
@@ -1319,11 +1318,11 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     MISSING_OC_DEPS=""
     # 检查“索引中是否存在”而不是只检查 Packages.gz 是否能访问。
     if [ "$INSTALL_PW" = "1" ]; then
-      for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl chinadns-ng dns2socks dns2tcp dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
+      for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl chinadns-ng dns2socks dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
         opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW_DEPS="$MISSING_PW_DEPS $dep"
       done
       [ -n "$MISSING_PW_DEPS" ] && NEED_PW_USERSPACE_DEPS=1
-      [ "$NEED_PW_USERSPACE_DEPS" = "1" ] && info "PassWall 依赖索引不完整，缺少:$MISSING_PW_DEPS"
+      [ "$NEED_PW_USERSPACE_DEPS" = "1" ] && info "PassWall 依赖待从系统源/SourceForge 用户态源解析，缺少:$MISSING_PW_DEPS"
     fi
     # PassWall2 与 PassWall 依赖不同：它额外需要 geoview/geo 数据包，通常不需要 chinadns/dns2socks。
     if [ "$INSTALL_PW2" = "1" ]; then
@@ -1335,7 +1334,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
         23.05|24.10) opkg list luci-lua-runtime 2>/dev/null | grep -q '^luci-lua-runtime ' || MISSING_PW2_DEPS="$MISSING_PW2_DEPS luci-lua-runtime" ;;
       esac
       [ -n "$MISSING_PW2_DEPS" ] && NEED_PW2_USERSPACE_DEPS=1
-      [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] && info "PassWall2 依赖索引不完整，缺少:$MISSING_PW2_DEPS"
+      [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] && info "PassWall2 依赖待从系统源/SourceForge 用户态源解析，缺少:$MISSING_PW2_DEPS"
     fi
     # OpenClash 主包的系统用户态依赖（0.47.x）：dnsmasq-full/bash/curl/ca-bundle/ip-full/ruby/ruby-yaml/unzip。
     # kmod-tun 单独检测，不能从官方其它版本源补装，必须匹配当前内核 hash。
@@ -2273,7 +2272,8 @@ pkginstall() {
   # Xray 官方/手动更新可能已经放置 /usr/bin/xray，但 opkg 数据库没有
   # xray-core 记录；不要因此重复走错误的仓库安装路径。
   if [ "$pkg" = "xray-core" ] && command -v xray >/dev/null 2>&1; then
-    ok "$desc 已存在 ($(xray version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 未知) ✓"
+    local xray_ver=$(xray version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    ok "$desc 已存在 (${xray_ver:-未知}) ✓"
     return 0
   fi
   if check_installed "$pkg"; then
@@ -2510,12 +2510,13 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
-    if [ "$SYS_SOURCE_OK" = "1" ]; then
+    if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
+      info "优先使用 SourceForge 官方 PassWall 用户态主包"
+      PASSWALL_PACKAGE_FALLBACK_OK=1
       PASSWALL_INSTALL_OK=1
       pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
-    elif [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
-      info "系统源无法提供 PassWall，尝试 SourceForge 官方用户态主包"
-      PASSWALL_PACKAGE_FALLBACK_OK=1
+    elif [ "$SYS_SOURCE_OK" = "1" ]; then
+      info "SourceForge 主包源不可用，回退系统源安装 PassWall"
       PASSWALL_INSTALL_OK=1
       pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
     else
@@ -2537,17 +2538,17 @@ if [ "$INSTALL_PW" = "1" ]; then
 if [ "$INSTALL_PW2" = "1" ]; then
   PASSWALL2_INSTALL_OK=0
   if [ "$PKG_MGR" = "opkg" ]; then
-    if install_passwall2_release "ipk"; then
+    if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ] && pkginstall "luci-app-passwall2" "PassWall2"; then
       PASSWALL2_INSTALL_OK=1
     else
-      info "PassWall2 官方 IPK 安装失败，使用已配置的 PassWall 源回退安装..."
-      pkginstall "luci-app-passwall2" "PassWall2" && PASSWALL2_INSTALL_OK=1
+      info "PassWall2 SourceForge 主包不可用，回退官方 Release..."
+      install_passwall2_release "ipk" && PASSWALL2_INSTALL_OK=1
     fi
   else
-    if pkginstall "luci-app-passwall2" "PassWall2"; then
+    if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ] && pkginstall "luci-app-passwall2" "PassWall2"; then
       PASSWALL2_INSTALL_OK=1
     else
-      info "PassWall2 APK 仓库安装失败，回退 GitHub 官方 APK..."
+      info "PassWall2 SourceForge 主包不可用，回退官方 Release APK..."
       install_passwall2_release "apk" && PASSWALL2_INSTALL_OK=1
     fi
   fi
@@ -3884,16 +3885,25 @@ fi
 #==============================================
 echo ""
 echo "============================================="
-echo " [✓] 安装完成！"
+echo " 安装结果汇总"
 echo "============================================="
 echo ""
 echo "系统: $SYS_DESC | $SYS_RELEASE | $SYS_ARCH | $PKG_MGR"
 echo ""
 
 RESULT_RC=0
+if [ "$SYS_SOURCE_NETWORK_FAIL" = "1" ]; then
+  info "系统源刷新失败：原源保留；本次使用 SourceForge 主包或已有缓存完成安装"
+fi
 if [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" != "1" ]; then
   err "PassWall 安装失败：主程序/依赖预检阶段未通过"
   RESULT_RC=1
+elif [ "$INSTALL_PW" = "1" ]; then
+  if [ "$PASSWALL_PACKAGE_FALLBACK_OK" = "1" ]; then
+    ok "PassWall 主程序验证通过（SourceForge 主包）"
+  else
+    ok "PassWall 主程序验证通过（系统源）"
+  fi
 fi
 if [ "$INSTALL_OC" = "1" ]; then
   if [ "$OPENCLASH_INSTALL_OK" = "1" ] && [ "$OPENCLASH_CORE_OK" = "1" ]; then
@@ -3906,6 +3916,8 @@ fi
 if [ "$INSTALL_PW2" = "1" ] && [ "${PASSWALL2_INSTALL_OK:-0}" != "1" ]; then
   err "PassWall2 安装失败：主程序/依赖预检阶段未通过"
   RESULT_RC=1
+elif [ "$INSTALL_PW2" = "1" ]; then
+  ok "PassWall2 主程序验证通过（SourceForge 优先/官方 Release 兜底）"
 fi
 
 # 安装完成后删除临时脚本并退出，不返回主菜单。
