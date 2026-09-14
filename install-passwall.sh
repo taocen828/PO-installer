@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.26 (三类插件统一优先使用可用官方包源)
+# VERSION: 20260914.27 (修复 25.12 APK 的 SourceForge snapshots 源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="26"
+VERSION_SEQ="27"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -664,6 +664,10 @@ if [ "$PKG_MGR" = "opkg" ]; then
     21.02|22.03|23.05|24.10) SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH" ;;
     *) SF_PATH=""; SF_OK=0 ;;
   esac
+else
+  # PassWall 的 APK 包线使用 SourceForge snapshots；OpenWrt 25.12
+  # 正式版系统不能按系统版本拼接 releases/packages-25.12。
+  SF_PATH="snapshots/packages/$SYS_ARCH"
 fi
 
 # SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
@@ -1296,11 +1300,8 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SO
   SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
   SF_MIRROR_QUERY=""
   if [ "$PKG_MGR" = "apk" ]; then
-    if echo "$SYS_RELEASE" | grep -qiE 'snapshot|snapshots|SNAPSHOT'; then
-      SF_PATH="snapshots/packages/$SYS_ARCH"
-    else
-      SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
-    fi
+    # SourceForge PassWall APK 统一使用 snapshots 包线，正式版/快照版均如此。
+    SF_PATH="snapshots/packages/$SYS_ARCH"
   else
     SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
   fi
