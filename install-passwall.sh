@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.17 (移除不兼容 wget 代理包装器)
+# VERSION: 20260914.18 (保留系统源与网络失败状态传播)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="17"
+VERSION_SEQ="18"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -376,8 +376,11 @@ PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0
 [ -z "$PW_VER" ] && PW_VER="unknown"
 IS_EXACT_RELEASE=0
 [ "$PW_VER" != "unknown" ] && IS_EXACT_RELEASE=1
+# PassWall 主包允许使用系统已验证可解析的源；精确版本门禁仅约束
+# 第三方 release fallback，不阻断 Snapshot 系统源中的可安装软件包。
 PASSWALL_SOURCE_OK=1
-[ "$PKG_MGR" = "opkg" ] && [ "$IS_EXACT_RELEASE" != "1" ] && PASSWALL_SOURCE_OK=0
+NON_RELEASE_OPKG=0
+[ "$PKG_MGR" = "opkg" ] && [ "$IS_EXACT_RELEASE" != "1" ] && NON_RELEASE_OPKG=1
 ok "源版本: $PW_VER"
 
 # 架构 → 目标平台映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
@@ -601,7 +604,7 @@ for m in $MIR_BASES; do
     break
   fi
 done
-if [ "$PKG_MGR" = "opkg" ] && [ "$IS_EXACT_RELEASE" = "0" ]; then
+if [ "$NON_RELEASE_OPKG" = "1" ]; then
   MIR_USE=""; OW_VER=""
   err "OPKG 固件版本未精确识别，拒绝正式版系统源 fallback"
 elif [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
@@ -1027,6 +1030,7 @@ validate_source_path_compatibility() {
 disable_failed_opkg_feeds() {
   local log="$1" file tmp line url changed
   [ -s "$log" ] || return 0
+  # 系统源允许在明确 404/签名/索引损坏时逐行注释，但绝不删除或清空文件。
   for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
     [ -f "$file" ] || continue
     tmp="/tmp/$(basename "$file").po-disabled"
@@ -1047,7 +1051,7 @@ disable_failed_opkg_feeds() {
     done < "$file"
     if [ "$changed" = "1" ]; then
       cat "$tmp" > "$file"
-      info "已注释本次刷新失败的 OPKG 源: $file"
+      info "已逐行注释明确失效的 OPKG 源（保留原内容）: $file"
     fi
     rm -f "$tmp"
   done
@@ -1091,7 +1095,20 @@ validate_opkg_system_source() {
   if grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
     err "OPKG 系统源更新失败或存在错误"
     grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
-    disable_failed_opkg_feeds "$log"
+    # wget returned 8/超时/DNS/代理连接失败只代表本次网络失败，不能据此
+    # 删除或注释仍可能正常的 Snapshot 源；只有明确内容错误才禁用。
+    if grep -qE '404|Signature check failed|invalid (gzip|index)|not a gzip|bad (gzip|index)' "$fatal_log" 2>/dev/null; then
+      disable_failed_opkg_feeds "$log"
+    else
+      info "本次 OPKG 源刷新疑似网络/代理失败，保留原源配置，不执行禁用"
+      SYS_SOURCE_NETWORK_FAIL=1
+      # 网络刷新失败不等于现有索引不可用；只要基础包仍可解析，保留
+      # 原 Snapshot 源并允许后续按需补充缺失的用户态依赖。
+      for pkg in base-files libc luci-base; do
+        opkg list "$pkg" 2>/dev/null | grep -q "^$pkg " || return 1
+      done
+      return 1
+    fi
     rm -f "$log" "$fatal_log"
     return 1
   fi
@@ -1133,6 +1150,7 @@ validate_apk_system_source() {
 }
 
 SYS_SOURCE_OK=0
+SYS_SOURCE_NETWORK_FAIL=0
 if [ "$PKG_MGR" = "opkg" ]; then
   validate_opkg_system_source && SYS_SOURCE_OK=1
 else
@@ -1141,10 +1159,21 @@ fi
 
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
+elif [ "$SYS_SOURCE_NETWORK_FAIL" = "1" ]; then
+  err "系统源本次刷新失败但未确认失效，保留原源，不注入替代源"
+  info "请检查代理/网络后重试；本次不继续插件安装"
+  NETWORK_SOURCE_BLOCK=1
 else
-  err "系统源不可用，已注释失败源，开始选择对应固件专用源..."
-  if [ "$PKG_MGR" = "opkg" ]; then
-    ISTORE_FALLBACK_OK=0
+  NETWORK_SOURCE_BLOCK=0
+  # 系统源文件只读保护：永不覆盖/清空 distfeeds.conf；fallback 只能写 customfeeds。
+  if [ "$SYS_SOURCE_NETWORK_FAIL" = "1" ]; then
+    err "系统源本次刷新失败，保留原 distfeeds.conf，不注入替代源"
+    NETWORK_SOURCE_BLOCK=1
+  else
+    NETWORK_SOURCE_BLOCK=0
+    err "系统源不可用，保留原 distfeeds.conf，开始选择独立追加源..."
+  fi
+  if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
       opkg_update_with_timeout /tmp/po_istore_update.log 180 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { err "iStoreOS 专用源更新失败"; info "iStoreOS 源诊断日志: /tmp/po_istore_update.log"; }
     fi
@@ -2474,7 +2503,7 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
-    if [ "$PASSWALL_SOURCE_OK" != "1" ]; then
+    if [ "$PASSWALL_SOURCE_OK" != "1" ] || [ "$SYS_SOURCE_OK" != "1" ]; then
       err "PassWall 源不可安全匹配当前固件版本，停止安装"
     else
       PASSWALL_INSTALL_OK=1
