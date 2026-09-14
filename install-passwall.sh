@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.20 (修复 OpenClash IPK 架构误报)
+# VERSION: 20260914.21 (修复 OpenClash 本地 IPK 被预检删除)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="20"
+VERSION_SEQ="21"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -3619,6 +3619,7 @@ if [ "$INSTALL_OC" = "1" ]; then
     if [ -n "$OC_URL" ]; then
       info "下载 OpenClash $OC_LATEST ($OC_EXT)..."
       OC_PKG="/tmp/luci-app-openclash.$OC_EXT"
+      OC_CHECK_PKG="/tmp/luci-app-openclash.preflight.$OC_EXT"
       if dl_with_mirror "$OC_URL" "$OC_PKG"; then
         if [ "$PKG_MGR" = "opkg" ]; then
           opkg_prepare_local_package_arches
@@ -3642,8 +3643,17 @@ if [ "$INSTALL_OC" = "1" ]; then
               ;;
           esac
           OC_LOG=/tmp/po-openclash-install.log
-          opkg install --noaction "$OC_PKG" --force-downgrade --force-overwrite > "$OC_LOG" 2>&1
-          OC_PRE_RC=$?
+          # 某些厂商版 opkg 的 --noaction 预检仍会执行部分事务，可能删除
+          # 或移动传入的本地 IPK。预检使用副本，正式安装始终使用原包。
+          cp -f "$OC_PKG" "$OC_CHECK_PKG"
+          if [ ! -s "$OC_CHECK_PKG" ]; then
+            err "OpenClash IPK 预检副本创建失败"
+            OPENCLASH_INSTALL_OK=0
+            OC_PRE_RC=1
+          else
+            opkg install --noaction "$OC_CHECK_PKG" --force-downgrade --force-overwrite > "$OC_LOG" 2>&1
+            OC_PRE_RC=$?
+          fi
           if [ "$OC_PRE_RC" != "0" ]; then
             err "OpenClash 依赖预检失败，未执行安装"
             OPENCLASH_INSTALL_OK=0
@@ -3664,7 +3674,7 @@ if [ "$INSTALL_OC" = "1" ]; then
           [ "$OC_RC" != "0" ] && info "OpenClash 安装日志: $OC_LOG"
           [ "$OC_RC" != "0" ] && OPENCLASH_INSTALL_OK=0
         fi
-        rm -f "$OC_PKG"
+        rm -f "$OC_PKG" "$OC_CHECK_PKG"
         # 验证版本真正更新到目标 (旧版还在不算成功)
         nver=$(get_version "luci-app-openclash")
         if [ -n "$nver" ] && [ "$nver" = "$OC_LATEST_NUM" ]; then
