@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.23 (避免空间不足触发 Geo 包 opkg 段错误)
+# VERSION: 20260914.24 (统一提示插件安装空间不足)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="23"
+VERSION_SEQ="24"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -986,6 +986,23 @@ fi
 #==============================================
 # 3.5 空间检测（仅提示，不用固定估算值拦截安装）
 #==============================================
+# 统一输出包管理器的空间错误，避免 opkg/apk 只显示错误码或段错误。
+report_install_space_error() {
+  local pkg="$1" log="$2" rc="$3" free_kb free_mb
+  if ! grep -qiE 'No space left on device|not enough space|disk space|ENOSPC|空间不足|insufficient space' "$log" 2>/dev/null; then
+    [ "$rc" = "139" ] || return 1
+    free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
+    [ -z "$free_kb" ] && free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
+    [ -n "$free_kb" ] && [ "$free_kb" -ge 45000 ] && return 1
+  fi
+  free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
+  [ -z "$free_kb" ] && free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
+  free_mb="未知"
+  [ -n "$free_kb" ] && free_mb=$((free_kb / 1024))
+  err "$pkg 安装/升级失败：存储空间不足（当前可用 ${free_mb}MB）"
+  info "请清理 /overlay 中不需要的软件包或扩容 Overlay 后重试"
+  return 0
+}
 if [ "$UNINSTALL_ONLY" != "1" ]; then
   hdr "空间检测"
   REQUIRED_SPACE_MB=30
@@ -1806,6 +1823,7 @@ opkg_preflight_installable() {
   if [ "$preflight_rc" != "0" ] || grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:" "$log" 2>/dev/null; then
     err "依赖预检失败，跳过安装/升级，避免半升级破坏现有版本"
     grep -E "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:|ERROR" "$log" 2>/dev/null || cat "$log"
+    report_install_space_error "$target_name" "$log" "$preflight_rc" || true
     cp "$log" /tmp/po-last-opkg-preflight.log 2>/dev/null || true
     rm -f "$log"
     return 1
@@ -1867,6 +1885,7 @@ apk_install() {
           grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
           grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
         fi
+        report_install_space_error "$pkg" "$log" "$rc" || true
         rm -f "$log"
       else
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
@@ -1888,6 +1907,7 @@ apk_install() {
             grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
+          report_install_space_error "$pkg" "$log" "$rc" || true
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
         else
           err "下载 $pkg 失败，回退 opkg 直接安装..."
@@ -1899,7 +1919,8 @@ apk_install() {
             grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
-          rm -f "$log"
+          report_install_space_error "$pkg" "$log" "$rc" || true
+        rm -f "$log"
         fi
       fi
     else
@@ -1934,10 +1955,12 @@ apk_install() {
         grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
         grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
       fi
+      report_install_space_error "$pkg" "$log" "$rc" || true
       rm -f "$log"
     fi
     if [ "$rc" != "0" ]; then
-    case "$pkg" in
+      report_install_space_error "$pkg" "$log" "$rc" || true
+      case "$pkg" in
       luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
         info "安装日志已保留: /tmp/po-last-opkg-install.log"
         ;;
@@ -1973,6 +1996,9 @@ apk_install() {
     rc=$?
   fi
   grep -v "^WARNING.*opening" "$log" || true
+  if [ "$rc" != "0" ]; then
+    report_install_space_error "$pkg" "$log" "$rc" || true
+  fi
   rm -f "$log"
   if [ "$rc" != "0" ]; then
     case "$pkg" in
