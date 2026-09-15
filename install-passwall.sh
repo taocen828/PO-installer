@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.7 (移除插件流程中的 SYS_TARGET 依赖)
+# VERSION: 20260915.8 (已安装插件升级忽略无关依赖候选)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="7"
+VERSION_SEQ="8"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1910,12 +1910,20 @@ apk_install() {
             # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
             # 直链校验下载，安装时只替换当前包，不重装已有依赖。
             local local_force_depends=""
+            # 已安装主插件的升级只替换目标 IPK；其依赖已在系统中存在时，
+            # 允许 opkg 忽略索引中无关/不匹配的依赖候选，不让 kmod 错误阻断主包升级。
+            [ "$installed_main" = "1" ] && local_force_depends="--force-depends"
             case "$pkg" in
               chinadns-ng|v2ray-geoip|v2ray-geosite|geoview|xray-core) local_force_depends="--force-depends" ;;
             esac
             opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite $local_force_depends > "$log" 2>&1
             rc=$?
             cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
+            # opkg 可能在主包已成功写入后，因附带依赖候选报非零。
+            # 以实际安装数据库中的目标版本为准，避免误报升级失败。
+            if [ "$installed_main" = "1" ] && [ -n "$repo_ver" ] && [ "$(get_version "$pkg")" = "$repo_ver" ]; then
+              rc=0
+            fi
             grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
