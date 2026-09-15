@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.5 (SourceForge 直接按 SYS_ARCH 下载)
+# VERSION: 20260915.6 (插件源仅按固件版本和 SYS_ARCH 匹配)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="5"
+VERSION_SEQ="6"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -662,7 +662,8 @@ else
 fi
 
 probe_proxy_sources() {
-# PassWall 源版本：跟随探测到的精确版本（22.03/23.05/24.10/25.12）
+# PassWall/PassWall2 用户态插件源只按固件包线和 SYS_ARCH 选择。
+# SYS_TARGET 仅供 OpenWrt 系统源、targets/kmod 源使用，不参与插件包匹配。
 # 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
 SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
