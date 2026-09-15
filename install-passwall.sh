@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.3 (清理 APK 旧版 packages-unknown 源)
+# VERSION: 20260915.4 (已安装插件直接升级匹配架构 IPK)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1885,17 +1885,29 @@ apk_install() {
     local url prog log="/tmp/opkg_install.log" repo_ver
     url=$(find_pkg_url "$pkg")
     repo_ver=$(get_repo_version "$pkg")
+    # 已安装插件的升级只替换匹配当前架构的主 IPK；不再重新解析整棵依赖树。
+    # 25.12/厂商 25.x 常见系统源不可达，但现有插件及其依赖已经可用，
+    # 重新做 noaction 会被无关的 coreutils-timeout/lyaml 缺失阻断升级。
+    local installed_main=0
+    check_installed "$pkg" && installed_main=1
+    if [ "$installed_main" = "1" ]; then
+      info "$pkg 已安装，跳过依赖预检/依赖重装，直接升级匹配架构 IPK"
+    fi
     # 预解析依赖清单 (模拟安装), 用于显示包名级进度; 排除主包自身(后面单独处理)
     local total=0 cur=0 dep deps
-    # 如果 PassWall/SF 索引已被脚本手动兜底到 /var/opkg-lists，但 opkg 自身没有接收该 feed，
-    # `opkg install --noaction luci-app-passwall` 会误报 Unknown package。
-    # 此时只要 find_pkg_url 已经从索引/远端 Packages.gz 找到直链，就跳过包名预检，下载本地 ipk 后再对本地文件做真实依赖预检。
-    if [ -z "$url" ] && ! opkg_preflight_installable "$pkg"; then
-      return 2
-    fi
-    deps=$(find_pkg_depends "$pkg" | normalize_dep_names | grep -v "^$pkg$" || true)
-    if [ -z "$deps" ] && [ -z "$url" ]; then
-      deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
+    if [ "$installed_main" = "1" ]; then
+      deps=""
+    else
+      # 如果 PassWall/SF 索引已被脚本手动兜底到 /var/opkg-lists，但 opkg 自身没有接收该 feed，
+      # `opkg install --noaction luci-app-passwall` 会误报 Unknown package。
+      # 此时只要 find_pkg_url 已经从索引/远端 Packages.gz 找到直链，就跳过包名预检，下载本地 ipk 后再对本地文件做真实依赖预检。
+      if [ -z "$url" ] && ! opkg_preflight_installable "$pkg"; then
+        return 2
+      fi
+      deps=$(find_pkg_depends "$pkg" | normalize_dep_names | grep -v "^$pkg$" || true)
+      if [ -z "$deps" ] && [ -z "$url" ]; then
+        deps=$(opkg install --noaction "$pkg" --force-downgrade --force-overwrite 2>/dev/null | grep "^Installing " | sed 's/Installing \(.*\) (.*/\1/' | grep -v "^$pkg$")
+      fi
     fi
     for dep in $deps; do total=$((total + 1)); done
     [ "$total" = "0" ] && total=1
@@ -1939,12 +1951,14 @@ apk_install() {
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl_download_progress "$url" "/tmp/pkg_$pkg.ipk"; then
-          if ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
+          if [ "$installed_main" = "1" ]; then
+            info "已安装插件跳过本地依赖预检，直接覆盖安装匹配架构 IPK"
+          elif ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
             rc=2
-          else
+          fi
+          if [ "$installed_main" = "1" ] || [ "$rc" != "2" ]; then
             # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
-            # 直链校验下载，安装时允许 opkg 忽略无关的未满足依赖，不能让
-            # kmod-nft-* 阻断 chinadns-ng/v2ray-geo*。
+            # 直链校验下载，安装时只替换当前包，不重装已有依赖。
             local local_force_depends=""
             case "$pkg" in
               chinadns-ng|v2ray-geoip|v2ray-geosite|geoview|xray-core) local_force_depends="--force-depends" ;;
