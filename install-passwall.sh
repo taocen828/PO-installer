@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.2 (修复 OPKG 重试成功仍被失败日志误判)
+# VERSION: 20260915.3 (清理 APK 旧版 packages-unknown 源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="2"
+VERSION_SEQ="3"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -286,6 +286,26 @@ fi
 # APK 兼容性：不使用 --force-reinstall
 # 不同 OpenWrt/apk-tools 版本对该参数支持不一致，普通 add/upgrade 已足够。
 APK_FORCE_REINSTALL_OPT=""
+
+# 清理旧版脚本遗留的 PassWall APK 源。
+# 旧版曾把 25.x 源写成 packages-unknown，apk update 会在系统源校验阶段
+# 先访问这些坏索引，导致即使本次后面能探测到正确源，也提前进入 fallback。
+# 只删除本脚本管理的 SourceForge PassWall 行，保留其它 APK 源和用户配置。
+cleanup_apk_passwall_feeds() {
+  [ "$PKG_MGR" = "apk" ] || return 0
+  local file tmp
+  for file in /etc/apk/repositories /etc/apk/repositories.d/*.list; do
+    [ -f "$file" ] || continue
+    tmp="/tmp/$(basename "$file").po-passwall-clean.$$"
+    grep -vE 'openwrt-passwall-build/(releases/packages-[^/]+|snapshots/packages/)|/(passwall_luci|passwall_packages|passwall2)/packages\.adb' "$file" > "$tmp" 2>/dev/null || true
+    if ! cmp -s "$file" "$tmp" 2>/dev/null; then
+      cat "$tmp" > "$file"
+      info "已清理旧版 PassWall APK 源: $file"
+    fi
+    rm -f "$tmp"
+  done
+}
+cleanup_apk_passwall_feeds
 
 SYS_ARCH=""
 if [ "$PKG_MGR" = "opkg" ]; then
