@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.6 (插件源仅按固件版本和 SYS_ARCH 匹配)
+# VERSION: 20260915.7 (移除插件流程中的 SYS_TARGET 依赖)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="6"
+VERSION_SEQ="7"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -386,7 +386,7 @@ configure_istoreos_feeds() {
 # 官方 OpenWrt 标准固件：使用官方 target/packages 源，不混入 ImmortalWrt
 # 或第三方完整 userspace 源。GL-MT6000/filogic 24.10.4 属于此类。
 OFFICIAL_STANDARD=0
-if echo "$SYS_DESC" | grep -qi '^OpenWrt ' && [ "$SYS_RELEASE" = "24.10.4" ] && { [ "$DISTRIB_TARGET" = "mediatek/filogic" ] || [ "$SYS_TARGET" = "mediatek/filogic" ]; }; then
+if echo "$SYS_DESC" | grep -qi '^OpenWrt ' && [ "$SYS_RELEASE" = "24.10.4" ] && [ "$DISTRIB_TARGET" = "mediatek/filogic" ]; then
   OFFICIAL_STANDARD=1
   info "检测到官方 OpenWrt 24.10.4 mediatek/filogic，锁定官方 userspace/kmod 源"
 fi
@@ -456,19 +456,8 @@ apk_pkg_arch_from_target() {
   esac
 }
 
-# 本地目标平台检测（不联网）：DISTRIB_TARGET → distfeeds URL → 架构映射
-SYS_TARGET="$DISTRIB_TARGET"
-[ -z "$SYS_TARGET" ] && SYS_TARGET=$(grep -hoE 'targets/[a-z0-9]+/[a-z0-9]+' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/apk/repositories.d/*.list 2>/dev/null | head -1 | cut -d/ -f2-)
-if [ "$PKG_MGR" = "apk" ]; then
-  PKG_ARCH=$(apk_pkg_arch_from_target "$SYS_TARGET")
-  if [ -n "$PKG_ARCH" ]; then
-    SYS_ARCH="$PKG_ARCH"
-    ok "软件源架构: $SYS_ARCH"
-  fi
-fi
-[ -z "$SYS_TARGET" ] && SYS_TARGET=$(arch_to_targets "$SYS_ARCH" | awk '{print $1}')
-ARCH_TARGETS=$(arch_to_targets "$SYS_ARCH")
-[ -n "$SYS_TARGET" ] && ok "目标平台: $SYS_TARGET" || info "目标平台: 未知（仅能检测 packages 源）"
+# 目标平台不是普通用户态插件的匹配条件；插件和 userspace 依赖只使用固件版本 + SYS_ARCH。
+info "普通插件模式：仅按固件版本和软件包架构匹配"
 
 # 内核版本
 KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
@@ -528,15 +517,12 @@ list_series_vers() {
     grep -oE "${2}([.-][0-9]+|[-]SNAPSHOT)/" | tr -d '/' | sort -uVr
 }
 
-# 动态探测精确源版本 + 目标平台：用内核版本精确匹配官方 manifest
-# 返回: OW_VER 精确版本号, SYS_TARGET 精确 target/subtarget
+# 动态探测精确 userspace 源版本（不读取 target/manifest）
+# 返回: OW_VER 精确版本号；不匹配 target/kmod
 probe_ow_ver() {
-  local MIR="$1" v t mf kv V mfname
+  local MIR="$1" v V
   OW_VER=""
-  # manifest 文件名前缀: immortalwrt 镜像用 immortalwrt-, openwrt 镜像用 openwrt-
-  mfname="openwrt"
-  echo "$MIR" | grep -q "immortalwrt" && mfname="immortalwrt"
-  # 1) DISTRIB_RELEASE 直接给出（最准，但需验证镜像上确实存在该版本——镜像可能滞后）
+  # 1) DISTRIB_RELEASE 直接给出（最准，但需验证镜像上确实存在该版本）
   V=$(echo "$SYS_RELEASE" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   if [ -n "$V" ] && [ "$(check_url $MIR/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="$V"; return 0
@@ -546,9 +532,8 @@ probe_ow_ver() {
   if [ "$PKG_MGR" != "opkg" ] && [ "$(check_url $MIR/snapshots/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="snapshots"; return 0
   fi
-  # 3) SNAPSHOT/第三方固件常没有可用的精确 release 信息。先只探测每个系列的最新
-  #    userspace Packages.gz，避免在低性能 MIPS 上按多个 target 逐个下载 manifest 而卡数分钟。
-  #    这一步只用于普通用户态包；kmod 源仍在后面按目标平台单独严格验证。
+  # 3) SNAPSHOT/第三方固件常没有可用的精确 release 信息；
+  #    只按 userspace Packages.gz 探测系列版本，不读取 target/manifest。
   for s in $SERIES_CHAIN; do
     for v in $(list_series_vers "$MIR" "$s"); do
       if [ "$(check_url "$MIR/releases/$v/packages/$SYS_ARCH/base/$PKG_FILE")" = "200" ]; then
@@ -556,20 +541,7 @@ probe_ow_ver() {
       fi
     done
   done
-  # 4) 仍无可用 userspace 源时，才遍历候选平台 × 系列链，以内核 manifest 精确匹配。
-  #    候选平台: 本地检测 target 优先，然后架构映射全列表。
-  local cands="$SYS_TARGET $ARCH_TARGETS"
-  for t in $cands; do
-    [ -z "$t" ] && continue
-    for s in $SERIES_CHAIN; do
-      for v in $(list_series_vers "$MIR" "$s"); do
-        mf="$MIR/releases/$v/targets/${t%/*}/${t#*/}/$mfname-$v-${t%/*}-${t#*/}.manifest"
-        kv=$(curl -sL --max-time 5 "$mf" 2>/dev/null | sed -n 's/^kernel - \([0-9.]*\)[~-].*/\1/p' | head -1)
-        [ "$kv" = "$KERNEL_VER" ] && { OW_VER="$v"; SYS_TARGET="$t"; return 0; }
-      done
-    done
-  done
-  # 无精确匹配：不在此处兜底，让主循环尝试下一个镜像
+  # 未找到 userspace 索引时不再遍历 target/manifest；插件源不需要 SYS_TARGET。
   return 1
 }
 
@@ -585,8 +557,7 @@ if echo "$SYS_DESC $DISTRIB_ID" | grep -qi immortalwrt; then
   MIR_BASES="https://downloads.immortalwrt.org https://mirror.sjtu.edu.cn/immortalwrt https://mirrors.vsean.net/immortalwrt $MIR_BASES"
   info "检测到 ImmortalWrt 固件，优先使用 immortalwrt 镜像"
 fi
-# Kwrt 软件源与官方 OpenWrt 目录结构兼容，但 Kwrt 的 release 目录通常
-# 只有 24.10/25.12 两级版本，且 manifest 文件名使用 kwrt-日期格式。
+# Kwrt 软件源与官方 OpenWrt userspace 目录结构兼容；只使用架构包索引。
 # 仅在系统源失败后的 fallback 阶段实际写入，避免影响正常固件的系统源。
 KWRT_FIRMWARE=0
 if echo "$SYS_DESC $DISTRIB_ID $DISTRIB_NAME" | grep -qiE '(^|[^a-z])kwrt([^a-z]|$)'; then
@@ -663,7 +634,7 @@ fi
 
 probe_proxy_sources() {
 # PassWall/PassWall2 用户态插件源只按固件包线和 SYS_ARCH 选择。
-# SYS_TARGET 仅供 OpenWrt 系统源、targets/kmod 源使用，不参与插件包匹配。
+# 普通插件流程不使用 SYS_TARGET。
 # 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
 SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
@@ -836,8 +807,8 @@ fi
 
 }
 
-# OpenWrt 源验证：基于探测到的 OW_VER + 主镜像，验证 base/luci + targets(kmod)
-OW_OK=0; TARGET_OK=0
+# OpenWrt userspace 源验证：只验证 packages/$SYS_ARCH 下的普通包索引。
+OW_OK=0
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   # OW_VER 为数字版本号 → releases；否则（snapshots）→ snapshots 目录
   case "$OW_VER" in
@@ -848,17 +819,7 @@ if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   for feed in base luci; do
     [ "$(check_url $OW_BASE/packages/$SYS_ARCH/$feed/$PKG_FILE)" != "200" ] && { OW_OK=0; break; }
   done
-  # targets 源（kmod 所在目录）: 厂商定制 target (如 mt7987) 官方可能没有,
-  # 此时降级为"仅 packages 源"——普通包可装, 仅 kmod 不可用
-  TARGET_OK=1
-  if [ "$OW_OK" = "1" ] && [ -n "$SYS_TARGET" ]; then
-    if [ "$(check_url $OW_BASE/targets/$SYS_TARGET/packages/$PKG_FILE)" != "200" ]; then
-      TARGET_OK=0
-      info "目标平台 $SYS_TARGET 在官方源无 kmod 源（厂商定制平台?），降级为仅 packages 源"
-      info "提示: 普通包(PassWall/核心)可正常安装, kmod 内核模块需用固件厂商源"
-    fi
-  fi
-  [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt 源 ✓ ($OW_BASE)"
+  [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt userspace 源 ✓ ($OW_BASE)"
 fi
 [ "$OW_OK" = "0" ] && info "未找到可安全匹配的 OpenWrt fallback 源（不代表固件自带系统源不可用）"
 
@@ -1266,10 +1227,8 @@ else
         printf 'src/gz %s %s\n' "$name" "$url" >> /tmp/customfeeds.po-new
       }
       {
-        echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH / $SYS_TARGET)"
+        echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH)"
       } >> /tmp/customfeeds.po-new
-      [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && \
-        add_fallback_opkg_feed openwrt_core "$OW_USE/targets/$SYS_TARGET/packages"
       add_fallback_opkg_feed openwrt_base "$OW_USE/packages/$SYS_ARCH/base"
       add_fallback_opkg_feed openwrt_luci "$OW_USE/packages/$SYS_ARCH/luci"
       add_fallback_opkg_feed openwrt_packages "$OW_USE/packages/$SYS_ARCH/packages"
@@ -1291,9 +1250,6 @@ else
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/routing/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/telephony/packages.adb"
-        if [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ]; then
-          echo "$OW_USE/targets/$SYS_TARGET/packages/packages.adb"
-        fi
       } > "$APK_REPO_FILE"
       ok "已配置 OpenWrt 镜像源 ($OW_USE)"
     else
@@ -1434,7 +1390,6 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
       add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "系统源可用但依赖不完整，已补充 OpenWrt userspace 依赖源 ($OW_USE / $SYS_ARCH)"
     elif [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
-      [ -n "$SYS_TARGET" ] && [ "$TARGET_OK" = "1" ] && add_opkg_feed_once "openwrt_core" "$OW_USE/targets/$SYS_TARGET/packages"
       add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
       add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
       add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
