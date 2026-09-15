@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.4 (已安装插件直接升级匹配架构 IPK)
+# VERSION: 20260915.5 (SourceForge 直接按 SYS_ARCH 下载)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="4"
+VERSION_SEQ="5"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -666,12 +666,9 @@ probe_proxy_sources() {
 # 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
 SF_PW_VER="$PW_VER"
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
-# SourceForge 的包架构目录与 OpenWrt 运行时架构不总是一致：
-# 21.02/22.03 的 aarch64_cortex-a53 包通常发布在 aarch64_generic 目录。
+# SourceForge 包目录直接使用固件报告的 SYS_ARCH；不再把 aarch64_cortex-a53
+# 改写为 aarch64_generic，也不依赖 SYS_TARGET。插件主包按软件包架构直链下载。
 SF_ARCH="$SYS_ARCH"
-case "$SYS_ARCH" in
-  aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76) SF_ARCH="aarch64_generic" ;;
-esac
 # Snapshot/厂商自定义版本不得自动套用正式版 userspace 源。
 [ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
 [ -z "$SF_PW_VER" ] && SF_PW_VER="unknown"
@@ -1336,9 +1333,6 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SO
     esac
   fi
   SF_ARCH="$SYS_ARCH"
-  case "$SYS_ARCH" in
-    aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76) SF_ARCH="aarch64_generic" ;;
-  esac
   SF_PREFIX="https://master.dl.sourceforge.net/project/openwrt-passwall-build"
   SF_MIRROR_QUERY=""
   if [ "$PKG_MGR" = "apk" ]; then
