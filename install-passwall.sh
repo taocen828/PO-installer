@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.1 (修复 Snapshot OPKG 源状态误报与镜像目录 403 探测)
+# VERSION: 20260915.2 (修复 OPKG 重试成功仍被失败日志误判)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="1"
+VERSION_SEQ="2"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1125,7 +1125,23 @@ validate_opkg_system_source() {
   # 部分镜像没有 telephony 索引，但 base/luci/packages/routing 已正常；
   local fatal_log=/tmp/po_system_opkg_fatal.log
   grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$log" > "$fatal_log" 2>/dev/null || true
-  # 某些 opkg 对单个 feed 失败仍返回 0，必须始终检查非可选 feed 的错误日志。
+  # 镜像可能瞬时失败；手工再次执行 opkg update 能成功时，脚本也应采用
+  # 第二次结果，而不是继续使用第一次日志中的 Failed/wget returned 8。
+  if grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
+    local retry_log=/tmp/po_system_opkg_update.retry.log retry_fatal=/tmp/po_system_opkg_fatal.retry.log retry_rc
+    info "OPKG 源出现瞬时下载错误，自动重试一次..."
+    opkg_update_with_timeout "$retry_log" 180
+    retry_rc=$?
+    grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$retry_log" > "$retry_fatal" 2>/dev/null || true
+    if [ "$retry_rc" = "0" ] && ! grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$retry_fatal" 2>/dev/null; then
+      cp "$retry_log" "$log" 2>/dev/null || true
+      rc=0
+      cp "$retry_fatal" "$fatal_log" 2>/dev/null || true
+      info "OPKG 源重试成功，按最终结果继续"
+    fi
+    rm -f "$retry_log" "$retry_fatal"
+  fi
+  # 某些 opkg 对单个 feed 失败仍返回 0，必须检查最终未更新的非可选 feed。
   if grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
     err "OPKG 系统源更新失败或存在错误"
     grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
