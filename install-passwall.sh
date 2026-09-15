@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260914.27 (修复 25.12 APK 的 SourceForge snapshots 源)
+# VERSION: 20260915.1 (修复 Snapshot OPKG 源状态误报与镜像目录 403 探测)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="27"
+VERSION_SEQ="1"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -579,7 +579,13 @@ if echo "$SYS_DESC $DISTRIB_ID $DISTRIB_NAME" | grep -qiE '(^|[^a-z])kwrt([^a-z]
 fi
 MIR_USE=""; OW_VER=""
 for m in $MIR_BASES; do
-  [ "$(check_url $m/releases/)" = "200" ] || continue
+  # 镜像可能禁止目录浏览(403)，但允许访问具体 Packages.gz；目录探测仅作提示，不作为硬门槛。
+  MIR_ROOT_CODE=$(check_url "$m/releases/")
+  case "$MIR_ROOT_CODE" in
+    200) ;;
+    403) info "镜像禁止目录浏览，继续探测具体索引: $m" ;;
+    *) continue ;;
+  esac
   # Kwrt 的 release 目录是 24.10/25.12，不是官方的 24.10.x。
   if [ "$KWRT_FIRMWARE" = "1" ] && [ "$m" = "https://dl.openwrt.ai" ]; then
     for s in $SERIES_CHAIN; do
@@ -836,7 +842,7 @@ if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   fi
   [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt 源 ✓ ($OW_BASE)"
 fi
-[ "$OW_OK" = "0" ] && err "OpenWrt 源不可用（镜像或版本探测失败）"
+[ "$OW_OK" = "0" ] && info "未找到可安全匹配的 OpenWrt fallback 源（不代表固件自带系统源不可用）"
 
 #==============================================
 # 3. 安装选择
