@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260916.13 (APK SourceForge 核心安装结果按二进制校验)
+# VERSION: 20260916.15 (可选组件从控制终端读取输入)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="13"
+VERSION_SEQ="15"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -4010,7 +4010,14 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   done
   echo "输入序号安装（多个用空格隔开，回车跳过）: "
   echo -n "> "
-  read -r OPT_CHOICES
+  # 优先从控制终端读取，不受脚本 stdin/SSH 启动方式影响。
+  # 例如 `curl ... | sh` 或远程执行器可能占用 stdin，直接 read 会立即 EOF。
+  if [ -r /dev/tty ]; then
+    read -r OPT_CHOICES </dev/tty
+  elif ! read -r OPT_CHOICES; then
+    info "可选组件输入流已关闭，跳过可选组件安装"
+    OPT_CHOICES=""
+  fi
   for idx in $OPT_CHOICES; do
     # 过滤非数字字符(退格^H等控制字符会混入序号)
     idx=$(printf '%s' "$idx" | tr -cd '0-9')
