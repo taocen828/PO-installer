@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260916.9 (小空间 PassWall 最小化安装)
+# VERSION: 20260916.10 (小空间 PassWall 最小化安装保留中文包)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="9"
+VERSION_SEQ="10"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -828,7 +828,7 @@ fi
 #==============================================
 hdr "安装选择"
 # Overlay 剩余空间低于 50MB 时，额外提供只安装 PassWall 主程序和
-# 必需代理内核的最小化模式；不自动安装中文包、Geo 数据库和可选核心。
+# 必需代理内核和中文包的最小化模式；跳过 Geo 数据库和可选核心。
 get_overlay_free_mb() {
   local free_kb
   free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
@@ -2615,10 +2615,8 @@ if [ "$INSTALL_PW" = "1" ]; then
     else
       err "系统源无 PassWall 且 SourceForge 主包源不可用，停止安装"
     fi
-    if [ "$PASSWALL_INSTALL_OK" = "1" ] && [ "$PASSWALL_MINIMAL" != "1" ]; then
+    if [ "$PASSWALL_INSTALL_OK" = "1" ]; then
       pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
-    elif [ "$PASSWALL_INSTALL_OK" = "1" ]; then
-      info "最小化模式：跳过 PassWall 中文语言包"
     fi
     if [ "$PASSWALL_INSTALL_OK" != "1" ]; then
       err "PassWall 主程序安装失败，停止其核心组件安装"
