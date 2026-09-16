@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260916.10 (小空间 PassWall 最小化安装保留中文包)
+# VERSION: 20260916.11 (APK 可选组件改用系统源安装)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="10"
+VERSION_SEQ="11"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2015,6 +2015,19 @@ apk_install() {
   # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本。
   # 先尝试 SourceForge 直链带进度；若本地包无效/未达到目标版本，必须回退仓库精确版本。
   repo_ver=$(get_repo_version "$pkg")
+  # APK 系统源中的可选组件不能拼接 SourceForge 路径：SourceForge
+  # PassWall APK 源并不保证提供 sing-box/hysteria 等全部组件，直接链路会得到 404。
+  # 这类组件统一交给已刷新过的 OpenWrt APK 系统源解析和安装。
+  case "$PKG_MGR:$pkg" in
+    apk:sing-box|apk:hysteria|apk:naiveproxy|apk:v2ray-plugin|apk:ipt2socks)
+      info "$desc 使用 OpenWrt APK 系统源安装"
+      apk_add_repo_exact "$pkg" "$repo_ver" /tmp/apk_optional_install.log
+      rc=$?
+      grep -v "^WARNING.*opening" /tmp/apk_optional_install.log 2>/dev/null || true
+      rm -f /tmp/apk_optional_install.log
+      return $rc
+      ;;
+  esac
   url=$(find_apk_url "$pkg" "$repo_ver")
   if [ -n "$url" ]; then
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
