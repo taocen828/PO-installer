@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260915.8 (已安装插件升级忽略无关依赖候选)
+# VERSION: 20260916.9 (小空间 PassWall 最小化安装)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="8"
+VERSION_SEQ="9"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -827,9 +827,29 @@ fi
 # 3. 安装选择
 #==============================================
 hdr "安装选择"
+# Overlay 剩余空间低于 50MB 时，额外提供只安装 PassWall 主程序和
+# 必需代理内核的最小化模式；不自动安装中文包、Geo 数据库和可选核心。
+get_overlay_free_mb() {
+  local free_kb
+  free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
+  [ -z "$free_kb" ] && free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
+  case "$free_kb" in
+    ''|*[!0-9]*) echo "" ;;
+    *) echo $((free_kb / 1024)) ;;
+  esac
+}
+OVERLAY_SPACE=$(get_overlay_free_mb)
+LOW_SPACE_MODE=0
+if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt 50 ]; then
+  LOW_SPACE_MODE=1
+  info "检测到 Overlay 可用空间 ${OVERLAY_SPACE}MB（低于 50MB）"
+fi
 echo "请选择要安装的软件："
 echo ""
 echo "  1) PassWall (经典版，推荐)"
+if [ "$LOW_SPACE_MODE" = "1" ]; then
+  echo "  10) PassWall 最小化安装（仅主程序+必需代理内核）"
+fi
 echo "  2) PassWall2 (新版，可与 PassWall 共存)"
 echo "  3) OpenClash (Clash 内核)"
 echo "  4) SSR Plus (ShadowSocksR Plus+)"
@@ -852,6 +872,7 @@ while :; do
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
     0|1|2|3|4|5|6|7|8|9) break ;;
+    10) [ "$LOW_SPACE_MODE" = "1" ] && break || printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
     *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
   esac
 done
@@ -870,6 +891,7 @@ case "$MAIN_CHOICE" in
     exit 0
     ;;
   1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
+  10) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_MINIMAL=1; ok "选择: PassWall 最小化安装" ;;
   2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
   3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
   4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
@@ -1344,7 +1366,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     MISSING_PW2_DEPS=""
     MISSING_OC_DEPS=""
     # 检查“索引中是否存在”而不是只检查 Packages.gz 是否能访问。
-    if [ "$INSTALL_PW" = "1" ]; then
+    if [ "$INSTALL_PW" = "1" ] && [ "$PASSWALL_MINIMAL" != "1" ]; then
       for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl chinadns-ng dns2socks dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
         opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW_DEPS="$MISSING_PW_DEPS $dep"
       done
@@ -2593,7 +2615,11 @@ if [ "$INSTALL_PW" = "1" ]; then
     else
       err "系统源无 PassWall 且 SourceForge 主包源不可用，停止安装"
     fi
-    [ "$PASSWALL_INSTALL_OK" = "1" ] && pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
+    if [ "$PASSWALL_INSTALL_OK" = "1" ] && [ "$PASSWALL_MINIMAL" != "1" ]; then
+      pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
+    elif [ "$PASSWALL_INSTALL_OK" = "1" ]; then
+      info "最小化模式：跳过 PassWall 中文语言包"
+    fi
     if [ "$PASSWALL_INSTALL_OK" != "1" ]; then
       err "PassWall 主程序安装失败，停止其核心组件安装"
     else
@@ -3848,15 +3874,19 @@ install_geoview_fallback() {
 if { [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" = "1" ]; } || [ "$INSTALL_PW2" = "1" ]; then
   hdr "默认核心组件"
   pkginstall "xray-core" "Xray 内核" || true
-  for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
-    pkgupgrade "$pkg" "$pkg" || true
-  done
-  if check_installed geoview && command -v geoview >/dev/null 2>&1; then
-    pkgupgrade "geoview" "GeoView" || true
-  elif [ "$PKG_MGR" = "opkg" ] && install_geoview_fallback; then
-    ok "GeoView $(get_version geoview) ✓"
+  if [ "$PASSWALL_MINIMAL" = "1" ]; then
+    info "最小化模式：跳过 ChinaDNS-NG、GeoIP、GeoSite、GeoView，减少存储占用"
   else
-    pkginstall "geoview" "GeoView" || true
+    for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
+      pkgupgrade "$pkg" "$pkg" || true
+    done
+    if check_installed geoview && command -v geoview >/dev/null 2>&1; then
+      pkgupgrade "geoview" "GeoView" || true
+    elif [ "$PKG_MGR" = "opkg" ] && install_geoview_fallback; then
+      ok "GeoView $(get_version geoview) ✓"
+    else
+      pkginstall "geoview" "GeoView" || true
+    fi
   fi
 fi
 
@@ -3925,6 +3955,9 @@ opt_pkginstall() {
 #==============================================
 if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   hdr "可选组件"
+  if [ "$PASSWALL_MINIMAL" = "1" ]; then
+    info "最小化模式：跳过可选代理核心，安装已完成"
+  else
   echo "可选组件列表："
   i=1
   for comp_desc in "sing-box:Sing-Box 代理核心" "hysteria:Hysteria 2 加速协议" "naiveproxy:NaiveProxy 代理协议" "v2ray-plugin:V2Ray WebSocket 插件" "ipt2socks:IPTables 转 SOCKS"; do
@@ -3960,6 +3993,7 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     eval "desc=\"\$OPT_DESC_$idx\""
     [ -n "$comp" ] && opt_pkginstall "$comp" "$desc"
   done
+  fi
 fi
 
 #==============================================
