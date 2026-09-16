@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260916.12 (APK 可选组件优先使用 SourceForge 包源)
+# VERSION: 20260916.13 (APK SourceForge 核心安装结果按二进制校验)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="12"
+VERSION_SEQ="13"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1796,6 +1796,28 @@ apk_installed_exact() {
   apk list --installed "$pkg" 2>/dev/null | grep -v WARNING | grep -q "^$pkg-$ver"
 }
 
+# APK 某些 OpenWrt 版本安装 SourceForge 包后，数据库中的版本可能带
+# -r 修订号或暂时未刷新，但实际代理核心已经成功覆盖。对可执行核心
+# 同时校验实际二进制版本，避免误判后回退 apk 仓库并清理无关依赖。
+apk_optional_binary_matches() {
+  local pkg="$1" want="$2" path actual base
+  case "$pkg" in
+    sing-box) path="/usr/bin/sing-box" ;;
+    hysteria) path="/usr/bin/hysteria" ;;
+    naiveproxy) path="/usr/bin/naive" ;;
+    v2ray-plugin) path="/usr/bin/v2ray-plugin" ;;
+    ipt2socks) path="/usr/bin/ipt2socks" ;;
+    *) return 1 ;;
+  esac
+  [ -x "$path" ] || return 1
+  case "$pkg" in
+    sing-box) actual=$("$path" version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) ;;
+    *) actual=$("$path" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) ;;
+  esac
+  base=$(printf '%s' "$want" | sed 's/-r[0-9][0-9]*$//')
+  [ -n "$actual" ] && [ "$actual" = "$base" ]
+}
+
 # 预先解析重定向后的最终地址，再显示一次下载进度。
 # SourceForge 的 -L 会对原地址和镜像地址各打印一条进度，造成“两个进度条”。
 curl_download_progress() {
@@ -2029,7 +2051,7 @@ apk_install() {
       apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
-      if [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver"; then
+      if [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver" && ! apk_optional_binary_matches "$pkg" "$repo_ver"; then
         info "$pkg 直链包未达到源版本，回退 apk 仓库安装..."
         apk_add_repo_exact "$pkg" "$repo_ver" "$log"
         rc=$?
