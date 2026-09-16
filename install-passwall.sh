@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260916.15 (可选组件从控制终端读取输入)
+# VERSION: 20260916.16 (APK aarch64 按固件目标选择软件包架构)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="15"
+VERSION_SEQ="16"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -456,8 +456,34 @@ apk_pkg_arch_from_target() {
   esac
 }
 
-# 目标平台不是普通用户态插件的匹配条件；插件和 userspace 依赖只使用固件版本 + SYS_ARCH。
-info "普通插件模式：仅按固件版本和软件包架构匹配"
+# APK 报告的是运行时 CPU 架构(aarch64)，但 OpenWrt 25.12 源目录使用 arch_packages
+# (如 mediatek/filogic → aarch64_cortex-a53)。源 URL 必须用包架构，否则 packages.adb 404。
+apk_pkg_arch_from_target() {
+  case "$1" in
+    mediatek/filogic|mediatek/mt7622|bcm27xx/bcm2710|bcm4908/generic|mvebu/cortexa53|sunxi/cortexa53|armvirt/64) echo "aarch64_cortex-a53" ;;
+    bcm27xx/bcm2711|mvebu/cortexa72) echo "aarch64_cortex-a72" ;;
+    bcm27xx/bcm2712) echo "aarch64_cortex-a76" ;;
+    sifiveu/generic|star64/generic) echo "riscv64" ;;
+    rockchip/armv8|octeontx/generic) echo "aarch64_generic" ;;
+    qualcommax/ipq60xx|qualcommax/ipq807x|qualcommax/ipq807x-ap|qualcommax/ipq6018) echo "aarch64_cortex-a53" ;;
+    *) echo "" ;;
+  esac
+}
+
+# APK 官方源按架构包名提供 userspace 索引；aarch64 只是运行时架构，
+# 不能直接用于 URL。优先使用固件目标映射，未知目标再读取现有源路径。
+if [ "$PKG_MGR" = "apk" ]; then
+  APK_TARGET_ARCH="$(apk_pkg_arch_from_target "$DISTRIB_TARGET")"
+  if [ -z "$APK_TARGET_ARCH" ]; then
+    APK_TARGET_ARCH=$(grep -hoE '/packages/(aarch64_cortex-a53|aarch64_cortex-a72|aarch64_cortex-a76|aarch64_generic|[A-Za-z0-9_.-]+)/' /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null | sed -n 's#.*/packages/\([^/]*\)/.*#\1#p' | head -1)
+  fi
+  if [ -n "$APK_TARGET_ARCH" ] && [ "$SYS_ARCH" != "$APK_TARGET_ARCH" ]; then
+    info "APK 软件包架构修正: $SYS_ARCH → $APK_TARGET_ARCH (目标 $DISTRIB_TARGET)"
+    SYS_ARCH="$APK_TARGET_ARCH"
+    CPU_ARCH="$SYS_ARCH"
+  fi
+fi
+
 
 # 内核版本
 KERNEL_VER=$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
