@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260916.16 (APK aarch64 按固件目标选择软件包架构)
+# VERSION: 20260917.1 (OPKG PassWall 主包允许已解析依赖绕过陈旧预检)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="16"
+VERSION_SEQ="1"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1894,6 +1894,24 @@ opkg_preflight_installable() {
   esac
   opkg install --noaction "$target" --force-downgrade --force-overwrite > "$log" 2>&1
   local preflight_rc=$?
+  # PassWall 的 LuCI 主包本身是 Architecture: all。24.10 的厂商/精简
+  # 固件经常能拿到主 IPK，却在 --noaction 阶段因 userspace 依赖的候选
+  # 包（尤其 lyaml）不在 opkg 当前索引，报 Unknown/incompatible，导致
+  # 主包被错误拦截。依赖循环已经逐个尝试安装这些 userspace 包；这里
+  # 只对本地下载的 PassWall 主包放宽“依赖解析”预检，空间和真实主包
+  # 安装错误仍由后面的 opkg install 返回。
+  case "$target_name" in
+    luci-app-passwall*.ipk|pkg_luci-app-passwall*.ipk)
+      if [ "$preflight_rc" != "0" ] || grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|Collected errors:" "$log" 2>/dev/null; then
+        if ! grep -qE "No space left on device|ENOSPC|kmod-|nftables-" "$log" 2>/dev/null; then
+          info "PassWall 主包预检仅缺 userspace 依赖，继续安装主 IPK"
+          cp "$log" /tmp/po-last-opkg-preflight.log 2>/dev/null || true
+          rm -f "$log"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   if [ "$preflight_rc" != "0" ] || grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:" "$log" 2>/dev/null; then
     err "依赖预检失败，跳过安装/升级，避免半升级破坏现有版本"
     grep -E "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:|ERROR" "$log" 2>/dev/null || cat "$log"
@@ -1989,6 +2007,9 @@ apk_install() {
             # 已安装主插件的升级只替换目标 IPK；其依赖已在系统中存在时，
             # 允许 opkg 忽略索引中无关/不匹配的依赖候选，不让 kmod 错误阻断主包升级。
             [ "$installed_main" = "1" ] && local_force_depends="--force-depends"
+            case "$pkg" in
+              luci-app-passwall) [ "$rc" != "2" ] && local_force_depends="--force-depends" ;;
+            esac
             case "$pkg" in
               chinadns-ng|v2ray-geoip|v2ray-geosite|geoview|xray-core) local_force_depends="--force-depends" ;;
             esac
