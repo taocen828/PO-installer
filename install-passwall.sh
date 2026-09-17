@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.3 (按 feed 诊断系统源并缓存完整用户态索引)
+# VERSION: 20260917.4 (隔离源刷新并汇总插件组件状态)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1315,7 +1315,7 @@ else
   NETWORK_SOURCE_BLOCK=0
   if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
-      opkg_update_with_timeout /tmp/po_istore_update.log 180 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { err "iStoreOS 专用源更新失败"; info "iStoreOS 源诊断日志: /tmp/po_istore_update.log"; }
+      opkg_update_with_timeout /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
     if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ -n "$OW_USE" ]; then
       # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
@@ -1375,7 +1375,7 @@ else
       probe_openwrt_userspace_feeds "$OW_USE"
       cache_openwrt_userspace_indexes "$OW_USE"
     fi
-    opkg_update_with_timeout /tmp/po_fallback_update.log 180 && ok "源更新成功" || { err "源更新失败，请检查网络"; info "源诊断日志: /tmp/po_fallback_update.log"; }
+    opkg_update_with_timeout /tmp/po_fallback_update.log 30 && ok "备用源整体刷新成功" || info "备用源整体刷新有失败，已使用逐 feed 缓存结果继续"
   else
     apk update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
   fi
@@ -1579,12 +1579,19 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     # 系统源正常时，base/luci 等官方索引无需删除，清空会造成不必要的全量重下。
     rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* 2>/dev/null || true
     info "已刷新插件及兜底源索引，保留系统源索引..."
-    opkg_update_with_timeout /tmp/po_opkg_update.log 180 || true
-    # 系统源或 OPKG 整体刷新失败时，逐 feed 缓存匹配的 userspace 索引。
-    # 单个 feed 失败不会阻断其它可用 feed。
-    if [ -n "$OW_USE" ]; then
-      probe_openwrt_userspace_feeds "$OW_USE"
-      cache_openwrt_userspace_indexes "$OW_USE"
+    # 不再对系统源、PassWall 源和备用源做一次整体 opkg update；
+    # 各源索引分别校验/缓存，避免一个坏源拖垮全部安装。
+    if [ -n "$SF_BASE" ] && [ "$SF_OK" = "1" ]; then
+      for feed in passwall_luci passwall_packages passwall2; do
+        tmp="/tmp/passwall_${feed}.$$"
+        if curl -fsL --connect-timeout 10 --max-time 20 "$SF_BASE/$feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+          cat "$tmp" > "/var/opkg-lists/$feed"
+          ok "PassWall $feed 索引已缓存"
+        else
+          info "PassWall $feed 索引不可用，跳过"
+        fi
+        rm -f "$tmp"
+      done
     fi
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
     PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
@@ -2496,6 +2503,7 @@ verify_package_installed() {
 }
 
 # 简化版（不询问，直接安装）
+PKG_LAST_RESULT=0
 pkginstall() {
   local pkg="$1" desc="$2"
   PKG_LAST_RESULT=0
@@ -4020,19 +4028,21 @@ install_geoview_fallback() {
 
 if { [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" = "1" ]; } || [ "$INSTALL_PW2" = "1" ]; then
   hdr "默认核心组件"
-  pkginstall "xray-core" "Xray 内核" || true
+  PASSWALL_XRAY_OK=0
+  pkginstall "xray-core" "Xray 内核" && PASSWALL_XRAY_OK=1 || true
   if [ "$PASSWALL_MINIMAL" = "1" ]; then
     info "最小化模式：跳过 ChinaDNS-NG、GeoIP、GeoSite、GeoView，减少存储占用"
   else
+    PASSWALL_GEO_OK=1
     for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
-      pkgupgrade "$pkg" "$pkg" || true
+      pkgupgrade "$pkg" "$pkg" || PASSWALL_GEO_OK=0
     done
     if check_installed geoview && command -v geoview >/dev/null 2>&1; then
-      pkgupgrade "geoview" "GeoView" || true
+      pkgupgrade "geoview" "GeoView" || PASSWALL_GEO_OK=0
     elif [ "$PKG_MGR" = "opkg" ] && install_geoview_fallback; then
       ok "GeoView $(get_version geoview) ✓"
     else
-      pkginstall "geoview" "GeoView" || true
+      pkginstall "geoview" "GeoView" || PASSWALL_GEO_OK=0
     fi
   fi
 fi
@@ -4206,6 +4216,12 @@ elif [ "$INSTALL_PW" = "1" ]; then
     ok "PassWall 主程序验证通过（SourceForge 主包）"
   else
     ok "PassWall 主程序验证通过（系统源）"
+  fi
+  [ "${PASSWALL_XRAY_OK:-1}" = "1" ] && ok "PassWall Xray 核心已就绪" || info "PassWall Xray 核心未确认，主程序仍已安装"
+  if [ "$PASSWALL_MINIMAL" = "1" ]; then
+    info "PassWall Geo/附加组件：最小化模式跳过"
+  elif [ "${PASSWALL_GEO_OK:-1}" != "1" ]; then
+    info "PassWall Geo/附加组件：部分未就绪，主程序仍已安装"
   fi
 fi
 if [ "$INSTALL_OC" = "1" ]; then
