@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.7 (严格校验 iStore 运行依赖)
+# VERSION: 20260917.11 (修复 OpenClash Ruby 依赖源冲突)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="7"
+VERSION_SEQ="11"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -48,12 +48,10 @@ check_url() {
   echo "$code"
 }
 
-# GitHub 下载候选：有用户代理时只走官方地址；无代理时再走公开代理兜底。
+# GitHub 下载候选：仅使用官方地址；下载工具会自动继承环境代理变量。
 gh_candidates() {
   local url="$1"
   printf '%s\n' "$url"
-  [ -n "$http_proxy$https_proxy$HTTP_PROXY$HTTPS_PROXY" ] && return 0
-  printf '%s\n' "https://ghfast.top/$url" "https://ghproxy.net/$url" "https://ghproxy.cc/$url" "https://gh.ddlc.top/$url"
 }
 
 # 修复“电脑可上网，但 SSH 到路由器后路由器自身 ping 不通”的常见问题。
@@ -139,6 +137,11 @@ if [ ! -t 0 ]; then
       exit 0
       ;;
   esac
+fi
+
+# 兼容用户通过 MY_PROXY 传入的代理配置；下载工具仅继承环境变量，避免凭据出现在命令行或日志中。
+if [ -n "${MY_PROXY:-}" ]; then
+  export http_proxy="$MY_PROXY" https_proxy="$MY_PROXY" HTTP_PROXY="$MY_PROXY" HTTPS_PROXY="$MY_PROXY"
 fi
 
 echo ""
@@ -264,13 +267,28 @@ else
 fi
 
 
-# 早期清理上次运行追加的代理插件源。
-# 必须放在第一次 opkg print-architecture 之前，否则历史 customfeeds 与 distfeeds 重复时，opkg 自身会先刷 Duplicate src declaration。
-# 注意：openwrt_ 是脚本探测/修复后的正确系统依赖源，不能清理；否则下一次运行又退回坏源。
-if [ "$PKG_MGR" = "opkg" ] && [ -f /etc/opkg/customfeeds.conf ]; then
-  grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-clean 2>/dev/null || true
-  cat /tmp/customfeeds.po-clean > /etc/opkg/customfeeds.conf 2>/dev/null
-  rm -f /tmp/customfeeds.po-clean
+# 早期清理上次运行追加的代理插件源及所有配置文件中的重复 feed 名称。
+# 必须放在第一次 opkg print-architecture 之前，否则 opkg 自身会先刷
+# Duplicate src declaration，并可能跳过正确的系统索引。
+# 只将重复声明注释掉，不删除原始内容；首次出现的声明保持不变。
+if [ "$PKG_MGR" = "opkg" ]; then
+  # 按 distfeeds → compatfeeds → customfeeds 顺序处理；状态文件让
+  # 重名项跨文件也能被识别，而不是只清理 customfeeds 内部重复。
+  : > /tmp/opkg-fixed-feed-names
+  for file in /etc/opkg/distfeeds.conf /etc/opkg/compatfeeds.conf /etc/opkg/customfeeds.conf; do
+    [ -f "$file" ] || continue
+    awk '
+      BEGIN { while ((getline n < "/tmp/opkg-fixed-feed-names") > 0) fixed[n]=1; close("/tmp/opkg-fixed-feed-names") }
+      /^[[:space:]]*src(\/gz)?[[:space:]]/ {
+        if ($2 ~ /passwall|ssr|helloworld|kiddin9/ || $2 ~ /^iw_/ || fixed[$2] || seen[$2]++) {
+          print "# PO-installer disabled duplicate/obsolete feed: " $0; next
+        }
+      }
+      { print }
+    ' "$file" > /tmp/opkg-feeds.po-clean 2>/dev/null && cat /tmp/opkg-feeds.po-clean > "$file"
+    awk '!/^[[:space:]]*#/ && /^[[:space:]]*src(\/gz)?[[:space:]]/ {print $2}' "$file" >> /tmp/opkg-fixed-feed-names
+  done
+  rm -f /tmp/opkg-fixed-feed-names /tmp/opkg-feeds.po-clean
 fi
 
 # APK 源文件路径兼容：部分 OpenWrt APK 系统没有 /etc/apk/repositories.d
@@ -1131,6 +1149,35 @@ opkg_update_with_timeout() {
   return "$rc"
 }
 
+# 只刷新指定名称的 OPKG 源，临时隔离其它配置并在结束时恢复。
+opkg_update_isolated_named_feeds() (
+  local names="$1" log="$2" seconds="${3:-60}" file bak tmp rc state="/tmp/po-isolate-files.$$"
+  [ "$PKG_MGR" = "opkg" ] || exit 1
+  : > "$state" || exit 1
+  restore_isolated_feeds() {
+    while IFS=: read -r file bak; do
+      [ -f "$bak" ] && mv -f "$bak" "$file"
+    done < "$state"
+    rm -f "$state"
+  }
+  trap 'restore_isolated_feeds' EXIT INT TERM
+  for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
+    [ -f "$file" ] || continue
+    bak=$(mktemp "/tmp/$(basename "$file").po-isolate.XXXXXX") || exit 1
+    cp -p "$file" "$bak" || exit 1
+    printf '%s:%s\n' "$file" "$bak" >> "$state" || exit 1
+    tmp=$(mktemp "$file.po-isolate.XXXXXX") || exit 1
+    awk -v names="$names" 'BEGIN { n=split(names,a," ") }
+      /^src(\/gz)?[[:space:]]/ { keep=0; for(i=1;i<=n;i++) if($2==a[i]) keep=1; if(!keep) { print "# PO-installer temporarily isolated: " $0; next } }
+      { print }' "$file" > "$tmp" || exit 1
+    mv -f "$tmp" "$file" || exit 1
+  done
+  opkg_update_with_timeout "$log" "$seconds"; rc=$?
+  restore_isolated_feeds
+  trap - EXIT INT TERM
+  return "$rc"
+)
+
 # 记录/显示单个 userspace feed 的连续失败次数；只记录探测状态，不记录包管理器输出。
 record_openwrt_feed_state() {
   local feed="$1" state="$2" file="/tmp/po-openwrt-feed-state" old=0 new=0
@@ -1177,8 +1224,16 @@ cache_openwrt_userspace_indexes() {
     echo "$OPENWRT_FEEDS_OK" | grep -qw "$feed" || continue
     tmp="/tmp/openwrt_${feed}.$$"
     if curl -fsL --connect-timeout 10 --max-time 60 "$base/packages/$SYS_ARCH/$feed/Packages.gz" 2>/dev/null | gzip -dc > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-      cat "$tmp" > "/var/opkg-lists/openwrt_$feed"
-      ok "已缓存 OpenWrt $feed 用户态索引"
+      # 手工索引只接受匹配本机架构的条目，并立即检查该 feed 的代表包。
+      if ! grep -qE "^Architecture: ($SYS_ARCH|all|noarch)$" "$tmp"; then
+        err "OpenWrt $feed 索引架构不匹配，拒绝缓存"
+      elif { [ "$feed" = "base" ] && ! grep -q '^Package: base-files$' "$tmp"; } ||
+           { [ "$feed" = "luci" ] && ! grep -q '^Package: luci-base$' "$tmp"; }; then
+        err "OpenWrt $feed 索引缺少预期基础包，拒绝缓存"
+      else
+        cat "$tmp" > "/var/opkg-lists/openwrt_$feed"
+        ok "已缓存 OpenWrt $feed 用户态索引（已绕过 OPKG 签名流程，架构/关键包已校验）"
+      fi
     else
       err "OpenWrt $feed 用户态索引下载失败"
     fi
@@ -1186,37 +1241,25 @@ cache_openwrt_userspace_indexes() {
   done
 }
 
+# 使用 OPKG 原生刷新系统源，保留签名校验与 Packages.sig 处理。
+# 手工 curl 缓存仅用于明确验证过的 fallback userspace 源。
 opkg_update_configured_feeds() {
-  local file name url tmp target log=/tmp/po_system_opkg_update.log ok_count=0 core_count=0 core_total=0
-  # 本次独立刷新必须使用全新日志，不能消费上次 opkg update 的残留结果。
+  local log=/tmp/po_system_opkg_update.log
   : > "$log" || return 1
-  for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
-    [ -f "$file" ] || continue
-    while read -r name url; do
-      [ -n "$name" ] && [ -n "$url" ] || continue
-      case "$name" in passwall*|openwrt_*) continue;; esac
-      target="/var/opkg-lists/$name"
-      tmp="/var/opkg-lists/.po-${name}.$$"
-      case "$name" in base|packages|luci|routing) core_total=$((core_total + 1));; esac
-      printf "  刷新 %s...\\n" "$name"
-      if mkdir -p /var/opkg-lists 2>/dev/null && curl -fsL --connect-timeout 8 --max-time 20 "$url/Packages.gz" 2>>"$log" | gzip -dc > "$tmp" 2>>"$log" && [ -s "$tmp" ]; then
-        # 临时文件与目标位于同一文件系统，mv 保证不会留下半份索引。
-        mv -f "$tmp" "$target"
-        ok_count=$((ok_count + 1))
-        case "$name" in base|packages|luci|routing) core_count=$((core_count + 1));; esac
-        ok "$name 索引刷新成功"
-      else
-        # 本次刷新失败时保留旧索引，避免网络抖动扩大为依赖解析失败。
-        rm -f "$tmp"
-        printf 'Failed to download %s/Packages.gz (PO-installer independent refresh: %s)\n' "$url" "$name" >> "$log"
-        info "$name 索引刷新失败，保留旧缓存（不影响其它源）"
-      fi
-      rm -f "$tmp"
-    done <<EOF
-$(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' "$file" 2>/dev/null)
-EOF
-  done
-  [ "$ok_count" -gt 0 ] && [ "$core_total" -gt 0 ] && [ "$core_count" -eq "$core_total" ]
+  opkg_update_with_timeout "$log" 180
+}
+
+validate_unique_opkg_feed_names() {
+  local names=/tmp/po-opkg-feed-names.$$ duplicates
+  awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2}' \
+    /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null > "$names"
+  duplicates=$(sort "$names" | uniq -d)
+  rm -f "$names"
+  if [ -n "$duplicates" ]; then
+    err "检测到重复 OPKG feed 名称，拒绝刷新以避免索引覆盖: $duplicates"
+    return 1
+  fi
+  return 0
 }
 
 validate_opkg_system_source() {
@@ -1233,50 +1276,17 @@ validate_opkg_system_source() {
   done <<EOF
 $(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
 EOF
-  # 各系统 feed 独立刷新，避免单个坏源阻断整体判断。
+  [ "$PKG_MGR" = "opkg" ] || return 1
+  validate_unique_opkg_feed_names || return 1
   opkg_update_configured_feeds
   local rc=$?
-  # 部分镜像没有 telephony 索引，但 base/luci/packages/routing 已正常；
-  local fatal_log=/tmp/po_system_opkg_fatal.log
-  grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$log" > "$fatal_log" 2>/dev/null || true
-  # 镜像可能瞬时失败；手工再次执行 opkg update 能成功时，脚本也应采用
-  # 第二次结果，而不是继续使用第一次日志中的 Failed/wget returned 8。
-  if grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
-    local retry_log=/tmp/po_system_opkg_update.retry.log retry_fatal=/tmp/po_system_opkg_fatal.retry.log retry_rc
-    info "OPKG 源出现瞬时下载错误，自动重试一次..."
-    opkg_update_with_timeout "$retry_log" 180
-    retry_rc=$?
-    grep -vE 'telephony/Packages\.gz|telephony/Packages\.sig|telephony' "$retry_log" > "$retry_fatal" 2>/dev/null || true
-    if [ "$retry_rc" = "0" ] && ! grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$retry_fatal" 2>/dev/null; then
-      cp "$retry_log" "$log" 2>/dev/null || true
-      rc=0
-      cp "$retry_fatal" "$fatal_log" 2>/dev/null || true
-      info "OPKG 源重试成功，按最终结果继续"
-    fi
-    rm -f "$retry_log" "$retry_fatal"
-  fi
-  # 某些 opkg 对单个 feed 失败仍返回 0，必须检查最终未更新的非可选 feed。
-  if grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' "$fatal_log" 2>/dev/null; then
+  # 使用 OPKG 原生刷新全部已配置源；签名校验由 OPKG 负责。
+  if [ "$rc" != "0" ]; then
     err "OPKG 系统源更新失败或存在错误"
-    grep -E 'Failed|Signature|Collected errors|incompatible|404|wget returned|ERROR' "$log" 2>/dev/null || true
-    # wget returned 8/超时/DNS/代理连接失败只代表本次网络失败，不能据此
-    # 删除或注释仍可能正常的 Snapshot 源；只有明确内容错误才禁用。
-    if grep -qE '404|Signature check failed|invalid (gzip|index)|not a gzip|bad (gzip|index)' "$fatal_log" 2>/dev/null; then
-      disable_failed_opkg_feeds "$log"
-    else
-      info "本次 OPKG 源刷新疑似网络/代理失败，保留原源配置，不执行禁用"
-      SYS_SOURCE_NETWORK_FAIL=1
-      # 网络刷新失败不等于现有索引不可用；只要基础包仍可解析，保留
-      # 原 Snapshot 源并允许后续按需补充缺失的用户态依赖。
-      for pkg in base-files libc luci-base; do
-        opkg list "$pkg" 2>/dev/null | grep -q "^$pkg " || return 1
-      done
-      return 1
-    fi
-    rm -f "$log" "$fatal_log"
+    grep -E 'Failed|ERROR|gzip|timeout|HTTP' "$log" 2>/dev/null || true
+    SYS_SOURCE_NETWORK_FAIL=1
     return 1
   fi
-  rm -f "$fatal_log"
   awk '!/^#/ && /^src(\/gz)?[[:space:]]/ {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | sort -u > /tmp/po_opkg_source_urls
   validate_source_path_compatibility /tmp/po_opkg_source_urls || { rm -f "$log" /tmp/po_opkg_source_urls; return 1; }
   # 索引必须至少能提供当前系统的基础用户态包，不能只凭 URL/HTTP 200 判定可用。
@@ -1335,7 +1345,7 @@ else
   NETWORK_SOURCE_BLOCK=0
   if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
-      opkg_update_with_timeout /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
+      opkg_update_isolated_named_feeds "istore_compat is_nas" /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
     if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ -n "$OW_USE" ]; then
       # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
@@ -1361,11 +1371,11 @@ else
       {
         echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH)"
       } >> /tmp/customfeeds.po-new
-      add_fallback_opkg_feed openwrt_base "$OW_USE/packages/$SYS_ARCH/base"
-      add_fallback_opkg_feed openwrt_luci "$OW_USE/packages/$SYS_ARCH/luci"
-      add_fallback_opkg_feed openwrt_packages "$OW_USE/packages/$SYS_ARCH/packages"
-      add_fallback_opkg_feed openwrt_routing "$OW_USE/packages/$SYS_ARCH/routing"
-      add_fallback_opkg_feed openwrt_telephony "$OW_USE/packages/$SYS_ARCH/telephony"
+      add_fallback_opkg_feed po_openwrt_base "$OW_USE/packages/$SYS_ARCH/base"
+      add_fallback_opkg_feed po_openwrt_luci "$OW_USE/packages/$SYS_ARCH/luci"
+      add_fallback_opkg_feed po_openwrt_packages "$OW_USE/packages/$SYS_ARCH/packages"
+      add_fallback_opkg_feed po_openwrt_routing "$OW_USE/packages/$SYS_ARCH/routing"
+      add_fallback_opkg_feed po_openwrt_telephony "$OW_USE/packages/$SYS_ARCH/telephony"
       cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
       rm -f /tmp/customfeeds.po-new
       ok "已配置对应固件备用源，保留现有 customfeeds ($OW_USE)"
@@ -1406,7 +1416,7 @@ else
       probe_openwrt_userspace_feeds "$OW_USE"
       cache_openwrt_userspace_indexes "$OW_USE"
     fi
-    opkg_update_with_timeout /tmp/po_fallback_update.log 30 && ok "备用源整体刷新成功" || info "备用源整体刷新有失败，已使用逐 feed 缓存结果继续"
+    opkg_update_isolated_named_feeds "po_openwrt_base po_openwrt_luci po_openwrt_packages po_openwrt_routing po_openwrt_telephony" /tmp/po_fallback_update.log 30 && ok "备用源 userspace feed 刷新成功" || info "备用源 userspace feed 刷新有失败，已使用逐 feed 缓存结果继续"
   else
     apk update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
   fi
@@ -1493,6 +1503,8 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     MISSING_OC_DEPS=""
     # 检查“索引中是否存在”而不是只检查 Packages.gz 是否能访问。
     if [ "$INSTALL_PW" = "1" ] && [ "$PASSWALL_MINIMAL" != "1" ]; then
+      # coreutils 子包由 OpenWrt 24.10 packages 源提供；若当前系统索引已有
+      # coreutils 主包但没有 applet 子包，继续从匹配的 userspace 源补齐。
       for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl chinadns-ng dns2socks dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
         opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW_DEPS="$MISSING_PW_DEPS $dep"
       done
@@ -1531,18 +1543,18 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     elif { [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; } && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
       # 系统源能访问不等于依赖完整：iStoreOS/厂商源可能缺 coreutils-timeout、libyaml、lyaml。
       # 只要 PassWall 依赖探测缺包，就必须追加匹配系列 userspace 源。
-      add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
-      add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
-      add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
-      add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
-      add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
+      add_opkg_feed_once "po_openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
+      add_opkg_feed_once "po_openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
+      add_opkg_feed_once "po_openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
+      add_opkg_feed_once "po_openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
+      add_opkg_feed_once "po_openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "系统源可用但依赖不完整，已补充 OpenWrt userspace 依赖源 ($OW_USE / $SYS_ARCH)"
     elif [ "$SYS_SOURCE_OK" != "1" ] && [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
-      add_opkg_feed_once "openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
-      add_opkg_feed_once "openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
-      add_opkg_feed_once "openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
-      add_opkg_feed_once "openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
-      add_opkg_feed_once "openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
+      add_opkg_feed_once "po_openwrt_base" "$OW_USE/packages/$SYS_ARCH/base"
+      add_opkg_feed_once "po_openwrt_luci" "$OW_USE/packages/$SYS_ARCH/luci"
+      add_opkg_feed_once "po_openwrt_packages" "$OW_USE/packages/$SYS_ARCH/packages"
+      add_opkg_feed_once "po_openwrt_routing" "$OW_USE/packages/$SYS_ARCH/routing"
+      add_opkg_feed_once "po_openwrt_telephony" "$OW_USE/packages/$SYS_ARCH/telephony"
       info "已追加匹配的 OpenWrt 依赖源 ($OW_USE / $SYS_ARCH)"
     elif [ "$SYS_SOURCE_OK" = "1" ]; then
       # 系统源完整时清理旧版残留；不碰 distfeeds.conf 中的系统源。
@@ -3631,7 +3643,7 @@ install_openclash_immortal_fallback() {
     fi
     add_opkg_feed_once "iw_luci" "$IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci"
     add_opkg_feed_once "iw_packages" "$IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages"
-    opkg_update_with_timeout /tmp/po-openclash-immortal-update.log 180
+    opkg_update_isolated_named_feeds "iw_luci iw_packages" /tmp/po-openclash-immortal-update.log 180
     rc=$?
     if [ "$rc" != "0" ] || grep -qE 'Failed to download|Signature check failed|Collected errors|incompatible|404|wget returned' /tmp/po-openclash-immortal-update.log 2>/dev/null; then
       err "immortalwrt OpenClash 源更新失败"
