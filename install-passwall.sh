@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.2 (系统源网络失败时继续使用匹配用户态备用源)
+# VERSION: 20260917.3 (按 feed 诊断系统源并缓存完整用户态索引)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="1"
+VERSION_SEQ="3"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1145,8 +1145,75 @@ opkg_update_with_timeout() {
   return "$rc"
 }
 
+# 记录/显示单个 userspace feed 的连续失败次数；只记录探测状态，不记录包管理器输出。
+record_openwrt_feed_state() {
+  local feed="$1" state="$2" file="/tmp/po-openwrt-feed-state" old=0 new=0
+  [ -n "$feed" ] || return 0
+  [ -f "$file" ] || : > "$file"
+  old=$(awk -v f="$feed" '$1==f {print $2; exit}' "$file" 2>/dev/null)
+  case "$old" in ''|*[!0-9]*) old=0;; esac
+  if [ "$state" = "ok" ]; then new=0; else new=$((old + 1)); fi
+  awk -v f="$feed" '$1!=f {print}' "$file" > "$file.tmp" 2>/dev/null || true
+  printf '%s %s\n' "$feed" "$new" >> "$file.tmp"
+  cat "$file.tmp" > "$file"
+  rm -f "$file.tmp"
+  [ "$new" -ge 2 ] && info "检测到 $feed feed 已连续失败 ${new} 次"
+}
+
+# 单独探测匹配的 OpenWrt userspace feed。某一个 feed 超时/404 时，
+# 其它可用 feed 仍可继续用于依赖安装。
+probe_openwrt_userspace_feeds() {
+  local base="$1" feed url code
+  [ -n "$base" ] || return 1
+  OPENWRT_FEEDS_OK=""
+  OPENWRT_FEEDS_BAD=""
+  for feed in base luci packages routing telephony; do
+    url="$base/packages/$SYS_ARCH/$feed/Packages.gz"
+    code=$(check_url "$url")
+    if [ "$code" = "200" ]; then
+      OPENWRT_FEEDS_OK="$OPENWRT_FEEDS_OK $feed"
+      record_openwrt_feed_state "$feed" ok
+      ok "OpenWrt userspace feed $feed ✓"
+    else
+      OPENWRT_FEEDS_BAD="$OPENWRT_FEEDS_BAD $feed"
+      record_openwrt_feed_state "$feed" fail
+      info "OpenWrt userspace feed $feed 不可用 (HTTP $code)，跳过"
+    fi
+  done
+  [ -n "$OPENWRT_FEEDS_OK" ]
+}
+
+cache_openwrt_userspace_indexes() {
+  local base="$1" feed tmp
+  [ -n "$base" ] || return 1
+  mkdir -p /var/opkg-lists 2>/dev/null || return 1
+  for feed in base luci packages routing telephony; do
+    echo "$OPENWRT_FEEDS_OK" | grep -qw "$feed" || continue
+    tmp="/tmp/openwrt_${feed}.$$"
+    if curl -fsL --connect-timeout 10 --max-time 60 "$base/packages/$SYS_ARCH/$feed/Packages.gz" 2>/dev/null | gzip -dc > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+      cat "$tmp" > "/var/opkg-lists/openwrt_$feed"
+      ok "已缓存 OpenWrt $feed 用户态索引"
+    else
+      err "OpenWrt $feed 用户态索引下载失败"
+    fi
+    rm -f "$tmp"
+  done
+}
+
 validate_opkg_system_source() {
-  local log=/tmp/po_system_opkg_update.log
+  local log=/tmp/po_system_opkg_update.log feed_url feed_name feed_code
+  echo "系统源逐 feed 检测："
+  while read -r feed_name feed_url; do
+    [ -n "$feed_url" ] || continue
+    feed_code=$(check_url "$feed_url/Packages.gz")
+    if [ "$feed_code" = "200" ]; then
+      ok "$feed_name ✓ (HTTP $feed_code)"
+    else
+      info "$feed_name ✗ (HTTP $feed_code)"
+    fi
+  done <<EOF
+$(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
+EOF
   opkg_update_with_timeout "$log" 180
   local rc=$?
   # 部分镜像没有 telephony 索引，但 base/luci/packages/routing 已正常；
@@ -1303,6 +1370,11 @@ else
   fi
   # 重新验证源
   if [ "$PKG_MGR" = "opkg" ]; then
+    # 系统源失败时也逐 feed 检查匹配备用源；单个 feed 不可用不阻断其它 feed。
+    if [ "$OW_OK" = "1" ] && [ -n "$OW_USE" ]; then
+      probe_openwrt_userspace_feeds "$OW_USE"
+      cache_openwrt_userspace_indexes "$OW_USE"
+    fi
     opkg_update_with_timeout /tmp/po_fallback_update.log 180 && ok "源更新成功" || { err "源更新失败，请检查网络"; info "源诊断日志: /tmp/po_fallback_update.log"; }
   else
     apk update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
@@ -1508,19 +1580,11 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     rm -f /var/opkg-lists/passwall* /var/opkg-lists/iw_* /var/opkg-lists/openwrt_* 2>/dev/null || true
     info "已刷新插件及兜底源索引，保留系统源索引..."
     opkg_update_with_timeout /tmp/po_opkg_update.log 180 || true
-    # 第三方 SNAPSHOT 的 opkg 有时不会将新 customfeed 的索引落盘。若补了完整 userspace packages 源，
-    # 直接缓存 Packages.gz，使 OPKG 能解析所有递归依赖（而不是按 coreutils-timeout/libyaml 逐个特判）。
-    if [ "$NEED_PW_USERSPACE_DEPS" = "1" ] || [ "$NEED_PW2_USERSPACE_DEPS" = "1" ] || [ "$NEED_OC_USERSPACE_DEPS" = "1" ]; then
-      info "缓存完整 userspace 依赖索引，交由 OPKG 自动解析递归依赖..."
-      if curl -fsL --connect-timeout 10 --max-time 60 "$OW_USE/packages/$SYS_ARCH/packages/Packages.gz" 2>/dev/null | gzip -dc > /tmp/openwrt_packages.po 2>/dev/null && [ -s /tmp/openwrt_packages.po ]; then
-        mkdir -p /var/opkg-lists 2>/dev/null || true
-        cat /tmp/openwrt_packages.po > /var/opkg-lists/openwrt_packages
-        rm -f /tmp/openwrt_packages.po
-        ok "完整 userspace 依赖索引已就绪"
-      else
-        rm -f /tmp/openwrt_packages.po
-        err "userspace 依赖索引缓存失败"
-      fi
+    # 系统源或 OPKG 整体刷新失败时，逐 feed 缓存匹配的 userspace 索引。
+    # 单个 feed 失败不会阻断其它可用 feed。
+    if [ -n "$OW_USE" ]; then
+      probe_openwrt_userspace_feeds "$OW_USE"
+      cache_openwrt_userspace_indexes "$OW_USE"
     fi
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
     PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
@@ -2434,6 +2498,7 @@ verify_package_installed() {
 # 简化版（不询问，直接安装）
 pkginstall() {
   local pkg="$1" desc="$2"
+  PKG_LAST_RESULT=0
   # Xray 官方/手动更新可能已经放置 /usr/bin/xray，但 opkg 数据库没有
   # xray-core 记录；不要因此重复走错误的仓库安装路径。
   if [ "$pkg" = "xray-core" ] && command -v xray >/dev/null 2>&1; then
@@ -4029,7 +4094,8 @@ opt_pkginstall() {
     fi
     return
   fi
-  pkginstall "$pkg" "$desc"
+  pkginstall "$pkg"
+  return $?
 }
 
 #==============================================
@@ -4080,7 +4146,14 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
     [ -z "$idx" ] && continue
     eval "comp=\"\$OPT_COMP_$idx\""
     eval "desc=\"\$OPT_DESC_$idx\""
-    [ -n "$comp" ] && opt_pkginstall "$comp" "$desc"
+      [ -n "$comp" ] && {
+        info "开始处理可选组件: $desc"
+        if opt_pkginstall "$comp" "$desc"; then
+          ok "$desc 处理完成"
+        else
+          err "$desc 处理失败"
+        fi
+      }
   done
   fi
 fi
