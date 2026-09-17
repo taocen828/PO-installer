@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.1 (OPKG PassWall 主包允许已解析依赖绕过陈旧预检)
+# VERSION: 20260917.2 (系统源网络失败时继续使用匹配用户态备用源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
 VERSION_SEQ="1"
@@ -1236,19 +1236,16 @@ fi
 
 if [ "$SYS_SOURCE_OK" = "1" ]; then
   ok "系统源可用"
-elif [ "$SYS_SOURCE_NETWORK_FAIL" = "1" ]; then
-  info "系统源本次刷新失败但未确认失效，保留原源；允许按需使用 SourceForge 主包 fallback"
-  NETWORK_SOURCE_BLOCK=1
 else
-  NETWORK_SOURCE_BLOCK=0
   # 系统源文件只读保护：永不覆盖/清空 distfeeds.conf；fallback 只能写 customfeeds。
   if [ "$SYS_SOURCE_NETWORK_FAIL" = "1" ]; then
-    err "系统源本次刷新失败，保留原 distfeeds.conf，不注入替代源"
-    NETWORK_SOURCE_BLOCK=1
+    info "系统源本次刷新失败，保留原 distfeeds.conf；继续探测匹配的用户态备用源"
   else
-    NETWORK_SOURCE_BLOCK=0
     err "系统源不可用，保留原 distfeeds.conf，开始选择独立追加源..."
   fi
+  # 网络失败不等于备用源不可用：不改原系统源，但允许把匹配的
+  # OpenWrt userspace 源追加到 customfeeds，供 PassWall 依赖使用。
+  NETWORK_SOURCE_BLOCK=0
   if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
       opkg_update_with_timeout /tmp/po_istore_update.log 180 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { err "iStoreOS 专用源更新失败"; info "iStoreOS 源诊断日志: /tmp/po_istore_update.log"; }
