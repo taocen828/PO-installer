@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.4 (隔离源刷新并汇总插件组件状态)
+# VERSION: 20260917.7 (严格校验 iStore 运行依赖)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="4"
+VERSION_SEQ="7"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -452,20 +452,6 @@ apk_pkg_arch_from_target() {
     bcm27xx/bcm2712) echo "aarch64_cortex-a76" ;;
     sifiveu/generic|star64/generic) echo "riscv64" ;;
     rockchip/armv8|octeontx/generic) echo "aarch64_generic" ;;
-    *) echo "" ;;
-  esac
-}
-
-# APK 报告的是运行时 CPU 架构(aarch64)，但 OpenWrt 25.12 源目录使用 arch_packages
-# (如 mediatek/filogic → aarch64_cortex-a53)。源 URL 必须用包架构，否则 packages.adb 404。
-apk_pkg_arch_from_target() {
-  case "$1" in
-    mediatek/filogic|mediatek/mt7622|bcm27xx/bcm2710|bcm4908/generic|mvebu/cortexa53|sunxi/cortexa53|armvirt/64) echo "aarch64_cortex-a53" ;;
-    bcm27xx/bcm2711|mvebu/cortexa72) echo "aarch64_cortex-a72" ;;
-    bcm27xx/bcm2712) echo "aarch64_cortex-a76" ;;
-    sifiveu/generic|star64/generic) echo "riscv64" ;;
-    rockchip/armv8|octeontx/generic) echo "aarch64_generic" ;;
-    qualcommax/ipq60xx|qualcommax/ipq807x|qualcommax/ipq807x-ap|qualcommax/ipq6018) echo "aarch64_cortex-a53" ;;
     *) echo "" ;;
   esac
 }
@@ -1201,29 +1187,36 @@ cache_openwrt_userspace_indexes() {
 }
 
 opkg_update_configured_feeds() {
-  local file name url tmp ok_count=0 core_count=0
+  local file name url tmp target log=/tmp/po_system_opkg_update.log ok_count=0 core_count=0 core_total=0
+  # 本次独立刷新必须使用全新日志，不能消费上次 opkg update 的残留结果。
+  : > "$log" || return 1
   for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
     [ -f "$file" ] || continue
     while read -r name url; do
       [ -n "$name" ] && [ -n "$url" ] || continue
       case "$name" in passwall*|openwrt_*) continue;; esac
-      tmp="/tmp/opkg-feed-${name}.$$"
+      target="/var/opkg-lists/$name"
+      tmp="/var/opkg-lists/.po-${name}.$$"
+      case "$name" in base|packages|luci|routing) core_total=$((core_total + 1));; esac
       printf "  刷新 %s...\\n" "$name"
-      if curl -fsL --connect-timeout 8 --max-time 20 "$url/Packages.gz" 2>&1 | gzip -dc > "$tmp" 2>&1 && [ -s "$tmp" ]; then
-        mkdir -p /var/opkg-lists 2>/dev/null || true
-        cat "$tmp" > "/var/opkg-lists/$name"
+      if mkdir -p /var/opkg-lists 2>/dev/null && curl -fsL --connect-timeout 8 --max-time 20 "$url/Packages.gz" 2>>"$log" | gzip -dc > "$tmp" 2>>"$log" && [ -s "$tmp" ]; then
+        # 临时文件与目标位于同一文件系统，mv 保证不会留下半份索引。
+        mv -f "$tmp" "$target"
         ok_count=$((ok_count + 1))
         case "$name" in base|packages|luci|routing) core_count=$((core_count + 1));; esac
         ok "$name 索引刷新成功"
       else
-        info "$name 索引刷新失败，跳过（不影响其它源）"
+        # 本次刷新失败时保留旧索引，避免网络抖动扩大为依赖解析失败。
+        rm -f "$tmp"
+        printf 'Failed to download %s/Packages.gz (PO-installer independent refresh: %s)\n' "$url" "$name" >> "$log"
+        info "$name 索引刷新失败，保留旧缓存（不影响其它源）"
       fi
       rm -f "$tmp"
     done <<EOF
 $(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' "$file" 2>/dev/null)
 EOF
   done
-  [ "$ok_count" -gt 0 ] && [ "$core_count" -gt 0 ]
+  [ "$ok_count" -gt 0 ] && [ "$core_total" -gt 0 ] && [ "$core_count" -eq "$core_total" ]
 }
 
 validate_opkg_system_source() {
@@ -1384,12 +1377,23 @@ else
   else
     if [ -n "$OW_USE" ]; then
       # 绝不注释原 APK 系统源；只追加兜底源，避免 iStore/系统源状态被破坏。
-      { echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
+      # 只替换本脚本上次写入的 fallback 块，保留用户已有系统源和自定义源。
+      awk '
+        /^# PO-installer APK fallback BEGIN$/ { skip=1; next }
+        /^# PO-installer APK fallback END$/ { skip=0; next }
+        !skip { print }
+      ' "$APK_REPO_FILE" > /tmp/apk-repositories.po-new 2>/dev/null || : > /tmp/apk-repositories.po-new
+      {
+        echo "# PO-installer APK fallback BEGIN"
+        echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/luci/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/packages/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/routing/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/telephony/packages.adb"
-      } > "$APK_REPO_FILE"
+        echo "# PO-installer APK fallback END"
+      } >> /tmp/apk-repositories.po-new
+      cat /tmp/apk-repositories.po-new > "$APK_REPO_FILE"
+      rm -f /tmp/apk-repositories.po-new
       ok "已配置 OpenWrt 镜像源 ($OW_USE)"
     else
       err "无可用镜像源，系统源保持不动（未修改）"
@@ -2110,17 +2114,8 @@ apk_install() {
           if [ "$installed_main" = "1" ] || [ "$rc" != "2" ]; then
             # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
             # 直链校验下载，安装时只替换当前包，不重装已有依赖。
-            local local_force_depends=""
-            # 已安装主插件的升级只替换目标 IPK；其依赖已在系统中存在时，
-            # 允许 opkg 忽略索引中无关/不匹配的依赖候选，不让 kmod 错误阻断主包升级。
-            [ "$installed_main" = "1" ] && local_force_depends="--force-depends"
-            case "$pkg" in
-              luci-app-passwall) [ "$rc" != "2" ] && local_force_depends="--force-depends" ;;
-            esac
-            case "$pkg" in
-              chinadns-ng|v2ray-geoip|v2ray-geosite|geoview|xray-core) local_force_depends="--force-depends" ;;
-            esac
-            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite $local_force_depends > "$log" 2>&1
+            # 主包不得用 --force-depends：它会把缺失/ABI 不匹配依赖伪装成成功。
+            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
             rc=$?
             cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
             # opkg 可能在主包已成功写入后，因附带依赖候选报非零。
@@ -3059,7 +3054,7 @@ install_ssr_release() {
     apk add --upgrade --allow-untrusted --force-broken-world --force-overwrite "$pkgfile" >> "$log" 2>&1
     rc=$?
   else
-    opkg install "$pkgfile" --force-downgrade --force-overwrite --force-depends >> "$log" 2>&1
+    opkg install "$pkgfile" --force-downgrade --force-overwrite >> "$log" 2>&1
     rc=$?
     grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
   fi
@@ -3118,15 +3113,16 @@ install_ssr_release() {
 # SSR Plus
 # 主程序来自 fw876/helloworld 官方 Release；OPKG 依赖源保留 openwrt.ai/kiddin9。
 if [ "$INSTALL_SSR" = "1" ]; then
+  SSR_INSTALL_OK=0
   if [ "$PKG_MGR" = "opkg" ]; then
     hdr "SSR Plus 安装"
     # 先装依赖/协议组件，最后装 LuCI 主程序，避免主程序先因依赖未解开而失败。
     install_ssr_dependencies
-    install_ssr_release "ipk"
+    install_ssr_release "ipk" && SSR_INSTALL_OK=1
   else
     hdr "SSR Plus 安装"
     install_ssr_dependencies
-    install_ssr_release "apk"
+    install_ssr_release "apk" && SSR_INSTALL_OK=1
   fi
 fi
 
@@ -3217,8 +3213,10 @@ install_openclash_dependencies() {
     grep -E "ERROR|WARNING|unable|conflict|breaks" "$log" 2>/dev/null || true
   fi
   if [ "$kernel_rc" != "0" ] || [ -n "$kernel_missing" ]; then
-    info "OpenClash 内核/防火墙依赖安装失败；通常是厂商内核源或 kernel hash 不匹配"
+    err "OpenClash 内核/防火墙依赖未就绪；通常是厂商内核源或 kernel hash 不匹配"
     grep -E "kmod-|incompatible|kernel|hash|Unknown package|ERROR|WARNING|unable" "$log" 2>/dev/null || true
+    rm -f "$log"
+    return 1
   fi
   rm -f "$log"
   ok "OpenClash 用户态依赖已就绪"
@@ -3266,7 +3264,8 @@ openclash_ipk_architecture() {
 
 if [ "$INSTALL_OC" = "1" ]; then
   hdr "OpenClash 依赖"
-  install_openclash_dependencies || info "OpenClash 依赖未完全就绪，继续尝试主程序安装以输出详细诊断"
+  OPENCLASH_DEPS_OK=1
+  install_openclash_dependencies || OPENCLASH_DEPS_OK=0
 fi
 
 # OpenClash 安装
@@ -3654,7 +3653,8 @@ install_openclash_immortal_fallback() {
   rc=$?
   grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
   nver=$(get_version "luci-app-openclash")
-  if [ "$rc" = "0" ] && [ -n "$nver" ] && { [ -z "$old_ver" ] || [ "$nver" != "$old_ver" ]; }; then
+  # 同版本且关键包已登记时视为已就绪；GitHub 仅不可达不应把可用安装判成失败。
+  if [ -n "$nver" ] && { [ "$rc" = "0" ] || { [ -n "$old_ver" ] && [ "$nver" = "$old_ver" ] && check_installed "luci-app-openclash"; }; }; then
     ok "OpenClash $nver ✓ (immortalwrt 源)"
     return 0
   fi
@@ -3664,7 +3664,8 @@ install_openclash_immortal_fallback() {
   return 1
 }
 if [ "$INSTALL_AGH" = "1" ]; then
-  install_adguardhome
+  AGH_INSTALL_OK=0
+  install_adguardhome && AGH_INSTALL_OK=1
 fi
 
 istore_files_installed() {
@@ -3673,16 +3674,25 @@ istore_files_installed() {
   return 1
 }
 istore_runtime_deps_ok() {
-  command -v script >/dev/null 2>&1 && command -v stty >/dev/null 2>&1 && return 0
-  return 1
+  command -v script >/dev/null 2>&1 || return 1
+  command -v stty >/dev/null 2>&1 || return 1
+  if [ "$PKG_MGR" = "apk" ]; then
+    apk list --installed script-utils 2>/dev/null | grep -v WARNING | grep -q '^script-utils-' || return 1
+    apk list --installed coreutils-stty 2>/dev/null | grep -v WARNING | grep -q '^coreutils-stty-' || return 1
+  else
+    check_installed script-utils || return 1
+    check_installed coreutils-stty || return 1
+  fi
+  return 0
 }
 ensure_istore_runtime_deps() {
   # taskd 运行商店安装任务时会调用 `script` 和 `stty`。
   # 手动解包 iStore 时包管理器不会自动安装 taskd 的依赖，缺 script 会报：/usr/libexec/taskd: exec: line 11: script: not found
   local need="" log="/tmp/istore_deps.log" rc=0
-  command -v script >/dev/null 2>&1 || need="$need script-utils"
-  command -v stty >/dev/null 2>&1 || need="$need coreutils-stty"
-  [ -z "$need" ] && return 0
+  istore_runtime_deps_ok && return 0
+  check_installed script-utils >/dev/null 2>&1 || need="$need script-utils"
+  check_installed coreutils-stty >/dev/null 2>&1 || need="$need coreutils-stty"
+  [ -z "$need" ] && return 1
   info "补装 iStore 运行依赖:$need"
   : > "$log"
   if [ "$PKG_MGR" = "apk" ]; then
@@ -3690,7 +3700,7 @@ ensure_istore_runtime_deps() {
     apk add --upgrade --latest --allow-untrusted --force-broken-world $need > "$log" 2>&1
     rc=$?
   else
-    opkg install $need --force-downgrade --force-overwrite --force-depends > "$log" 2>&1
+    opkg install $need --force-downgrade --force-overwrite > "$log" 2>&1
     rc=$?
   fi
   if istore_runtime_deps_ok; then
@@ -3747,6 +3757,22 @@ fetch_istore_ipk() {
   done
   return 1
 }
+validate_tar_paths() {
+  # 归档只能包含相对路径；拒绝绝对路径和任意父目录跳转。
+  local archive="$1" member members
+  members=$(tar -tzf "$archive" 2>/dev/null) || return 1
+  while IFS= read -r member; do
+    case "$member" in
+      /*|..|../*|*/../*|*/..)
+        err "拒绝不安全归档路径: $member"
+        return 1
+        ;;
+    esac
+  done <<EOF
+$members
+EOF
+  return 0
+}
 install_istore_ipk_manual() {
   # 官方 istore-reinstall.run 在 APK 固件上可能被 world 约束卡住，报 unable to select packages。
   # 兜底直接解包 iStore 官方 all/store IPK：这些包都是 all 架构，适合 x86_64/arm64。
@@ -3771,7 +3797,21 @@ install_istore_ipk_manual() {
       rm -rf "$work" /tmp/istore_extract.log
       return 1
     fi
-    tar -xzf "$work/$pkg/data.tar.gz" -C / >>/tmp/istore_extract.log 2>&1 || rc=1
+    if ! validate_tar_paths "$work/$pkg/data.tar.gz"; then
+      err "iStore 组件归档路径校验失败: $pkg"
+      rm -rf "$work" /tmp/istore_extract.log
+      return 1
+    fi
+    rm -rf "$work/$pkg/data"
+    mkdir -p "$work/$pkg/data" || return 1
+    tar -xzf "$work/$pkg/data.tar.gz" -C "$work/$pkg/data" >>/tmp/istore_extract.log 2>&1 || rc=1
+    if [ "$rc" != "0" ]; then
+      err "iStore 组件解包失败: $pkg"
+      grep -E "ERROR|failed|invalid|not found|No such|Permission" /tmp/istore_extract.log 2>/dev/null || true
+      rm -rf "$work" /tmp/istore_extract.log
+      return 1
+    fi
+    cp -a "$work/$pkg/data"/. / >>/tmp/istore_extract.log 2>&1 || rc=1
     if [ "$rc" != "0" ]; then
       err "iStore 组件写入失败: $pkg"
       grep -E "ERROR|failed|invalid|not found|No such|Permission" /tmp/istore_extract.log 2>/dev/null || true
@@ -3780,7 +3820,7 @@ install_istore_ipk_manual() {
     fi
   done
   chmod +x /bin/is-opkg /etc/init.d/istore /etc/init.d/tasks /usr/libexec/taskd 2>/dev/null || true
-  ensure_istore_runtime_deps || true
+  ensure_istore_runtime_deps || { rm -rf "$work" /tmp/istore_extract.log; return 1; }
   patch_istore_is_opkg_world_cleanup
   [ -x /etc/uci-defaults/luci-app-store ] && /etc/uci-defaults/luci-app-store >/tmp/istore_uci.log 2>&1 || true
   /etc/init.d/tasks enable >/dev/null 2>&1 || true
@@ -3809,7 +3849,7 @@ install_istore() {
       ;;
   esac
   if check_installed "luci-app-store" || istore_files_installed; then
-    ensure_istore_runtime_deps || true
+    ensure_istore_runtime_deps || return 1
     patch_istore_is_opkg_world_cleanup
     if istore_runtime_deps_ok; then
       ok "iStore 商店已安装，运行依赖正常"
@@ -3859,7 +3899,8 @@ install_istore() {
 }
 
 if [ "$INSTALL_ISTORE" = "1" ]; then
-  install_istore
+  ISTORE_INSTALL_OK=0
+  install_istore && ISTORE_INSTALL_OK=1
 fi
 
 if [ "$INSTALL_OC" = "1" ]; then
@@ -4042,7 +4083,7 @@ install_geoview_fallback() {
   url="$base/$meta"
   info "安装 geoview（PassWall 同架构完整预编译包）..."
   if curl -fL --connect-timeout 10 --max-time 120 -o /tmp/geoview.ipk "$url"; then
-    opkg install /tmp/geoview.ipk --force-downgrade --force-overwrite --force-depends >/tmp/geoview_install.log 2>&1 || true
+    opkg install /tmp/geoview.ipk --force-downgrade --force-overwrite >/tmp/geoview_install.log 2>&1
   else
     err "geoview 下载失败: $url"
   fi
@@ -4252,12 +4293,24 @@ elif [ "$INSTALL_PW" = "1" ]; then
   fi
 fi
 if [ "$INSTALL_OC" = "1" ]; then
-  if [ "$OPENCLASH_INSTALL_OK" = "1" ] && [ "$OPENCLASH_CORE_OK" = "1" ]; then
+  if [ "$OPENCLASH_INSTALL_OK" = "1" ] && [ "$OPENCLASH_CORE_OK" = "1" ] && [ "${OPENCLASH_DEPS_OK:-1}" = "1" ]; then
     ok "OpenClash 主程序与内核验证通过"
   else
-    err "OpenClash 未完成：主程序状态=$OPENCLASH_INSTALL_OK，内核状态=$OPENCLASH_CORE_OK"
+    err "OpenClash 未完成：依赖状态=${OPENCLASH_DEPS_OK:-未知}，主程序状态=$OPENCLASH_INSTALL_OK，内核状态=$OPENCLASH_CORE_OK"
     RESULT_RC=1
   fi
+fi
+if [ "$INSTALL_SSR" = "1" ] && [ "${SSR_INSTALL_OK:-0}" != "1" ]; then
+  err "SSR Plus 安装失败"
+  RESULT_RC=1
+fi
+if [ "$INSTALL_AGH" = "1" ] && [ "${AGH_INSTALL_OK:-0}" != "1" ]; then
+  err "AdGuardHome 安装失败"
+  RESULT_RC=1
+fi
+if [ "$INSTALL_ISTORE" = "1" ] && [ "${ISTORE_INSTALL_OK:-0}" != "1" ]; then
+  err "iStore 安装失败"
+  RESULT_RC=1
 fi
 if [ "$INSTALL_PW2" = "1" ] && [ "${PASSWALL2_INSTALL_OK:-0}" != "1" ]; then
   err "PassWall2 安装失败：主程序/依赖预检阶段未通过"
