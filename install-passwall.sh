@@ -1938,7 +1938,7 @@ apk_install() {
       info "$pkg 已安装，跳过依赖预检/依赖重装，直接升级匹配架构 IPK"
     fi
     # 预解析依赖清单 (模拟安装), 用于显示包名级进度; 排除主包自身(后面单独处理)
-    local total=0 cur=0 dep deps dep_rc dep_log failed_deps=""
+    local total=0 cur=0 dep deps dep_rc failed_deps=""
     if [ "$installed_main" = "1" ]; then
       deps=""
     else
@@ -1977,8 +1977,6 @@ apk_install() {
       fi
       if [ "$dep_rc" != "0" ] || ! check_installed "$dep"; then
         failed_deps="$failed_deps $dep"
-        dep_log="/tmp/po-dep-$dep.log"
-        cp /tmp/opkg_dep.log "$dep_log" 2>/dev/null || true
         printf "\n"
         err "$dep 安装失败或未落盘"
         grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR|wget|curl|timeout" /tmp/opkg_dep.log 2>/dev/null || cat /tmp/opkg_dep.log
@@ -1988,7 +1986,6 @@ apk_install() {
     printf "\r  [%s/%s] 完成             \n" "$total" "$total"
     if [ -n "$failed_deps" ]; then
       err "$pkg 依赖未全部安装，停止主包安装:$failed_deps"
-      info "依赖错误日志保留在 /tmp/po-dep-*.log"
       return 2
     fi
     # 主包: 优先 find_pkg_url 拿 URL 走 curl 带进度; 找不到则 opkg download(也带进度到 stderr)
