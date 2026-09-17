@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.13 (新装动态匹配阿里云/官方源，更新不改系统源)
+# VERSION: 20260917.14 (OpenClash不再探测PassWall源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="13"
+VERSION_SEQ="14"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -817,7 +817,7 @@ SF_BASE="$SF_PREFIX/$SF_PATH"
 IW_OK=0; IW_USE=""; IW_VER=""
 # SourceForge 官方 PassWall 源可用时，不再额外探测 ImmortalWrt，避免
 # 24.10.6 等补充源被误认为 PassWall 安装候选，也避免混入第三方依赖。
-if [ "$PKG_MGR" = "opkg" ] && { [ "$SF_OK" != "1" ] || [ "$INSTALL_OC" = "1" ]; }; then
+if [ "$PKG_MGR" = "opkg" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; } && [ "$SF_OK" != "1" ]; then
   info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
   # 仅根据原始固件版本选择同系列源；未知/snapshot/自定义版本拒绝 fallback。
   IW_SYSTEM_SERIES=$(printf '%s\n' "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9].*/\1/p')
@@ -1527,7 +1527,7 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SO
   IW_OK=0
   ok "按官方教程配置 PassWall 源 ($SF_PATH)"
 else
-  if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ] || [ "$INSTALL_OC" = "1" ]; }; then
+  if [ "$UNINSTALL_ONLY" != "1" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
     probe_proxy_sources
   fi
 fi
