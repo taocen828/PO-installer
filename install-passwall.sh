@@ -1200,6 +1200,32 @@ cache_openwrt_userspace_indexes() {
   done
 }
 
+opkg_update_configured_feeds() {
+  local file name url tmp ok_count=0 core_count=0
+  for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
+    [ -f "$file" ] || continue
+    while read -r name url; do
+      [ -n "$name" ] && [ -n "$url" ] || continue
+      case "$name" in passwall*|openwrt_*) continue;; esac
+      tmp="/tmp/opkg-feed-${name}.$$"
+      printf "  刷新 %s...\\n" "$name"
+      if curl -fsL --connect-timeout 8 --max-time 20 "$url/Packages.gz" 2>&1 | gzip -dc > "$tmp" 2>&1 && [ -s "$tmp" ]; then
+        mkdir -p /var/opkg-lists 2>/dev/null || true
+        cat "$tmp" > "/var/opkg-lists/$name"
+        ok_count=$((ok_count + 1))
+        case "$name" in base|packages|luci|routing) core_count=$((core_count + 1));; esac
+        ok "$name 索引刷新成功"
+      else
+        info "$name 索引刷新失败，跳过（不影响其它源）"
+      fi
+      rm -f "$tmp"
+    done <<EOF
+$(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' "$file" 2>/dev/null)
+EOF
+  done
+  [ "$ok_count" -gt 0 ] && [ "$core_count" -gt 0 ]
+}
+
 validate_opkg_system_source() {
   local log=/tmp/po_system_opkg_update.log feed_url feed_name feed_code
   echo "系统源逐 feed 检测："
@@ -1214,7 +1240,8 @@ validate_opkg_system_source() {
   done <<EOF
 $(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
 EOF
-  opkg_update_with_timeout "$log" 180
+  # 各系统 feed 独立刷新，避免单个坏源阻断整体判断。
+  opkg_update_configured_feeds
   local rc=$?
   # 部分镜像没有 telephony 索引，但 base/luci/packages/routing 已正常；
   local fatal_log=/tmp/po_system_opkg_fatal.log
