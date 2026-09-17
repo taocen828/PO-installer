@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.11 (修复 OpenClash Ruby 依赖源冲突)
+# VERSION: 20260917.13 (新装动态匹配阿里云/官方源，更新不改系统源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="11"
+VERSION_SEQ="13"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -557,6 +557,13 @@ probe_ow_ver() {
   if [ -n "$V" ] && [ "$(check_url $MIR/releases/$V/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
     OW_VER="$V"; return 0
   fi
+  # 阿里云等镜像可能没有 releases/<小版本>，但提供
+  # releases/packages-<系列>/<架构>/；这里按系统系列动态匹配，禁止写死版本。
+  for v in $SERIES_CHAIN; do
+    if [ "$(check_url "$MIR/releases/packages-$v/$SYS_ARCH/base/$PKG_FILE")" = "200" ]; then
+      OW_VER="packages-$v"; return 0
+    fi
+  done
   # 2) SNAPSHOT 固件 (SYS_RELEASE=SNAPSHOT/r0-xxx): 直接探测 snapshots 目录
   #    (opkg 系统跳过: 官方 snapshots 已切 apk, 无 Packages.gz)
   if [ "$PKG_MGR" != "opkg" ] && [ "$(check_url $MIR/snapshots/packages/$SYS_ARCH/base/$PKG_FILE)" = "200" ]; then
@@ -842,6 +849,7 @@ OW_OK=0
 if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   # OW_VER 为数字版本号 → releases；否则（snapshots）→ snapshots 目录
   case "$OW_VER" in
+    packages-*) OW_BASE="$MIR_USE/releases/$OW_VER" ;;
     [0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) OW_BASE="$MIR_USE/releases/$OW_VER" ;;
     *) OW_BASE="$MIR_USE/snapshots" ;;
   esac
@@ -1063,7 +1071,30 @@ fi
 #==============================================
 # 4. 配置源
 #==============================================
-if [ "$UNINSTALL_ONLY" != "1" ]; then
+# 直接更新模式：已安装插件只使用现有插件 source，绝不探测、注销或追加系统源。
+# 新装/卸载后重装模式才允许修复系统源。
+SOURCE_UPDATE_ONLY=0
+if [ "$UNINSTALL_ONLY" != "1" ] && [ "$FORCE_REINSTALL" != "1" ]; then
+  selected_plugins_installed=1
+  plugin_installed() {
+    if [ "$PKG_MGR" = "opkg" ]; then
+      opkg list-installed 2>/dev/null | grep -q "^$1 "
+    else
+      apk list --installed "$1" 2>/dev/null | grep -v WARNING | grep -q "^$1-"
+    fi
+  }
+  if [ "$INSTALL_PW" = "1" ] && ! plugin_installed luci-app-passwall; then selected_plugins_installed=0; fi
+  if [ "$INSTALL_PW2" = "1" ] && ! plugin_installed luci-app-passwall2; then selected_plugins_installed=0; fi
+  if [ "$INSTALL_OC" = "1" ] && ! plugin_installed luci-app-openclash; then selected_plugins_installed=0; fi
+  if [ "$INSTALL_SSR" = "1" ] && ! plugin_installed luci-app-ssr-plus; then selected_plugins_installed=0; fi
+  if [ "$INSTALL_AGH" = "1" ] && [ ! -x /opt/AdGuardHome/AdGuardHome ]; then selected_plugins_installed=0; fi
+  if [ "$INSTALL_ISTORE" = "1" ] && ! plugin_installed luci-app-store; then selected_plugins_installed=0; fi
+  [ "$selected_plugins_installed" = "1" ] && SOURCE_UPDATE_ONLY=1
+fi
+if [ "$SOURCE_UPDATE_ONLY" = "1" ]; then
+  info "检测到已安装插件，进入更新模式：保持系统源不变，直接使用插件 source"
+fi
+if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
 hdr "软件源配置"
 info "快速检测系统默认源..."
 validate_source_path_compatibility() {
@@ -1344,10 +1375,36 @@ else
   # OpenWrt userspace 源追加到 customfeeds，供 PassWall 依赖使用。
   NETWORK_SOURCE_BLOCK=0
   if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
+    # 新装且系统源异常：停用原系统源，分别从阿里云和官方目录动态匹配
+    # 当前系列/架构的 userspace 源。版本、架构均来自前面的探测，不写死。
+    if [ -f /etc/opkg/distfeeds.conf ]; then
+      awk '/^[[:space:]]*src(\/gz)?[[:space:]]/ {print "# PO-installer disabled broken system feed: " $0; next} {print}' \
+        /etc/opkg/distfeeds.conf > /tmp/distfeeds.po-disabled && cat /tmp/distfeeds.po-disabled > /etc/opkg/distfeeds.conf
+      rm -f /tmp/distfeeds.po-disabled
+      info "已注销异常系统源（原配置保留为注释）"
+    fi
+    OW_SERIES="$PW_VER"
+    [ -z "$OW_SERIES" -o "$OW_SERIES" = "unknown" ] && OW_SERIES=$(printf '%s\n' "$KERNEL_VER" | sed -n 's/^5\.4\..*/21.02/p; s/^5\.10\..*/22.03/p; s/^5\.15\..*/23.05/p; s/^6\..*/24.10/p')
+    ALIYUN_BASE="https://mirrors.aliyun.com/openwrt/releases/packages-$OW_SERIES/$SYS_ARCH"
+    OFFICIAL_BASE=""
+    case "$OW_VER" in
+      [0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) OFFICIAL_BASE="https://downloads.openwrt.org/releases/$OW_VER/packages/$SYS_ARCH" ;;
+    esac
+    [ -n "$OFFICIAL_BASE" ] || {
+      for official_ver in $(list_series_vers https://downloads.openwrt.org "$OW_SERIES" | head -1); do
+        [ "$(check_url "https://downloads.openwrt.org/releases/$official_ver/packages/$SYS_ARCH/base/$PKG_FILE")" = "200" ] && {
+          OFFICIAL_BASE="https://downloads.openwrt.org/releases/$official_ver/packages/$SYS_ARCH"
+          break
+        }
+      done
+    }
+    ALIYUN_OK=0; OFFICIAL_OK=0
+    [ -n "$OW_SERIES" ] && [ "$(check_url "$ALIYUN_BASE/base/$PKG_FILE")" = "200" ] && ALIYUN_OK=1
+    [ -n "$OFFICIAL_BASE" ] && [ "$(check_url "$OFFICIAL_BASE/base/$PKG_FILE")" = "200" ] && OFFICIAL_OK=1
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
       opkg_update_isolated_named_feeds "istore_compat is_nas" /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
-    if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ -n "$OW_USE" ]; then
+    if [ "$ISTORE_FALLBACK_OK" != "1" ] && { [ "$ALIYUN_OK" = "1" ] || [ "$OFFICIAL_OK" = "1" ]; }; then
       # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
       cp /etc/opkg/customfeeds.conf /tmp/customfeeds.po-bak 2>/dev/null || true
       : > /tmp/customfeeds.po-new
@@ -1368,17 +1425,26 @@ else
         fi
         printf 'src/gz %s %s\n' "$name" "$url" >> /tmp/customfeeds.po-new
       }
-      {
-        echo "# PO-installer 自动配置 (OpenWrt $OW_VER / $SYS_ARCH)"
-      } >> /tmp/customfeeds.po-new
-      add_fallback_opkg_feed po_openwrt_base "$OW_USE/packages/$SYS_ARCH/base"
-      add_fallback_opkg_feed po_openwrt_luci "$OW_USE/packages/$SYS_ARCH/luci"
-      add_fallback_opkg_feed po_openwrt_packages "$OW_USE/packages/$SYS_ARCH/packages"
-      add_fallback_opkg_feed po_openwrt_routing "$OW_USE/packages/$SYS_ARCH/routing"
-      add_fallback_opkg_feed po_openwrt_telephony "$OW_USE/packages/$SYS_ARCH/telephony"
+      echo "# PO-installer 自动配置 (动态匹配系列 $OW_SERIES / $SYS_ARCH)" >> /tmp/customfeeds.po-new
+      if [ "$ALIYUN_OK" = "1" ]; then
+        add_fallback_opkg_feed po_aliyun_base "$ALIYUN_BASE/base"
+        add_fallback_opkg_feed po_aliyun_luci "$ALIYUN_BASE/luci"
+        add_fallback_opkg_feed po_aliyun_packages "$ALIYUN_BASE/packages"
+        add_fallback_opkg_feed po_aliyun_routing "$ALIYUN_BASE/routing"
+        add_fallback_opkg_feed po_aliyun_telephony "$ALIYUN_BASE/telephony"
+        ok "已匹配阿里云 OpenWrt userspace 源 ($ALIYUN_BASE)"
+      fi
+      if [ "$OFFICIAL_OK" = "1" ]; then
+        add_fallback_opkg_feed po_openwrt_base "$OFFICIAL_BASE/base"
+        add_fallback_opkg_feed po_openwrt_luci "$OFFICIAL_BASE/luci"
+        add_fallback_opkg_feed po_openwrt_packages "$OFFICIAL_BASE/packages"
+        add_fallback_opkg_feed po_openwrt_routing "$OFFICIAL_BASE/routing"
+        add_fallback_opkg_feed po_openwrt_telephony "$OFFICIAL_BASE/telephony"
+        ok "已匹配 OpenWrt 官方 userspace 源 ($OFFICIAL_BASE)"
+      fi
       cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
       rm -f /tmp/customfeeds.po-new
-      ok "已配置对应固件备用源，保留现有 customfeeds ($OW_USE)"
+      ok "已配置阿里云 + OpenWrt 官方匹配源"
       elif [ "$ISTORE_FALLBACK_OK" = "1" ]; then
         ok "已使用 iStoreOS 专用源，不添加通用兜底源"
       else
@@ -1416,7 +1482,7 @@ else
       probe_openwrt_userspace_feeds "$OW_USE"
       cache_openwrt_userspace_indexes "$OW_USE"
     fi
-    opkg_update_isolated_named_feeds "po_openwrt_base po_openwrt_luci po_openwrt_packages po_openwrt_routing po_openwrt_telephony" /tmp/po_fallback_update.log 30 && ok "备用源 userspace feed 刷新成功" || info "备用源 userspace feed 刷新有失败，已使用逐 feed 缓存结果继续"
+    opkg_update_isolated_named_feeds "po_openwrt_base po_openwrt_luci po_openwrt_packages po_openwrt_routing po_openwrt_telephony po_aliyun_base po_aliyun_luci po_aliyun_packages po_aliyun_routing po_aliyun_telephony" /tmp/po_fallback_update.log 30 && ok "备用源 userspace feed 刷新成功" || info "备用源 userspace feed 刷新有失败，已使用逐 feed 缓存结果继续"
   else
     apk update >/dev/null 2>&1 && ok "源更新成功" || err "源更新失败，请检查网络"
   fi
@@ -1469,7 +1535,7 @@ fi
 # 添加代理插件源（PassWall/PassWall2/SSR Plus/OpenClash 均有需要；OpenClash 用 GitHub 下载，
 # 但 GitHub 不可达时降级走 immortalwrt 源 opkg 安装，所以 OpenClash-only 也必须写入 iw 源）
 # 源组合（速度优先）: 国内 immortalwrt 可用 → 优先加在前面；SF 仅作最新版/缺包兜底
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INSTALL_SSR" = "1" ]; then
+if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INSTALL_SSR" = "1" ]; then
   if [ "$PKG_MGR" = "opkg" ]; then
     # 清旧声明（幂等）: 仅过滤代理插件源；保留已修复的 openwrt_ 系统依赖源 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
@@ -1702,6 +1768,28 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" -o "$INSTALL_OC" = "1" -o "$INS
     fi
   fi
 fi
+fi
+
+# 更新模式只刷新已配置的插件 source；不执行系统源检测、注销、追加或替换。
+# OPKG 仅隔离刷新插件 feed，避免触碰 distfeeds/customfeeds 中的系统 feed。
+if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+  UPDATE_FEEDS=""
+  [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS passwall_luci passwall_packages passwall2"
+  [ "$INSTALL_SSR" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS openwrt_ai_kiddin9 helloworld kiddin9"
+  [ "$INSTALL_OC" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS iw_luci iw_packages"
+  [ "$INSTALL_ISTORE" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS istore_compat is_nas"
+  # 去重后只刷新存在于配置文件中的 feed；不存在的名称不会制造空索引。
+  EXISTING_UPDATE_FEEDS=$(for feed in $UPDATE_FEEDS; do
+    awk -v n="$feed" '$1=="src/gz" && $2==n {found=1} END {if(found) print n}' \
+      /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null
+  done | sort -u | tr '\n' ' ')
+  if [ -n "$EXISTING_UPDATE_FEEDS" ]; then
+    opkg_update_isolated_named_feeds "$EXISTING_UPDATE_FEEDS" /tmp/po_plugin_source_update.log 120 && \
+      ok "插件 source 索引刷新成功（系统源未改动）" || \
+      { err "插件 source 索引刷新失败，保留完整错误: /tmp/po_plugin_source_update.log"; }
+  else
+    info "未找到已配置的插件 source，直接使用现有索引安装/更新"
+  fi
 fi
 
 #==============================================
