@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.14 (OpenClash不再探测PassWall源)
+# VERSION: 20260917.16 (更新直接下载SourceForge包，新装修复系统源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="14"
+VERSION_SEQ="16"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -532,8 +532,9 @@ if [ "$PO_SKIP_NET_REPAIR" != "1" ]; then
 fi
 
 #==============================================
-# 2. 源连通性检测
+# 2. 源连通性检测（仅新装模式执行）
 #==============================================
+probe_system_source_candidates() {
 # SourceForge/ImmortalWrt 等代理插件源必须等用户选择后再探测；
 # 这里保留系统源/固件镜像的基础探测，避免 OpenClash/iStore 单独安装访问 SF。
 hdr "源连通性检测"
@@ -817,7 +818,7 @@ SF_BASE="$SF_PREFIX/$SF_PATH"
 IW_OK=0; IW_USE=""; IW_VER=""
 # SourceForge 官方 PassWall 源可用时，不再额外探测 ImmortalWrt，避免
 # 24.10.6 等补充源被误认为 PassWall 安装候选，也避免混入第三方依赖。
-if [ "$PKG_MGR" = "opkg" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; } && [ "$SF_OK" != "1" ]; then
+if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$PKG_MGR" = "opkg" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; } && [ "$SF_OK" != "1" ]; then
   info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
   # 仅根据原始固件版本选择同系列源；未知/snapshot/自定义版本拒绝 fallback。
   IW_SYSTEM_SERIES=$(printf '%s\n' "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9].*/\1/p')
@@ -860,6 +861,7 @@ if [ -n "$MIR_USE" ] && [ -n "$OW_VER" ]; then
   [ "$OW_OK" = "1" ] && OW_USE=$OW_BASE && ok "OpenWrt userspace 源 ✓ ($OW_BASE)"
 fi
 [ "$OW_OK" = "0" ] && info "未找到可安全匹配的 OpenWrt fallback 源（不代表固件自带系统源不可用）"
+}
 
 #==============================================
 # 3. 安装选择
@@ -1068,9 +1070,6 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
 fi
 
-#==============================================
-# 4. 配置源
-#==============================================
 # 直接更新模式：已安装插件只使用现有插件 source，绝不探测、注销或追加系统源。
 # 新装/卸载后重装模式才允许修复系统源。
 SOURCE_UPDATE_ONLY=0
@@ -1094,6 +1093,13 @@ fi
 if [ "$SOURCE_UPDATE_ONLY" = "1" ]; then
   info "检测到已安装插件，进入更新模式：保持系统源不变，直接使用插件 source"
 fi
+
+# 新装才执行系统源/阿里云/官方源候选探测；更新模式完全跳过。
+[ "$SOURCE_UPDATE_ONLY" != "1" ] && probe_system_source_candidates
+
+#==============================================
+# 4. 配置源
+#==============================================
 if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
 hdr "软件源配置"
 info "快速检测系统默认源..."
@@ -1405,17 +1411,19 @@ else
       opkg_update_isolated_named_feeds "istore_compat is_nas" /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
     if [ "$ISTORE_FALLBACK_OK" != "1" ] && { [ "$ALIYUN_OK" = "1" ] || [ "$OFFICIAL_OK" = "1" ]; }; then
-      # 保留用户已有 customfeeds，只替换本脚本管理的 openwrt_* 源，避免覆盖其它插件源。
-      cp /etc/opkg/customfeeds.conf /tmp/customfeeds.po-bak 2>/dev/null || true
-      : > /tmp/customfeeds.po-new
-      if [ -f /etc/opkg/customfeeds.conf ]; then
+      # 新装且系统源异常：将匹配源写入系统源文件；原失效 src 行已在上面注释保留。
+      # 只替换本脚本管理的 fallback 行，不覆盖用户其它系统源。
+      FEED_FILE=/etc/opkg/distfeeds.conf
+      [ -f "$FEED_FILE" ] || : > "$FEED_FILE"
+      : > /tmp/systemfeeds.po-new
+      if [ -f "$FEED_FILE" ]; then
         grep -vE '^[[:space:]]*src(/gz)?[[:space:]]+openwrt_(core|base|luci|packages|routing|telephony)[[:space:]]' \
-          /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-new 2>/dev/null || true
+          "$FEED_FILE" > /tmp/systemfeeds.po-new 2>/dev/null || true
       fi
       add_fallback_opkg_feed() {
         local name="$1" url="$2" existing
         existing=$(awk -v n="$name" '$1=="src/gz" && $2==n {print $3; exit}' \
-          /etc/opkg/distfeeds.conf /etc/opkg/compatfeeds.conf /tmp/customfeeds.po-new 2>/dev/null)
+          /etc/opkg/distfeeds.conf /etc/opkg/compatfeeds.conf /tmp/systemfeeds.po-new 2>/dev/null)
         if [ -n "$existing" ]; then
           if [ "$existing" = "$url" ]; then
             return 0
@@ -1423,9 +1431,9 @@ else
           info "已存在同名源 $name，跳过重复追加（当前: $existing）"
           return 0
         fi
-        printf 'src/gz %s %s\n' "$name" "$url" >> /tmp/customfeeds.po-new
+        printf 'src/gz %s %s\n' "$name" "$url" >> /tmp/systemfeeds.po-new
       }
-      echo "# PO-installer 自动配置 (动态匹配系列 $OW_SERIES / $SYS_ARCH)" >> /tmp/customfeeds.po-new
+      echo "# PO-installer 自动配置 (动态匹配系列 $OW_SERIES / $SYS_ARCH)" >> /tmp/systemfeeds.po-new
       if [ "$ALIYUN_OK" = "1" ]; then
         add_fallback_opkg_feed po_aliyun_base "$ALIYUN_BASE/base"
         add_fallback_opkg_feed po_aliyun_luci "$ALIYUN_BASE/luci"
@@ -1442,8 +1450,8 @@ else
         add_fallback_opkg_feed po_openwrt_telephony "$OFFICIAL_BASE/telephony"
         ok "已匹配 OpenWrt 官方 userspace 源 ($OFFICIAL_BASE)"
       fi
-      cat /tmp/customfeeds.po-new > /etc/opkg/customfeeds.conf
-      rm -f /tmp/customfeeds.po-new
+      cat /tmp/systemfeeds.po-new > "$FEED_FILE"
+      rm -f /tmp/systemfeeds.po-new
       ok "已配置阿里云 + OpenWrt 官方匹配源"
       elif [ "$ISTORE_FALLBACK_OK" = "1" ]; then
         ok "已使用 iStoreOS 专用源，不添加通用兜底源"
@@ -1773,8 +1781,26 @@ fi
 # 更新模式只刷新已配置的插件 source；不执行系统源检测、注销、追加或替换。
 # OPKG 仅隔离刷新插件 feed，避免触碰 distfeeds/customfeeds 中的系统 feed。
 if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
+  # 已安装 PassWall/PassWall2 更新时，SourceForge 是唯一包来源：
+  # 从现有插件 source 读取官方 Packages.gz，不把 source 写入系统配置，也不刷新系统源。
+  if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
+    SF_BASE=$(awk '/^[[:space:]]*src(\/gz)?[[:space:]]+(passwall_luci|passwall_packages|passwall2)[[:space:]]/ && $3 ~ /sourceforge\.net\/project\/openwrt-passwall-build/ {print $3; exit}' \
+      /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
+    SF_BASE=${SF_BASE%/}
+    SF_OK=0
+    if [ -n "$SF_BASE" ] && [ "$(check_url "$SF_BASE/passwall_luci/Packages.gz")" = "200" ]; then
+      SF_OK=1
+      ok "更新模式：SourceForge 插件 source 可用"
+    fi
+    if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
+      ok "更新模式：将从 SourceForge 直接下载对应版本包"
+    else
+      err "更新模式：无法获取 SourceForge 对应包索引"
+    fi
+  fi
   UPDATE_FEEDS=""
-  [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS passwall_luci passwall_packages passwall2"
+  # PassWall/PassWall2 更新直接读取 SourceForge 远端 Packages.gz，
+  # 不刷新 opkg 配置中的任何 feed，避免误走系统源。
   [ "$INSTALL_SSR" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS openwrt_ai_kiddin9 helloworld kiddin9"
   [ "$INSTALL_OC" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS iw_luci iw_packages"
   [ "$INSTALL_ISTORE" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS istore_compat is_nas"
