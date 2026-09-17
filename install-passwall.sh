@@ -1963,25 +1963,24 @@ apk_install() {
       printf "\r  [%s/%s] 安装 %s...  " "$cur" "$total" "$dep"
       dep_url=$(find_pkg_url "$dep")
       if [ -n "$dep_url" ]; then
-        if curl -fL -sS -o "/tmp/pkg_$dep.ipk" "$dep_url" 2>/tmp/opkg_dep.log; then
-          opkg install "/tmp/pkg_$dep.ipk" --force-downgrade --force-overwrite > /tmp/opkg_dep.log 2>&1
+        if curl -fL -sS -o "/tmp/pkg_$dep.ipk" "$dep_url"; then
+          opkg install "/tmp/pkg_$dep.ipk" --force-downgrade --force-overwrite 2>&1
           dep_rc=$?
           rm -f "/tmp/pkg_$dep.ipk"
         else
-          opkg install "$dep" --force-downgrade --force-overwrite > /tmp/opkg_dep.log 2>&1
-          dep_rc=$?
+          dep_rc=1
+          opkg install "$dep" --force-downgrade --force-overwrite 2>&1
+          [ "$?" = "0" ] && dep_rc=0
         fi
       else
-        opkg install "$dep" --force-downgrade --force-overwrite > /tmp/opkg_dep.log 2>&1
+        opkg install "$dep" --force-downgrade --force-overwrite 2>&1
         dep_rc=$?
       fi
       if [ "$dep_rc" != "0" ] || ! check_installed "$dep"; then
         failed_deps="$failed_deps $dep"
         printf "\n"
         err "$dep 安装失败或未落盘"
-        grep -E "Unknown package|cannot find dependency|incompatible|No space|Collected errors|ERROR|wget|curl|timeout" /tmp/opkg_dep.log 2>/dev/null || cat /tmp/opkg_dep.log
       fi
-      rm -f /tmp/opkg_dep.log
     done
     printf "\r  [%s/%s] 完成             \n" "$total" "$total"
     if [ -n "$failed_deps" ]; then
