@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.16 (更新直接下载SourceForge包，新装修复系统源)
+# VERSION: 20260917.17 (新装系统源仅匹配阿里云)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="16"
+VERSION_SEQ="17"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1392,25 +1392,12 @@ else
     OW_SERIES="$PW_VER"
     [ -z "$OW_SERIES" -o "$OW_SERIES" = "unknown" ] && OW_SERIES=$(printf '%s\n' "$KERNEL_VER" | sed -n 's/^5\.4\..*/21.02/p; s/^5\.10\..*/22.03/p; s/^5\.15\..*/23.05/p; s/^6\..*/24.10/p')
     ALIYUN_BASE="https://mirrors.aliyun.com/openwrt/releases/packages-$OW_SERIES/$SYS_ARCH"
-    OFFICIAL_BASE=""
-    case "$OW_VER" in
-      [0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) OFFICIAL_BASE="https://downloads.openwrt.org/releases/$OW_VER/packages/$SYS_ARCH" ;;
-    esac
-    [ -n "$OFFICIAL_BASE" ] || {
-      for official_ver in $(list_series_vers https://downloads.openwrt.org "$OW_SERIES" | head -1); do
-        [ "$(check_url "https://downloads.openwrt.org/releases/$official_ver/packages/$SYS_ARCH/base/$PKG_FILE")" = "200" ] && {
-          OFFICIAL_BASE="https://downloads.openwrt.org/releases/$official_ver/packages/$SYS_ARCH"
-          break
-        }
-      done
-    }
-    ALIYUN_OK=0; OFFICIAL_OK=0
+    ALIYUN_OK=0
     [ -n "$OW_SERIES" ] && [ "$(check_url "$ALIYUN_BASE/base/$PKG_FILE")" = "200" ] && ALIYUN_OK=1
-    [ -n "$OFFICIAL_BASE" ] && [ "$(check_url "$OFFICIAL_BASE/base/$PKG_FILE")" = "200" ] && OFFICIAL_OK=1
     if echo "$SYS_DESC $DISTRIB_ID" | grep -qiE 'iStoreOS|istoreos' && configure_istoreos_feeds; then
       opkg_update_isolated_named_feeds "istore_compat is_nas" /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
-    if [ "$ISTORE_FALLBACK_OK" != "1" ] && { [ "$ALIYUN_OK" = "1" ] || [ "$OFFICIAL_OK" = "1" ]; }; then
+    if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ "$ALIYUN_OK" = "1" ]; then
       # 新装且系统源异常：将匹配源写入系统源文件；原失效 src 行已在上面注释保留。
       # 只替换本脚本管理的 fallback 行，不覆盖用户其它系统源。
       FEED_FILE=/etc/opkg/distfeeds.conf
@@ -1442,17 +1429,9 @@ else
         add_fallback_opkg_feed po_aliyun_telephony "$ALIYUN_BASE/telephony"
         ok "已匹配阿里云 OpenWrt userspace 源 ($ALIYUN_BASE)"
       fi
-      if [ "$OFFICIAL_OK" = "1" ]; then
-        add_fallback_opkg_feed po_openwrt_base "$OFFICIAL_BASE/base"
-        add_fallback_opkg_feed po_openwrt_luci "$OFFICIAL_BASE/luci"
-        add_fallback_opkg_feed po_openwrt_packages "$OFFICIAL_BASE/packages"
-        add_fallback_opkg_feed po_openwrt_routing "$OFFICIAL_BASE/routing"
-        add_fallback_opkg_feed po_openwrt_telephony "$OFFICIAL_BASE/telephony"
-        ok "已匹配 OpenWrt 官方 userspace 源 ($OFFICIAL_BASE)"
-      fi
       cat /tmp/systemfeeds.po-new > "$FEED_FILE"
       rm -f /tmp/systemfeeds.po-new
-      ok "已配置阿里云 + OpenWrt 官方匹配源"
+      ok "已配置匹配的阿里云 OpenWrt userspace 源"
       elif [ "$ISTORE_FALLBACK_OK" = "1" ]; then
         ok "已使用 iStoreOS 专用源，不添加通用兜底源"
       else
