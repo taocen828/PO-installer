@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.21 (APK 更新显式继承代理并保留诊断日志)
+# VERSION: 20260918.22 (APK 不因索引状态误阻断 PassWall 直装)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="21"
+VERSION_SEQ="22"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2902,7 +2902,14 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
-    if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
+    # APK 的 SourceForge 索引探测只用于提示，不能阻断实际安装：
+    # 部分 apk-tools/代理环境下 apk update 不落本地索引，但直链仓库仍可正常解析。
+    if [ "$PKG_MGR" = "apk" ] && [ -n "$SF_BASE" ]; then
+      info "使用 SourceForge APK 官方包源安装 PassWall（跳过易失的索引状态判断）"
+      PASSWALL_PACKAGE_FALLBACK_OK=1
+      PASSWALL_INSTALL_OK=1
+      pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
+    elif [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
       info "优先使用 SourceForge 官方 PassWall 用户态主包"
       PASSWALL_PACKAGE_FALLBACK_OK=1
       PASSWALL_INSTALL_OK=1
