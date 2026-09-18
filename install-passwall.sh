@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260917.17 (新装系统源仅匹配阿里云)
+# VERSION: 20260918.18 (修复 APK 用户态包安装后的落盘校验)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="17"
+VERSION_SEQ="18"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1847,6 +1847,11 @@ get_version() {
 check_installed() {
   local pkg="$1"
   [ -n "$(get_version "$pkg")" ] && return 0
+  # OpenWrt APK 的 list 输出在部分版本/本地包安装后可能为空，
+  # 但 apk info -e 已直接从 installed 数据库确认包存在；不能因此误报“文件未落盘”。
+  if [ "$PKG_MGR" = "apk" ] && apk info -e "$pkg" >/dev/null 2>&1; then
+    return 0
+  fi
   return 1
 }
 
