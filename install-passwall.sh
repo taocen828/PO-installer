@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.19 (修复代理环境下 SourceForge 索引探测失败)
+# VERSION: 20260918.20 (兼容代理环境变量并修复 SourceForge 探测)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="19"
+VERSION_SEQ="20"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -159,7 +159,7 @@ hdr "系统检测"
 # 记录真实网络工具路径；后续即使创建兼容包装器，也不递归调用包装器。
 CURL_REAL=$(command -v curl 2>/dev/null || true)
 WGET_REAL=$(command -v wget 2>/dev/null || true)
-PROXY_URL="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+PROXY_URL="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}}}"
 curl_works() { [ -n "$CURL_REAL" ] && "$CURL_REAL" --version >/dev/null 2>&1; }
 wget_works() { [ -n "$WGET_REAL" ] && "$WGET_REAL" --version >/dev/null 2>&1; }
 
@@ -751,8 +751,11 @@ sf_probe_index() {
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc" \
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=netix"; do
     rm -f "$tmp"
-    # 代理环境下不要因单次连接抖动直接判定 SF 不可用；curl 的代理变量会自动继承。
-    curl -fsSL --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 15 --max-time 60 -o "$tmp" "$u" 2>/dev/null || true
+    # 显式代理参数：兼容仅设置 ALL_PROXY/all_proxy 的环境，以及 curl 未自动继承代理变量的固件。
+    if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${http_proxy:-}${HTTP_PROXY:-}" ] && [ -n "${all_proxy:-${ALL_PROXY:-}}" ]; then
+      export https_proxy="${all_proxy:-${ALL_PROXY:-}}" http_proxy="${all_proxy:-${ALL_PROXY:-}}"
+    fi
+    curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 --max-time 90 -o "$tmp" "$u" 2>/dev/null || true
     if [ "$PKG_MGR" = "opkg" ]; then
       gzip -t "$tmp" 2>/dev/null && { rm -f "$tmp"; echo "$u"; return 0; }
     else
