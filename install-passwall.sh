@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.20 (兼容代理环境变量并修复 SourceForge 探测)
+# VERSION: 20260918.21 (APK 更新显式继承代理并保留诊断日志)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="20"
+VERSION_SEQ="21"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1743,7 +1743,13 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
       done
-      apk update >/dev/null 2>&1 || true
+      # apk 进程不一定继承 curl 的代理配置；显式传递代理，并保留日志，避免把代理可用误判为源不可用。
+      if [ -n "$PROXY_URL" ]; then
+        https_proxy="$PROXY_URL" http_proxy="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" \
+          apk update >/tmp/po_apk_update.log 2>&1 || true
+      else
+        apk update >/tmp/po_apk_update.log 2>&1 || true
+      fi
       APK_PW_INDEX_OK=1
       if [ "$INSTALL_PW" = "1" ] && ! apk list luci-app-passwall 2>/dev/null | grep -v WARNING | grep -q '^luci-app-passwall-'; then
         APK_PW_INDEX_OK=0
@@ -1753,7 +1759,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
         APK_PW_INDEX_OK=0
         err "SourceForge APK 源缺少 luci-app-passwall2"
       fi
-      [ "$APK_PW_INDEX_OK" = "1" ] && ok "源配置完成 (SourceForge)" || err "PassWall APK 源索引刷新失败或构建残缺"
+      [ "$APK_PW_INDEX_OK" = "1" ] && ok "源配置完成 (SourceForge)" || { err "PassWall APK 源索引刷新失败或构建残缺"; grep -E "ERROR|WARNING|failed|unable|not found|permission|cannot" /tmp/po_apk_update.log 2>/dev/null || true; }
     else
       err "PassWall 源不可用：SourceForge 无法连接"
     fi
