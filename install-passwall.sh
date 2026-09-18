@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.24 (保留 APK 更新模式的 PassWall 源)
+# VERSION: 20260918.25 (修复 OPKG 更新模式保留 PassWall source)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="24"
+VERSION_SEQ="25"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -276,11 +276,12 @@ else
 fi
 
 
-# 早期清理上次运行追加的代理插件源及所有配置文件中的重复 feed 名称。
-# 必须放在第一次 opkg print-architecture 之前，否则 opkg 自身会先刷
-# Duplicate src declaration，并可能跳过正确的系统索引。
+# 清理上次运行追加的代理插件源及所有配置文件中的重复 feed 名称。
+# 必须在安装选择完成后执行：更新模式要保留已有 PassWall source，
+# 否则后续无法从现有 source 读取 Packages.gz。
 # 只将重复声明注释掉，不删除原始内容；首次出现的声明保持不变。
-if [ "$PKG_MGR" = "opkg" ]; then
+cleanup_opkg_duplicate_feeds() {
+  [ "$PKG_MGR" = "opkg" ] || return 0
   # 按 distfeeds → compatfeeds → customfeeds 顺序处理；状态文件让
   # 重名项跨文件也能被识别，而不是只清理 customfeeds 内部重复。
   : > /tmp/opkg-fixed-feed-names
@@ -298,7 +299,7 @@ if [ "$PKG_MGR" = "opkg" ]; then
     awk '!/^[[:space:]]*#/ && /^[[:space:]]*src(\/gz)?[[:space:]]/ {print $2}' "$file" >> /tmp/opkg-fixed-feed-names
   done
   rm -f /tmp/opkg-fixed-feed-names /tmp/opkg-feeds.po-clean
-fi
+}
 
 # APK 源文件路径兼容：部分 OpenWrt APK 系统没有 /etc/apk/repositories.d
 APK_REPO_FILE="/etc/apk/repositories"
@@ -1107,8 +1108,11 @@ fi
 if [ "$SOURCE_UPDATE_ONLY" = "1" ]; then
   info "检测到已安装插件，进入更新模式：保持系统源不变，直接使用插件 source"
 fi
-# 新装/强制重装才清理旧版错误 PassWall APK 源；更新模式保留现有源，
-# 后续从 repositories 恢复 SF_BASE。
+# 早期清理必须在安装选择后执行；更新模式绝不触碰已配置 PassWall source。
+# 仅新装/强制重装时清理历史重复 feed，避免更新模式丢失 SF_BASE。
+if [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
+  cleanup_opkg_duplicate_feeds
+fi
 if [ "$PKG_MGR" = "apk" ] && [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
   cleanup_apk_passwall_feeds
 fi
@@ -1792,14 +1796,19 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
       /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
     SF_BASE=${SF_BASE%/}
     SF_OK=0
-    if [ -n "$SF_BASE" ] && [ "$(check_url "$SF_BASE/passwall_luci/Packages.gz")" = "200" ]; then
+    if [ -n "$SF_BASE" ] && { [ "$(check_url "$SF_BASE/passwall_luci/Packages.gz")" = "200" ] || [ "$(check_url "$SF_BASE/passwall_luci/Packages")" = "200" ]; }; then
       SF_OK=1
       ok "更新模式：SourceForge 插件 source 可用"
     fi
+# PassWall source 已配置但索引探测失败时，不阻断更新：opkg 可能已有缓存索引。
+    # 仅当 source 缺失时报告错误；安装阶段仍会由 pkginstall 返回真实失败。
     if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
       ok "更新模式：将从 SourceForge 直接下载对应版本包"
+    elif [ -n "$SF_BASE" ]; then
+      info "更新模式：SourceForge source 已配置，使用现有 opkg 索引继续"
+      SF_OK=1
     else
-      err "更新模式：无法获取 SourceForge 对应包索引"
+      err "更新模式：未找到已配置的 SourceForge 插件 source"
     fi
   fi
   UPDATE_FEEDS=""
