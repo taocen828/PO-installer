@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.23 (APK 直链索引兜底)
+# VERSION: 20260918.24 (保留 APK 更新模式的 PassWall 源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="23"
+VERSION_SEQ="24"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -332,7 +332,8 @@ cleanup_apk_passwall_feeds() {
     rm -f "$tmp"
   done
 }
-cleanup_apk_passwall_feeds
+# 延迟到安装选择完成后执行：更新模式必须保留已有 SourceForge
+# PassWall 源，供后续恢复 SF_BASE；新装模式才清理旧版错误源。
 
 SYS_ARCH=""
 if [ "$PKG_MGR" = "opkg" ]; then
@@ -1105,6 +1106,11 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$FORCE_REINSTALL" != "1" ]; then
 fi
 if [ "$SOURCE_UPDATE_ONLY" = "1" ]; then
   info "检测到已安装插件，进入更新模式：保持系统源不变，直接使用插件 source"
+fi
+# 新装/强制重装才清理旧版错误 PassWall APK 源；更新模式保留现有源，
+# 后续从 repositories 恢复 SF_BASE。
+if [ "$PKG_MGR" = "apk" ] && [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
+  cleanup_apk_passwall_feeds
 fi
 
 # 新装才执行系统源/阿里云/官方源候选探测；更新模式完全跳过。
