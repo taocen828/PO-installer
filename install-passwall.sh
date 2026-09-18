@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.18 (修复 APK 用户态包安装后的落盘校验)
+# VERSION: 20260918.19 (修复代理环境下 SourceForge 索引探测失败)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="18"
+VERSION_SEQ="19"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -751,7 +751,8 @@ sf_probe_index() {
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc" \
     "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=netix"; do
     rm -f "$tmp"
-    curl -fsL --retry 1 --connect-timeout 10 --max-time 25 -o "$tmp" "$u" 2>/dev/null || true
+    # 代理环境下不要因单次连接抖动直接判定 SF 不可用；curl 的代理变量会自动继承。
+    curl -fsSL --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 15 --max-time 60 -o "$tmp" "$u" 2>/dev/null || true
     if [ "$PKG_MGR" = "opkg" ]; then
       gzip -t "$tmp" 2>/dev/null && { rm -f "$tmp"; echo "$u"; return 0; }
     else
