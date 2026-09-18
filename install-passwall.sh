@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.22 (APK 不因索引状态误阻断 PassWall 直装)
+# VERSION: 20260918.23 (APK 直链索引兜底)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="22"
+VERSION_SEQ="23"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -160,6 +160,15 @@ hdr "系统检测"
 CURL_REAL=$(command -v curl 2>/dev/null || true)
 WGET_REAL=$(command -v wget 2>/dev/null || true)
 PROXY_URL="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-${all_proxy:-${ALL_PROXY:-}}}}}}"
+# 兼容 SSH 中常见的简写代理地址（如 cc.828789.xyz）：curl 可猜测，
+# 但 apk-tools 不会猜测 scheme，必须统一补为 HTTP proxy URL。
+case "$PROXY_URL" in
+  ""|*://*) ;;
+  *) PROXY_URL="http://$PROXY_URL" ;;
+esac
+if [ -n "$PROXY_URL" ]; then
+  export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+fi
 curl_works() { [ -n "$CURL_REAL" ] && "$CURL_REAL" --version >/dev/null 2>&1; }
 wget_works() { [ -n "$WGET_REAL" ] && "$WGET_REAL" --version >/dev/null 2>&1; }
 
@@ -1805,6 +1814,32 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
   else
     info "未找到已配置的插件 source，直接使用现有索引安装/更新"
   fi
+fi
+# APK 更新模式不会执行新装阶段的 probe_proxy_sources；必须从现有
+# repositories 恢复 SourceForge 根路径，否则 SF_BASE 为空，主包安装
+# 会错误落入“系统源无 PassWall 且 SourceForge 不可用”。
+if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "apk" ] &&
+   { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
+  SF_OK=0
+  SF_BASE=$(cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null |
+    awk '/^[[:space:]]*https?:\/\/[^#]*sourceforge\.net\/project\/openwrt-passwall-build\// {
+      sub(/[?#].*$/, "", $1)
+      sub(/\/(passwall_luci|passwall_packages|passwall2)\/packages\.adb\/?$/, "", $1)
+      if ($1 !~ /\/(passwall_luci|passwall_packages|passwall2)\//) {print $1; exit}
+    }')
+  SF_BASE=${SF_BASE%/}
+  if [ -n "$SF_BASE" ]; then
+    for sf_feed in passwall_luci passwall_packages passwall2; do
+      sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
+        "$SF_BASE/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
+      if [ "$sf_magic" = "ADBd" ]; then
+        SF_OK=1
+        ok "更新模式：从现有 APK SourceForge source 恢复包源"
+        break
+      fi
+    done
+  fi
+  [ "$SF_OK" = "1" ] || err "更新模式：无法从现有 APK source 获取 PassWall 包索引"
 fi
 
 #==============================================
