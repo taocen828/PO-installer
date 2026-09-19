@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.31 (修复 APK 直链核心误回退仓库事务)
+# VERSION: 20260919.32 (APK 可选核心升级前卸载旧版本)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="31"
+VERSION_SEQ="32"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2413,7 +2413,18 @@ pkg_update() {
   if [ "$PKG_MGR" = "apk" ]; then
     local log=/tmp/apk_upgrade.log rc=0 url prog
     if [ -n "$want_ver" ]; then
-      # 先尝试直链包以显示进度；安装后若未读回精确版本，再回退 apk 仓库精确版本。
+      # OpenWrt 25.12 某些 apk-tools 对已安装的本地核心只返回 OK，
+      # 但不会替换旧二进制。可选代理核心先卸载旧包，再安装新包。
+      case "$pkg" in
+        sing-box|hysteria|naiveproxy|v2ray-plugin|ipt2socks)
+          if apk info -e "$pkg" >/dev/null 2>&1 || apk_optional_binary_matches "$pkg" "$want_ver" 2>/dev/null; then
+            info "$pkg 已安装，先卸载旧版本再安装 $want_ver..."
+            clean_apk_broken_world
+            apk del --force-broken-world "$pkg" 2>&1 || true
+          fi
+          ;;
+      esac
+      # 先尝试直链包以显示进度；安装后若未读回精确版本，再回退仓库精确版本。
       : > "$log"
       url=$(find_apk_url "$pkg" "$want_ver")
       if [ -n "$url" ]; then
@@ -4350,8 +4361,16 @@ opt_pkginstall() {
     if [ -n "$repo_ver" ] && [ -n "$ver" ] && [ "${repo_ver%%-r*}" = "$ver" ]; then
       ok "$desc 已存在二进制 ($ver)，源版本 $repo_ver 仅包修订号不同，跳过安装"
     elif [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
-      info "$desc 已安装二进制 ($ver)，源中有新版本 ($repo_ver)，尝试安装包管理器版本..."
+      info "$desc 已安装二进制 ($ver)，先卸载旧版本，再安装新版本 ($repo_ver)..."
+      clean_apk_broken_world
+      apk del --force-broken-world "$pkg" 2>&1 || true
+      # 直接安装新包；部分 APK 固件不登记本地包，但二进制版本可作为最终依据。
       pkginstall "$pkg" "$desc"
+      local rc=$?
+      if [ "$rc" = "0" ] || apk_optional_binary_matches "$pkg" "$repo_ver"; then
+        return 0
+      fi
+      return "$rc"
     else
       ok "$desc 已存在二进制 ($ver)，跳过安装"
     fi
