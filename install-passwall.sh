@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.32 (APK 可选核心升级前卸载旧版本)
+# VERSION: 20260919.33 (APK 可选核心严格使用 SourceForge 包源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="32"
+VERSION_SEQ="33"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2128,6 +2128,11 @@ curl_download_progress() {
 
 # 预下载的 .apk 可能因 SourceForge 跳转/镜像不同步变成 HTML/错误页。
 # apk add 返回码不能直接代表目标包已升级；必须安装后读回精确版本，失败再走仓库精确版本兜底。
+apk_optional_core() {
+  case "$1" in sing-box|hysteria|naiveproxy|v2ray-plugin|ipt2socks) return 0;; esac
+  return 1
+}
+
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
@@ -2377,6 +2382,15 @@ apk_install() {
       # 直链包若已实际覆盖二进制，以功能版本为准，不再回退到会触发全量事务的仓库安装。
       if [ -n "$repo_ver" ] && apk_optional_binary_matches "$pkg" "$repo_ver"; then
         rc=0
+      elif [ "$rc" != "0" ]; then
+        # SourceForge 包依赖与当前固件不匹配时，不回退到系统仓库。
+        grep -E "ERROR|unable to select|no such package|required by|missing|not found|conflict|breaks" "$log" 2>/dev/null || true
+        info "$pkg SourceForge 包安装失败，保留当前版本，不回退系统仓库"
+      elif apk_optional_core "$pkg"; then
+        # 可选核心必须保持 SourceForge 与系统包线隔离；系统源版本可能是
+        # 另一套构建/依赖，不能用 apk 仓库回退覆盖或触发大事务。
+        info "$pkg SourceForge 包未完成版本登记，保留当前版本，不回退系统仓库"
+        rc=1
       elif [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver"; then
         info "$pkg 直链包未达到源版本，回退 apk 仓库精确安装..."
         apk_add_repo_exact "$pkg" "$repo_ver" "$log"
@@ -2413,18 +2427,7 @@ pkg_update() {
   if [ "$PKG_MGR" = "apk" ]; then
     local log=/tmp/apk_upgrade.log rc=0 url prog
     if [ -n "$want_ver" ]; then
-      # OpenWrt 25.12 某些 apk-tools 对已安装的本地核心只返回 OK，
-      # 但不会替换旧二进制。可选代理核心先卸载旧包，再安装新包。
-      case "$pkg" in
-        sing-box|hysteria|naiveproxy|v2ray-plugin|ipt2socks)
-          if apk info -e "$pkg" >/dev/null 2>&1 || apk_optional_binary_matches "$pkg" "$want_ver" 2>/dev/null; then
-            info "$pkg 已安装，先卸载旧版本再安装 $want_ver..."
-            clean_apk_broken_world
-            apk del --force-broken-world "$pkg" 2>&1 || true
-          fi
-          ;;
-      esac
-      # 先尝试直链包以显示进度；安装后若未读回精确版本，再回退仓库精确版本。
+      # 先尝试直链包；安装失败时保留旧版本，不回退系统仓库。
       : > "$log"
       url=$(find_apk_url "$pkg" "$want_ver")
       if [ -n "$url" ]; then
@@ -4361,10 +4364,7 @@ opt_pkginstall() {
     if [ -n "$repo_ver" ] && [ -n "$ver" ] && [ "${repo_ver%%-r*}" = "$ver" ]; then
       ok "$desc 已存在二进制 ($ver)，源版本 $repo_ver 仅包修订号不同，跳过安装"
     elif [ -n "$repo_ver" ] && [ -n "$ver" ] && version_newer "$repo_ver" "$ver"; then
-      info "$desc 已安装二进制 ($ver)，先卸载旧版本，再安装新版本 ($repo_ver)..."
-      clean_apk_broken_world
-      apk del --force-broken-world "$pkg" 2>&1 || true
-      # 直接安装新包；部分 APK 固件不登记本地包，但二进制版本可作为最终依据。
+      # SourceForge APK 更新失败时保留旧版本；不回退系统仓库，避免装入不匹配的旧包。
       pkginstall "$pkg" "$desc"
       local rc=$?
       if [ "$rc" = "0" ] || apk_optional_binary_matches "$pkg" "$repo_ver"; then
