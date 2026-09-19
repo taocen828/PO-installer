@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.33 (APK 可选核心严格使用 SourceForge 包源)
+# VERSION: 20260919.34 (APK 核心安装按实际二进制结果判定)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="33"
+VERSION_SEQ="34"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2376,20 +2376,17 @@ apk_install() {
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
     info "下载 $pkg (带进度)..."
     if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
+      # SourceForge APK 必须实际替换二进制；apk 的 OK 只表示事务/索引同步，
+      # 不代表目标包已经安装。安装输出保持实时显示，失败时保留旧版本。
       apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world $APK_FORCE_REINSTALL_OPT --no-network "/tmp/pkg_$pkg.apk" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
-      # 直链包若已实际覆盖二进制，以功能版本为准，不再回退到会触发全量事务的仓库安装。
       if [ -n "$repo_ver" ] && apk_optional_binary_matches "$pkg" "$repo_ver"; then
         rc=0
       elif [ "$rc" != "0" ]; then
-        # SourceForge 包依赖与当前固件不匹配时，不回退到系统仓库。
-        grep -E "ERROR|unable to select|no such package|required by|missing|not found|conflict|breaks" "$log" 2>/dev/null || true
         info "$pkg SourceForge 包安装失败，保留当前版本，不回退系统仓库"
       elif apk_optional_core "$pkg"; then
-        # 可选核心必须保持 SourceForge 与系统包线隔离；系统源版本可能是
-        # 另一套构建/依赖，不能用 apk 仓库回退覆盖或触发大事务。
-        info "$pkg SourceForge 包未完成版本登记，保留当前版本，不回退系统仓库"
+        info "$pkg APK 事务返回成功但二进制仍未达到 $repo_ver，通常是依赖缺失/包未落盘；保留当前版本"
         rc=1
       elif [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver"; then
         info "$pkg 直链包未达到源版本，回退 apk 仓库精确安装..."
