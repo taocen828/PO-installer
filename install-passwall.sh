@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260918.25 (修复 OPKG 更新模式保留 PassWall source)
+# VERSION: 20260919.26 (修复 OPKG 更新模式恢复已配置 PassWall source)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="25"
+VERSION_SEQ="26"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1792,7 +1792,7 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
   # 已安装 PassWall/PassWall2 更新时，SourceForge 是唯一包来源：
   # 从现有插件 source 读取官方 Packages.gz，不把 source 写入系统配置，也不刷新系统源。
   if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
-    SF_BASE=$(awk '/^[[:space:]]*src(\/gz)?[[:space:]]+(passwall_luci|passwall_packages|passwall2)[[:space:]]/ && $3 ~ /sourceforge\.net\/project\/openwrt-passwall-build/ {print $3; exit}' \
+    SF_BASE=$(awk '/^[[:space:]]*#?[[:space:]]*src(\/gz)?[[:space:]]+(passwall_luci|passwall_packages|passwall2)[[:space:]]/ && $NF ~ /sourceforge\.net\/project\/openwrt-passwall-build/ {for (i=1; i<=NF; i++) if ($i ~ /^https?:\/\//) {print $i; exit}}' \
       /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
     SF_BASE=${SF_BASE%/}
     SF_OK=0
@@ -2928,13 +2928,14 @@ install_passwall2_release() {
   done
   [ -s "$pkgfile" ] || { err "PassWall2 官方 Release 下载失败"; return 1; }
   if [ "$ext" = "apk" ]; then
-    apk add --upgrade --allow-untrusted --force-broken-world "$pkgfile" >/tmp/passwall2-release.log 2>&1
+    apk add --upgrade --allow-untrusted --force-broken-world "$pkgfile" 2>&1
     rc=$?
   else
-    opkg install "$pkgfile" >/tmp/passwall2-release.log 2>&1
+    # 必须实时显示 OPKG 的依赖/格式错误；不能只写临时日志再过滤，
+    # 否则 5.1 上只看到 Collected errors，无法定位真正失败原因。
+    opkg install "$pkgfile" 2>&1
     rc=$?
   fi
-  grep -E "ERROR|warning|cannot find|Unknown package|incompatible|No space|Collected errors" /tmp/passwall2-release.log 2>/dev/null || true
   rm -f "$pkgfile" /tmp/passwall2-release.log
   newver=$(get_version "luci-app-passwall2")
   if [ "$rc" = "0" ] && [ -n "$newver" ]; then
@@ -4422,9 +4423,9 @@ fi
 if [ "$PKG_MGR" = "opkg" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ] && [ -f /etc/opkg/customfeeds.conf ]; then
   if grep -qE '^src/gz passwall(_|2)' /etc/opkg/customfeeds.conf 2>/dev/null; then
     # 不用 sed -i：busybox sed -i 会破坏符号链接（与开头清理逻辑保持一致），用 sed 输出到临时文件再 cat 回写。
-    sed 's/^src\/gz \(passwall[_2][^ ]* \)/#src\/gz \1/' /etc/opkg/customfeeds.conf > /tmp/customfeeds.po-sf 2>/dev/null && cat /tmp/customfeeds.po-sf > /etc/opkg/customfeeds.conf 2>/dev/null
-    rm -f /tmp/customfeeds.po-sf
-    ok "PassWall 源已设为脚本专用（Web 软件源刷新不会访问 SourceForge）"
+    # 保留现有 PassWall source；更新模式依赖它恢复 SF_BASE，不能注释。
+    info "PassWall source 保留为可用配置（更新模式可直接恢复）"
+
   fi
 fi
 
