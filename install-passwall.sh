@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.29 (修复 OPKG 更新模式误报缺少插件 source)
+# VERSION: 20260919.30 (修复 APK 可选核心回退时触发全量仓库事务)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="29"
+VERSION_SEQ="30"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2131,7 +2131,7 @@ curl_download_progress() {
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
-    apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
+    apk add --upgrade --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
     apk_installed_exact "$pkg" "$want_ver" && return 0
     # 不再回退 apk upgrade --available：OpenWrt APK 会为满足 world 约束顺手升级大量 LuCI/系统包，
