@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.26 (修复 OPKG 更新模式恢复已配置 PassWall source)
+# VERSION: 20260919.27 (修复 APK 直链可选核心被判非仓库)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="26"
+VERSION_SEQ="27"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2367,7 +2367,7 @@ apk_install() {
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
     info "下载 $pkg (带进度)..."
     if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
-      apk add --upgrade --allow-untrusted --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
+      apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
       if [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver" && ! apk_optional_binary_matches "$pkg" "$repo_ver"; then
@@ -2928,7 +2928,7 @@ install_passwall2_release() {
   done
   [ -s "$pkgfile" ] || { err "PassWall2 官方 Release 下载失败"; return 1; }
   if [ "$ext" = "apk" ]; then
-    apk add --upgrade --allow-untrusted --force-broken-world "$pkgfile" 2>&1
+    apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world "$pkgfile" 2>&1
     rc=$?
   else
     # 必须实时显示 OPKG 的依赖/格式错误；不能只写临时日志再过滤，
