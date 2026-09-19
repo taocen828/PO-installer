@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.28 (修复 OPKG 更新模式重复拼接 PassWall feed 路径)
+# VERSION: 20260919.29 (修复 OPKG 更新模式误报缺少插件 source)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="28"
+VERSION_SEQ="29"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1817,17 +1817,21 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
   [ "$INSTALL_SSR" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS openwrt_ai_kiddin9 helloworld kiddin9"
   [ "$INSTALL_OC" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS iw_luci iw_packages"
   [ "$INSTALL_ISTORE" = "1" ] && UPDATE_FEEDS="$UPDATE_FEEDS istore_compat is_nas"
-  # 去重后只刷新存在于配置文件中的 feed；不存在的名称不会制造空索引。
-  EXISTING_UPDATE_FEEDS=$(for feed in $UPDATE_FEEDS; do
-    awk -v n="$feed" '$1=="src/gz" && $2==n {found=1} END {if(found) print n}' \
-      /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null
-  done | sort -u | tr '\n' ' ')
-  if [ -n "$EXISTING_UPDATE_FEEDS" ]; then
-    opkg_update_isolated_named_feeds "$EXISTING_UPDATE_FEEDS" /tmp/po_plugin_source_update.log 120 && \
-      ok "插件 source 索引刷新成功（系统源未改动）" || \
-      { err "插件 source 索引刷新失败，保留完整错误: /tmp/po_plugin_source_update.log"; }
-  else
-    info "未找到已配置的插件 source，直接使用现有索引安装/更新"
+  if [ -n "$UPDATE_FEEDS" ]; then
+    # 去重后只刷新存在于配置文件中的 feed；不存在的名称不会制造空索引。
+    EXISTING_UPDATE_FEEDS=$(for feed in $UPDATE_FEEDS; do
+      awk -v n="$feed" '$1=="src/gz" && $2==n {found=1} END {if(found) print n}' \
+        /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null
+    done | sort -u | tr '\n' ' ')
+    if [ -n "$EXISTING_UPDATE_FEEDS" ]; then
+      opkg_update_isolated_named_feeds "$EXISTING_UPDATE_FEEDS" /tmp/po_plugin_source_update.log 120 && \
+        ok "插件 source 索引刷新成功（系统源未改动）" || \
+        { err "插件 source 索引刷新失败，保留完整错误: /tmp/po_plugin_source_update.log"; }
+    else
+      info "未找到已配置的其它插件 source，PassWall 使用已有索引继续"
+    fi
+  elif [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
+    info "PassWall source 不重复刷新，直接使用现有索引继续"
   fi
 fi
 # APK 更新模式不会执行新装阶段的 probe_proxy_sources；必须从现有
