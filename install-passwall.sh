@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.30 (修复 APK 可选核心回退时触发全量仓库事务)
+# VERSION: 20260919.31 (修复 APK 直链核心误回退仓库事务)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="30"
+VERSION_SEQ="31"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2371,11 +2371,14 @@ apk_install() {
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
     info "下载 $pkg (带进度)..."
     if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
-      apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
+      apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world $APK_FORCE_REINSTALL_OPT --no-network "/tmp/pkg_$pkg.apk" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
-      if [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver" && ! apk_optional_binary_matches "$pkg" "$repo_ver"; then
-        info "$pkg 直链包未达到源版本，回退 apk 仓库安装..."
+      # 直链包若已实际覆盖二进制，以功能版本为准，不再回退到会触发全量事务的仓库安装。
+      if [ -n "$repo_ver" ] && apk_optional_binary_matches "$pkg" "$repo_ver"; then
+        rc=0
+      elif [ -n "$repo_ver" ] && ! apk_installed_exact "$pkg" "$repo_ver"; then
+        info "$pkg 直链包未达到源版本，回退 apk 仓库精确安装..."
         apk_add_repo_exact "$pkg" "$repo_ver" "$log"
         rc=$?
       fi
