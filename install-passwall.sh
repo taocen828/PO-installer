@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.37 (按本地 OPKG 索引反查 PassWall source)
+# VERSION: 20260920.38 (更新模式直连匹配架构的 SourceForge 源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="37"
+VERSION_SEQ="38"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1827,6 +1827,33 @@ $(awk '
   ($1=="src/gz" || $1=="src") && NF>=3 {print $2 "|" $3}
 ' "$sf_conf" 2>/dev/null)
 EOF
+      done
+    fi
+    # 更新模式找不到旧 source 时，按当前固件直接尝试 SourceForge 官方源。
+    # Kwrt 24.10-SNAPSHOT + aarch64_cortex-a53 使用 24.10 包线；同时尝试
+    # aarch64_generic（SourceForge 历史构建常用该目录），不依赖旧配置名称。
+    if [ -z "$SF_BASE" ] && [ "$PKG_MGR" = "opkg" ]; then
+      SF_DIRECT_VER=""
+      case "$OW_VER" in
+        21.02*|22.03*|23.05*|24.10*) SF_DIRECT_VER=$(printf '%s' "$OW_VER" | cut -d. -f1-2) ;;
+      esac
+      [ -n "$SF_DIRECT_VER" ] || case "$KERNEL_VER" in
+        6.6.*) SF_DIRECT_VER="24.10" ;;
+      esac
+      [ -n "$SF_DIRECT_VER" ] || SF_DIRECT_VER="24.10"
+      for sf_arch in "$SYS_ARCH" aarch64_generic; do
+        [ -n "$sf_arch" ] || continue
+        for sf_prefix in \
+          https://downloads.sourceforge.net/project/openwrt-passwall-build \
+          https://master.dl.sourceforge.net/project/openwrt-passwall-build; do
+          sf_candidate="$sf_prefix/releases/packages-$SF_DIRECT_VER/$sf_arch"
+          if [ "$(check_url "$sf_candidate/passwall_luci/Packages.gz")" = "200" ] ||
+             [ "$(check_url "$sf_candidate/passwall_luci/Packages")" = "200" ]; then
+            SF_BASE="$sf_candidate"
+            info "更新模式：直接使用 SourceForge 官方源 ($SF_DIRECT_VER/$sf_arch)"
+            break 2
+          fi
+        done
       done
     fi
     SF_BASE=${SF_BASE%/}
