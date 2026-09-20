@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.38 (更新模式直连匹配架构的 SourceForge 源)
+# VERSION: 20260920.39 (修复 OpenWrt 依赖索引名称映射)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="38"
+VERSION_SEQ="39"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1292,6 +1292,15 @@ cache_openwrt_userspace_indexes() {
         err "OpenWrt $feed 索引缺少预期基础包，拒绝缓存"
       else
         cat "$tmp" > "/var/opkg-lists/openwrt_$feed"
+        # opkg 24.10/iStoreOS 可能只读取与已配置 feed 同名的索引。
+        # 同时写入脚本配置的 po_openwrt_* 名称，避免索引已缓存但
+        # `opkg list` 仍返回 Unknown package。
+        for alias in "po_openwrt_$feed" "openwrt_$feed"; do
+          if grep -qE "^[[:space:]]*src(/gz)?[[:space:]]+$alias[[:space:]]" \
+             /etc/opkg/*.conf 2>/dev/null; then
+            cp "$tmp" "/var/opkg-lists/$alias"
+          fi
+        done
         ok "已缓存 OpenWrt $feed 用户态索引（已绕过 OPKG 签名流程，架构/关键包已校验）"
       fi
     else
