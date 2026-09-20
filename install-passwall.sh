@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.36 (兼容自定义 PassWall 插件源)
+# VERSION: 20260920.37 (按本地 OPKG 索引反查 PassWall source)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="36"
+VERSION_SEQ="37"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1809,6 +1809,26 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
         }
       }
     ' /etc/opkg/*.conf 2>/dev/null)
+    # 最后按本地 OPKG 索引反查：有些旧版脚本/固件使用完全无关的
+    # feed 名称和 URL，唯一可靠线索是索引中实际包含 luci-app-passwall。
+    if [ -z "$SF_BASE" ]; then
+      for sf_conf in /etc/opkg/*.conf; do
+        [ -f "$sf_conf" ] || continue
+        while IFS='|' read -r sf_name sf_url; do
+          [ -n "$sf_name" ] && [ -n "$sf_url" ] || continue
+          sf_idx="/var/opkg-lists/$sf_name"
+          if [ -f "$sf_idx" ] && grep -qE '^Package:[[:space:]]+luci-app-passwall2?$' "$sf_idx" 2>/dev/null; then
+            SF_BASE="$sf_url"
+            break 2
+          fi
+        done <<EOF
+$(awk '
+  /^[[:space:]]*#/ {next}
+  ($1=="src/gz" || $1=="src") && NF>=3 {print $2 "|" $3}
+' "$sf_conf" 2>/dev/null)
+EOF
+      done
+    fi
     SF_BASE=${SF_BASE%/}
     SF_OK=0
     # 现有 source 可能已经是某个单独 feed 根目录，也可能是包含
