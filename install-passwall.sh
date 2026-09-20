@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.39 (修复 OpenWrt 依赖索引名称映射)
+# VERSION: 20260920.40 (修复中文语言包已安装误报)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="39"
+VERSION_SEQ="40"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2788,10 +2788,17 @@ verify_package_installed() {
   if [ "$PKG_MGR" = "opkg" ]; then
     case "$pkg" in
       luci-i18n-passwall-zh-cn|luci-i18n-passwall2-zh-cn)
-        files=$(opkg files "$pkg" 2>/dev/null | awk '/^\// {print; exit}')
-        [ -n "$files" ] || return 1
-        path="$files"
-        [ -f "$path" ] || return 1
+        # OPKG 的 `opkg files` 在部分 iStoreOS/Kwrt 版本中只返回状态文本，
+        # 或语言包文件由 LuCI 缓存/软链接管理，不能要求第一行必须是绝对路径。
+        # 先确认安装数据库状态；opkg install 返回成功且状态为 installed
+        # 时，语言包已被 OPKG 接收，避免误报“文件未落盘”。
+        if opkg status "$pkg" 2>/dev/null | grep -qiE 'Status:[[:space:]].*installed|install[[:space:]]+ok[[:space:]]+installed'; then
+          return 0
+        fi
+        # 兼容没有 status 子命令或状态格式不同的 opkg。
+        files=$(opkg files "$pkg" 2>/dev/null)
+        printf '%s\n' "$files" | grep -qE '(^|[[:space:]])/(usr|www|etc)/' && return 0
+        return 1
         ;;
     esac
   fi
