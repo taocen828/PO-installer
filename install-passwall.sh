@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.40 (修复中文语言包已安装误报)
+# VERSION: 20260920.41 (修复可选组件交互输入跳过)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="40"
+VERSION_SEQ="41"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -4505,12 +4505,17 @@ if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
   echo "输入序号安装（多个用空格隔开，回车跳过）: "
   echo -n "> "
   # 优先从控制终端读取，不受脚本 stdin/SSH 启动方式影响。
-  # 例如 `curl ... | sh` 或远程执行器可能占用 stdin，直接 read 会立即 EOF。
-  if [ -r /dev/tty ]; then
-    read -r OPT_CHOICES </dev/tty
-  elif ! read -r OPT_CHOICES; then
-    info "可选组件输入流已关闭，跳过可选组件安装"
-    OPT_CHOICES=""
+  # 使用独立文件描述符打开控制终端；部分 BusyBox ash 对直接
+  # `read ... </dev/tty` 在远程会话中会立即返回 EOF。
+  OPT_CHOICES=""
+  if [ -c /dev/tty ] && exec 3<>/dev/tty 2>/dev/null; then
+    IFS= read -r OPT_CHOICES <&3 || OPT_CHOICES=""
+    exec 3>&-
+  else
+    IFS= read -r OPT_CHOICES || OPT_CHOICES=""
+  fi
+  if [ -z "$OPT_CHOICES" ]; then
+    info "未选择可选组件，跳过安装"
   fi
   for idx in $OPT_CHOICES; do
     # 过滤非数字字符(退格^H等控制字符会混入序号)
