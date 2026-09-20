@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.35 (兼容任意已配置 PassWall SourceForge source)
+# VERSION: 20260920.36 (兼容自定义 PassWall 插件源)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="35"
+VERSION_SEQ="36"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1792,14 +1792,16 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
   # 已安装 PassWall/PassWall2 更新时，SourceForge 是唯一包来源：
   # 从现有插件 source 读取官方 Packages.gz，不把 source 写入系统配置，也不刷新系统源。
   if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
-    # 兼容旧版脚本及用户手工配置：source 名称可能不是固定的
-    # passwall_luci/passwall_packages/passwall2，配置文件也可能位于
-    # /etc/opkg/*.conf。只接受 active src 行，不把注释当成已配置 source。
+    # 兼容旧版脚本及用户手工配置：source 名称可能不是固定的，且
+    # 已安装插件也可能来自 GitHub/国内镜像而不是 SourceForge。
+    # 只接受 active src 行，不把注释当成已配置 source。
     SF_BASE=$(awk '
       /^[[:space:]]*#/ {next}
       ($1=="src/gz" || $1=="src") {
         u=$NF
-        if (u ~ /^https?:\/\/[^[:space:]]*sourceforge\.net\/(project\/)?openwrt-passwall-build\//) {
+        low=tolower(u " " $2)
+        # 优先 PassWall 专用源；兼容自定义 feed 名称和国内镜像。
+        if (low ~ /passwall/ || low ~ /openwrt-passwall-build/) {
           sub(/\/(passwall_luci|passwall_packages|passwall2)(\/)?$/, "", u)
           sub(/\/(Packages|Packages\.gz)$/, "", u)
           print u
@@ -1809,19 +1811,34 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
     ' /etc/opkg/*.conf 2>/dev/null)
     SF_BASE=${SF_BASE%/}
     SF_OK=0
-    if [ -n "$SF_BASE" ] && { [ "$(check_url "$SF_BASE/passwall_luci/Packages.gz")" = "200" ] || [ "$(check_url "$SF_BASE/passwall_luci/Packages")" = "200" ]; }; then
+    # 现有 source 可能已经是某个单独 feed 根目录，也可能是包含
+    # passwall_luci/passwall_packages/passwall2 的父目录，两种都尝试。
+    SF_PROBE_FEED=""
+    if [ -n "$SF_BASE" ]; then
+      for sf_feed in passwall_luci passwall_packages passwall2; do
+        if [ "$(check_url "$SF_BASE/$sf_feed/Packages.gz")" = "200" ] ||
+           [ "$(check_url "$SF_BASE/$sf_feed/Packages")" = "200" ]; then
+          SF_PROBE_FEED="$sf_feed"; break
+        fi
+      done
+      if [ -z "$SF_PROBE_FEED" ] &&
+         { [ "$(check_url "$SF_BASE/Packages.gz")" = "200" ] || [ "$(check_url "$SF_BASE/Packages")" = "200" ]; }; then
+        SF_PROBE_FEED="direct"
+      fi
+    fi
+    if [ -n "$SF_PROBE_FEED" ]; then
       SF_OK=1
-      ok "更新模式：SourceForge 插件 source 可用"
+      ok "更新模式：已配置的 PassWall 插件 source 可用"
     fi
 # PassWall source 已配置但索引探测失败时，不阻断更新：opkg 可能已有缓存索引。
     # 仅当 source 缺失时报告错误；安装阶段仍会由 pkginstall 返回真实失败。
     if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
-      ok "更新模式：将从 SourceForge 直接下载对应版本包"
+      ok "更新模式：将从已配置 PassWall source 直接下载对应版本包"
     elif [ -n "$SF_BASE" ]; then
-      info "更新模式：SourceForge source 已配置，使用现有 opkg 索引继续"
+      info "更新模式：PassWall source 已配置，使用现有 opkg 索引继续"
       SF_OK=1
     else
-      err "更新模式：未找到已配置的 SourceForge 插件 source"
+      err "更新模式：未找到已配置的 PassWall 插件 source"
     fi
   fi
   UPDATE_FEEDS=""
