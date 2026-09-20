@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260919.34 (APK 核心安装按实际二进制结果判定)
+# VERSION: 20260920.35 (兼容任意已配置 PassWall SourceForge source)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="34"
+VERSION_SEQ="35"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1792,8 +1792,21 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "opkg" ]; then
   # 已安装 PassWall/PassWall2 更新时，SourceForge 是唯一包来源：
   # 从现有插件 source 读取官方 Packages.gz，不把 source 写入系统配置，也不刷新系统源。
   if [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; then
-    SF_BASE=$(awk '/^[[:space:]]*#?[[:space:]]*src(\/gz)?[[:space:]]+(passwall_luci|passwall_packages|passwall2)[[:space:]]/ && $NF ~ /sourceforge\.net\/project\/openwrt-passwall-build/ {for (i=1; i<=NF; i++) if ($i ~ /^https?:\/\//) {u=$i; sub(/\/(passwall_luci|passwall_packages|passwall2)\/?$/, "", u); print u; exit}}' \
-      /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
+    # 兼容旧版脚本及用户手工配置：source 名称可能不是固定的
+    # passwall_luci/passwall_packages/passwall2，配置文件也可能位于
+    # /etc/opkg/*.conf。只接受 active src 行，不把注释当成已配置 source。
+    SF_BASE=$(awk '
+      /^[[:space:]]*#/ {next}
+      ($1=="src/gz" || $1=="src") {
+        u=$NF
+        if (u ~ /^https?:\/\/[^[:space:]]*sourceforge\.net\/(project\/)?openwrt-passwall-build\//) {
+          sub(/\/(passwall_luci|passwall_packages|passwall2)(\/)?$/, "", u)
+          sub(/\/(Packages|Packages\.gz)$/, "", u)
+          print u
+          exit
+        }
+      }
+    ' /etc/opkg/*.conf 2>/dev/null)
     SF_BASE=${SF_BASE%/}
     SF_OK=0
     if [ -n "$SF_BASE" ] && { [ "$(check_url "$SF_BASE/passwall_luci/Packages.gz")" = "200" ] || [ "$(check_url "$SF_BASE/passwall_luci/Packages")" = "200" ]; }; then
