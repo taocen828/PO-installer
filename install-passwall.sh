@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260923.42 (校验系统源索引内容与架构)
+# VERSION: 20260923.43 (修复 OPKG 源预检顺序并显示 PassWall 原始错误)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="42"
+VERSION_SEQ="43"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1387,6 +1387,9 @@ $(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.
 EOF
   [ "$PKG_MGR" = "opkg" ] || return 1
   validate_unique_opkg_feed_names || return 1
+  # 先生成当前实际启用的源 URL 清单，再检查版本/架构；此前这里在
+  # 文件尚未创建时调用校验，可能把源预检结果误判为通过或失败。
+  awk '!/^#/ && /^src(\/gz)?[[:space:]]/ {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | sort -u > /tmp/po_opkg_source_urls
   validate_source_path_compatibility /tmp/po_opkg_source_urls || return 1
   validate_opkg_feed_indexes || {
     err "系统源索引内容/架构校验失败，停止 OPKG 安装"
@@ -2323,7 +2326,9 @@ opkg_preflight_installable() {
   esac
   if [ "$preflight_rc" != "0" ] || grep -qE "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:" "$log" 2>/dev/null; then
     err "依赖预检失败，跳过安装/升级，避免半升级破坏现有版本"
-    grep -E "pkg_hash_check_unresolved|cannot find dependency|incompatible with the architectures configured|Unknown package|No space left on device|kmod-|nftables-|Collected errors:|ERROR" "$log" 2>/dev/null || cat "$log"
+    # 不再只筛选少数关键词；厂商 opkg 的真正原因可能出现在相邻行。
+    # 现场直接显示完整原始输出，同时保留副本供复核。
+    cat "$log" 2>/dev/null || true
     report_install_space_error "$target_name" "$log" "$preflight_rc" || true
     cp "$log" /tmp/po-last-opkg-preflight.log 2>/dev/null || true
     rm -f "$log"
@@ -2490,9 +2495,11 @@ apk_install() {
     if [ "$rc" != "0" ]; then
       report_install_space_error "$pkg" "$log" "$rc" || true
       case "$pkg" in
-      luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
-        info "安装日志已保留: /tmp/po-last-opkg-install.log"
-        ;;
+        luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)
+          err "$pkg 原始 OPKG 安装输出如下："
+          cat /tmp/po-last-opkg-install.log 2>/dev/null || true
+          info "完整安装日志已保留: /tmp/po-last-opkg-install.log"
+          ;;
     esac
   fi
   return $rc
@@ -2975,13 +2982,28 @@ update_xray_official_mips() {
     ok "unzip 已安装"
     rm -f /tmp/po_unzip_install.log
   fi
-  local api json tag url u cur new bin=/usr/bin/xray tmp=/tmp/xray-mips.zip newbin=/tmp/xray-new
+  local api json tag url u cur new bin=/usr/bin/xray tmp=/tmp/xray-mips.zip newbin=/tmp/xray-new release_pair
   cur=$($bin version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+  # /releases/latest 只返回最新正式版；Xray 新版本可能标为 prerelease。
+  # 按 GitHub releases 的发布时间顺序选择第一个带 mips32le 资产的版本。
+  api="https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100"
   for u in $(gh_candidates "$api"); do
-    json=$(curl -sL --connect-timeout 10 --max-time 25 "$u" 2>/dev/null) || continue
-    tag=$(printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | cut -d'"' -f4)
-    url=$(printf '%s' "$json" | grep -oE 'https://[^" ]*/Xray-linux-mips32le\.zip' | head -1)
+    json=$(curl -sL --connect-timeout 10 --max-time 35 "$u" 2>/dev/null) || continue
+    release_pair=$(printf '%s\n' "$json" | awk '
+      /"tag_name"[[:space:]]*:/ {
+        tag=$0
+        sub(/^.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag)
+        sub(/".*$/, "", tag)
+      }
+      /browser_download_url.*Xray-linux-mips32le\.zip"/ {
+        url=$0
+        sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", url)
+        sub(/".*$/, "", url)
+        if (tag != "") { print tag "|" url; exit }
+      }
+    ')
+    tag=${release_pair%%|*}
+    url=${release_pair#*|}
     [ -n "$tag" ] && [ -n "$url" ] && break
   done
   [ -n "$url" ] || { info "跳过 Xray 官方更新：无法获取 mips32le Release"; return 0; }
@@ -3133,6 +3155,14 @@ if [ "$INSTALL_PW" = "1" ]; then
     fi
     if [ "$PASSWALL_INSTALL_OK" != "1" ]; then
       err "PassWall 主程序安装失败，停止其核心组件安装"
+      [ -s /tmp/po-last-opkg-preflight.log ] && {
+        err "PassWall 依赖预检原始输出如下："
+        cat /tmp/po-last-opkg-preflight.log
+      }
+      [ -s /tmp/po-last-opkg-install.log ] && {
+        err "PassWall 主包安装原始输出如下："
+        cat /tmp/po-last-opkg-install.log
+      }
     else
       update_xray_official_mips
       install_passwall_iptables_compat
