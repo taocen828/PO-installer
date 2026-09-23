@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260920.41 (修复可选组件交互输入跳过)
+# VERSION: 20260923.42 (校验系统源索引内容与架构)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="41"
+VERSION_SEQ="42"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1127,7 +1127,7 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
 hdr "软件源配置"
 info "快速检测系统默认源..."
 validate_source_path_compatibility() {
-  local file="$1" url series arch bad=0
+  local file="$1" url series arch bad=0 src_series
   series=$(echo "$SYS_RELEASE" | sed -n 's/^\(19\.07\|21\.02\|22\.03\|23\.05\|24\.10\|25\.12\)\..*/\1/p')
   [ -n "$series" ] || series=$(echo "$SYS_RELEASE" | sed -n 's/^\(19\.07\|21\.02\|22\.03\|23\.05\|24\.10\|25\.12\).*/\1/p')
   while read -r url; do
@@ -1149,6 +1149,46 @@ validate_source_path_compatibility() {
       bad=1
     fi
   done < "$file"
+  return "$bad"
+}
+
+# HTTP 200 只证明服务器返回了内容，不能证明它是可供本机 OPKG 使用的索引。
+# 在第一次 opkg update 前检查 gzip、索引头、架构和该 feed 的代表包；否则
+# OPKG 可能先接受错误/混合源，随后只在安装依赖时表现为 Unknown package。
+validate_opkg_feed_indexes() {
+  local feed_name url feed tmp expected bad=0
+  while read -r feed_name url; do
+    [ -n "$url" ] || continue
+    feed=""
+    case "$url" in
+      */packages/*/base) feed="base"; expected="base-files" ;;
+      */packages/*/luci) feed="luci"; expected="luci-base" ;;
+      */packages/*/packages) feed="packages"; expected="coreutils" ;;
+      */packages/*/routing) feed="routing"; expected="ip-full" ;;
+      */packages/*/telephony) feed="telephony"; expected="" ;;
+      *) continue ;;
+    esac
+    tmp="/tmp/po-feed-index.$$"
+    if ! curl -fsSL --connect-timeout 10 --max-time 45 "$url/Packages.gz" -o "$tmp" 2>/dev/null || ! gzip -t "$tmp" 2>/dev/null; then
+      err "$feed_name 索引不可用：不是有效 Packages.gz ($url)"
+      bad=1; rm -f "$tmp"; continue
+    fi
+    if ! gzip -dc "$tmp" 2>/dev/null | grep -q '^Package: '; then
+      err "$feed_name 索引内容无效：缺少 OPKG 包记录 ($url)"
+      bad=1
+    elif ! gzip -dc "$tmp" 2>/dev/null | grep -qE "^Architecture: ($SYS_ARCH|all|noarch)$"; then
+      err "$feed_name 索引架构不匹配：需要 $SYS_ARCH/all/noarch ($url)"
+      bad=1
+    elif [ -n "$expected" ] && ! gzip -dc "$tmp" 2>/dev/null | grep -q "^Package: $expected$"; then
+      err "$feed_name 索引缺少预期包 $expected：可能是错误版本/错误架构源 ($url)"
+      bad=1
+    else
+      ok "$feed_name 索引内容匹配 (架构 $SYS_ARCH)"
+    fi
+    rm -f "$tmp"
+  done <<EOF
+$(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null)
+EOF
   return "$bad"
 }
 # 将本次更新明确失败的 OPKG 源注释掉，避免后续刷新持续访问坏源。
@@ -1347,6 +1387,11 @@ $(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.
 EOF
   [ "$PKG_MGR" = "opkg" ] || return 1
   validate_unique_opkg_feed_names || return 1
+  validate_source_path_compatibility /tmp/po_opkg_source_urls || return 1
+  validate_opkg_feed_indexes || {
+    err "系统源索引内容/架构校验失败，停止 OPKG 安装"
+    return 1
+  }
   opkg_update_configured_feeds
   local rc=$?
   # 使用 OPKG 原生刷新全部已配置源；签名校验由 OPKG 负责。
