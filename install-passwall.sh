@@ -2,10 +2,10 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260923.43 (修复 OPKG 源预检顺序并显示 PassWall 原始错误)
+# VERSION: 20260924.44 (修复 OpenWrt 24.10 OPKG feed 校验与失败后菜单)
 #==============================================
 # 版本序号由发布时递增；日期不再写死，跨日运行时自动切换为当天日期。
-VERSION_SEQ="43"
+VERSION_SEQ="44"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1161,10 +1161,14 @@ validate_opkg_feed_indexes() {
     [ -n "$url" ] || continue
     feed=""
     case "$url" in
-      */packages/*/base) feed="base"; expected="base-files" ;;
+      # base-files 属于 targets/<target>/packages，不属于 release
+      # packages/<arch>/base；base feed 用 ip-full 作为稳定代表包。
+      */packages/*/base) feed="base"; expected="ip-full" ;;
       */packages/*/luci) feed="luci"; expected="luci-base" ;;
       */packages/*/packages) feed="packages"; expected="coreutils" ;;
-      */packages/*/routing) feed="routing"; expected="ip-full" ;;
+      # 24.10 的 routing feed 不保证包含 ip-full（它在 base feed）；
+      # 只验证索引格式/架构，不用错误的包名阻断整个系统源。
+      */packages/*/routing) feed="routing"; expected="" ;;
       */packages/*/telephony) feed="telephony"; expected="" ;;
       *) continue ;;
     esac
@@ -1327,7 +1331,7 @@ cache_openwrt_userspace_indexes() {
       # 手工索引只接受匹配本机架构的条目，并立即检查该 feed 的代表包。
       if ! grep -qE "^Architecture: ($SYS_ARCH|all|noarch)$" "$tmp"; then
         err "OpenWrt $feed 索引架构不匹配，拒绝缓存"
-      elif { [ "$feed" = "base" ] && ! grep -q '^Package: base-files$' "$tmp"; } ||
+      elif { [ "$feed" = "base" ] && ! grep -q '^Package: ip-full$' "$tmp"; } ||
            { [ "$feed" = "luci" ] && ! grep -q '^Package: luci-base$' "$tmp"; }; then
         err "OpenWrt $feed 索引缺少预期基础包，拒绝缓存"
       else
@@ -1335,12 +1339,18 @@ cache_openwrt_userspace_indexes() {
         # opkg 24.10/iStoreOS 可能只读取与已配置 feed 同名的索引。
         # 同时写入脚本配置的 po_openwrt_* 名称，避免索引已缓存但
         # `opkg list` 仍返回 Unknown package。
-        for alias in "po_openwrt_$feed" "openwrt_$feed"; do
+        # 手工缓存必须使用配置中实际存在的 feed 名；否则 opkg list
+        # 不会读取索引，随后依赖安装会误报 Unknown package。
+        for alias in po_openwrt_$feed openwrt_$feed po_aliyun_$feed; do
           if grep -qE "^[[:space:]]*src(/gz)?[[:space:]]+$alias[[:space:]]" \
-             /etc/opkg/*.conf 2>/dev/null; then
+             /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null; then
             cp "$tmp" "/var/opkg-lists/$alias"
           fi
         done
+        # iStoreOS 的 compat/nas 源不一定有 OpenWrt feed 名；保留一个
+        # 脚本专用索引副本供 find_pkg_meta/依赖直链解析，不能替代 opkg
+        # 的正式索引，但可避免索引存在却无法找到包 URL。
+        cp "$tmp" "/var/opkg-lists/po_openwrt_$feed"
         ok "已缓存 OpenWrt $feed 用户态索引（已绕过 OPKG 签名流程，架构/关键包已校验）"
       fi
     else
@@ -1407,7 +1417,9 @@ EOF
   awk '!/^#/ && /^src(\/gz)?[[:space:]]/ {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf 2>/dev/null | sort -u > /tmp/po_opkg_source_urls
   validate_source_path_compatibility /tmp/po_opkg_source_urls || { rm -f "$log" /tmp/po_opkg_source_urls; return 1; }
   # 索引必须至少能提供当前系统的基础用户态包，不能只凭 URL/HTTP 200 判定可用。
-  for pkg in base-files libc luci-base; do
+  # base-files 属于 targets/<target>/packages，不在 release packages/<arch>/base；
+  # 用 libc/luci-base 检查 userspace 覆盖，避免把正常官方源误判为损坏。
+  for pkg in libc luci-base; do
     opkg list "$pkg" 2>/dev/null | grep -q "^$pkg " || {
       err "OPKG 索引缺少基础包: $pkg"
       rm -f "$log" /tmp/po_opkg_source_urls
@@ -4548,7 +4560,8 @@ opt_pkginstall() {
 #==============================================
 # 7. 可选组件（一次性列出，用户输入序号）
 #==============================================
-if [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" = "1" ]; then
+if { [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" = "1" ]; } ||
+   { [ "$INSTALL_PW2" = "1" ] && [ "${PASSWALL2_INSTALL_OK:-0}" = "1" ]; }; then
   hdr "可选组件"
   if [ "$PASSWALL_MINIMAL" = "1" ]; then
     info "最小化模式：跳过可选代理核心，安装已完成"
