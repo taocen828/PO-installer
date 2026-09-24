@@ -2004,7 +2004,29 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "apk" ] &&
       fi
     done
   fi
-  [ "$SF_OK" = "1" ] || err "更新模式：无法从现有 APK source 获取 PassWall 包索引"
+  # 已安装插件的 APK 更新模式不能只依赖本地 repositories：旧版脚本可能
+  # 没有保存 SourceForge source，或保存的是单个 feed/带查询参数的 URL。
+  # 25.12 PassWall 官方 APK 源固定使用 snapshots/packages/<包架构>；
+  # 直接探测官方索引后恢复 SF_BASE，不改系统源文件。
+  if [ "$SF_OK" != "1" ]; then
+    SF_BASE=""
+    for sf_prefix in \
+      https://downloads.sourceforge.net/project/openwrt-passwall-build \
+      https://master.dl.sourceforge.net/project/openwrt-passwall-build; do
+      sf_candidate="$sf_prefix/snapshots/packages/$SYS_ARCH"
+      for sf_feed in passwall_luci passwall_packages passwall2; do
+        sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
+          "$sf_candidate/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
+        if [ "$sf_magic" = "ADBd" ]; then
+          SF_BASE="$sf_candidate"
+          SF_OK=1
+          info "更新模式：恢复 SourceForge 官方 APK 源 (snapshots/$SYS_ARCH)"
+          break 2
+        fi
+      done
+    done
+  fi
+  [ "$SF_OK" = "1" ] || err "更新模式：无法从现有或官方 APK source 获取 PassWall 包索引"
 fi
 
 #==============================================
