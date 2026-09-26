@@ -6,7 +6,7 @@
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2166,14 +2166,32 @@ find_pkg_meta() {
 }
 
 # 获取所有源中的最高版本（国内源低版本不会遮住 SourceForge 新版本）
+# APK 的 packages.adb 不是文本索引；apk list 可能仍是旧缓存，不能用它拼出
+# SourceForge 的主包文件名。直接读取 SourceForge 目录页，按真实 APK 文件名取最高版本。
+sf_apk_latest_version() {
+  local pkg="$1" feed html
+  [ "$PKG_MGR" = "apk" ] && [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ] || return 1
+  case "$pkg" in
+    luci-*|luci_*) feed="passwall_luci" ;;
+    *) feed="passwall_packages" ;;
+  esac
+  html=$(curl -fsSL --connect-timeout 15 --max-time 60 \
+    "https://sourceforge.net/projects/openwrt-passwall-build/files/${SF_PATH:-snapshots/packages/$SYS_ARCH}/$feed/" 2>/dev/null) || return 1
+  printf '%s\n' "$html" | grep -oE "${pkg}-[^\"/ ]+\\.apk" | \
+    sed "s/^${pkg}-//; s/\\.apk$//" | sort -V | tail -1
+}
+
 get_repo_version() {
-  local pkg="$1"
+  local pkg="$1" v
   if [ "$PKG_MGR" = "opkg" ]; then
     find_pkg_meta "$pkg" version
   else
-    # APK: apk list 可能先输出已装旧版，再输出 [upgradable] 新版；不能 head -1
-    # 例: luci-app-passwall-26.7.24-r1 [installed] / luci-app-passwall-26.8.26-r1 [upgradable]
-    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | awk '{print $1}' | sed "s/^$pkg-//" | sort -V | tail -1
+    # 优先使用 SourceForge 真实目录，避免 stale packages.adb/apk list 把
+    # 26.9.16 错误降成不存在的 26.9.1-r1，最终探测出 404。
+    v=$(sf_apk_latest_version "$pkg")
+    [ -n "$v" ] && { echo "$v"; return 0; }
+    apk list "$pkg" 2>/dev/null | grep -v WARNING | grep "^$pkg-" | \
+      awk '{print $1}' | sed "s/^$pkg-//" | sort -V | tail -1
   fi
 }
 
