@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.6 (补齐 APK PassWall 用户态依赖源检测)
+# VERSION: 20260928.7 (修复 ip-tiny 与 ip-full 冲突)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="6"
+VERSION_SEQ="7"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1469,13 +1469,23 @@ validate_apk_system_source() {
     }
   done
   if [ "$INSTALL_PW" = "1" ]; then
-    for required_pkg in ip-tiny coreutils coreutils-base64 coreutils-nohup coreutils-timeout lyaml; do
+    # ip-full 与 ip-tiny 是互斥实现，不能把 ip-tiny 当作 PassWall 的硬依赖。
+    # PassWall 主包声明 ip-full；若系统已有 ip-full，只需验证该实现，
+    # 不应因 world 中残留 ip-tiny 把两者同时交给 apk 求解。
+    for required_pkg in coreutils coreutils-base64 coreutils-nohup coreutils-timeout lyaml; do
       apk search --exact "$required_pkg" 2>/dev/null | grep -q "$required_pkg" || {
         info "APK 系统源缺少 PassWall 依赖: $required_pkg，切换匹配的 OpenWrt userspace 源"
         rm -f "$log" /tmp/po_apk_source_urls
         return 1
       }
     done
+    if ! apk list --installed ip-full 2>/dev/null | grep -v WARNING | grep -q '^ip-full-'; then
+      apk search --exact ip-full 2>/dev/null | grep -q ip-full || {
+        info "APK 系统源缺少 PassWall 依赖: ip-full，切换匹配的 OpenWrt userspace 源"
+        rm -f "$log" /tmp/po_apk_source_urls
+        return 1
+      }
+    fi
   fi
   rm -f "$log" /tmp/po_apk_source_urls
   return 0
@@ -2736,16 +2746,23 @@ clean_apk_broken_world() {
   # OpenWrt apk world 可带约束/校验后缀，如 luci-app-ssr-plus><Qxxx；按前缀清理。
   # naiveprox4 是错误包名；naiveproxy 在 25.12/APK 上可能依赖不存在的 libatomic1，留在 world 会让 iStore 内安装任何插件都失败。
   awk '
-    $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next}
+    $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box|ip-tiny)([<>=~].*)?$/ {next}
     $0 ~ /^naiveprox/ {next}
     $0 ~ /^libatomic/ {next}
     {print}
   ' /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || cp /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null
   if ! cmp -s /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null; then
     cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
-    ok "已清理 APK world 残留约束: naiveprox*/libatomic*"
+    ok "已清理 APK world 残留约束: naiveprox*/libatomic*/ip-tiny"
   fi
   rm -f /tmp/apk.world.po-clean 2>/dev/null || true
+  # ip-tiny 与 PassWall 声明的 ip-full 提供同一虚拟能力，二者不能并存。
+  # 无论 ip-full 是否已落盘，都先移除已安装的 ip-tiny；后续由 ip-full 满足
+  # zerotier 等软件的虚拟依赖。失败只保留原包，交给主事务输出真实冲突。
+  if apk list --installed ip-tiny 2>/dev/null | grep -v WARNING | grep -q '^ip-tiny-'; then
+    info "检测到已安装 ip-tiny，PassWall 需要 ip-full，先移除冲突包"
+    apk del --force-broken-world ip-tiny 2>&1 || true
+  fi
 }
 
 
@@ -3256,6 +3273,9 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
+    # PassWall 声明 ip-full；ip-tiny 与它提供同一虚拟能力 ip，APK 不允许共存。
+    # 清理失败安装/旧 world 残留后再进入主包事务，避免 ip-tiny 与 ip-full 冲突。
+    [ "$PKG_MGR" = "apk" ] && clean_apk_broken_world
     # APK 的 SourceForge 索引探测只用于提示，不能阻断实际安装：
     # 部分 apk-tools/代理环境下 apk update 不落本地索引，但直链仓库仍可正常解析。
     if [ "$PKG_MGR" = "apk" ] && [ "$SF_OK" = "1" ] && [ "$APK_PW_INDEX_OK" = "1" ] && [ -n "$SF_BASE" ]; then
