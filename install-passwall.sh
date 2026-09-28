@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.4 (修复 25.12 APK 更新源优先级)
+# VERSION: 20260928.5 (修复 APK 本地包安装误用 --no-network)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="4"
+VERSION_SEQ="5"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2624,7 +2624,10 @@ apk_install() {
     if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url" && apk_file_valid "/tmp/pkg_$pkg.apk"; then
       # SourceForge APK 必须实际替换二进制；apk 的 OK 只表示事务/索引同步，
       # 不代表目标包已经安装。安装输出保持实时显示，失败时保留旧版本。
-      apk add --upgrade --allow-untrusted --force-non-repository $APK_FORCE_REINSTALL_OPT --no-network "/tmp/pkg_$pkg.apk" 2>&1
+      # 本地 APK 只跳过仓库归属校验；依赖仍必须从已验证的系统/SF 索引解析。
+      # --no-network 会把所有未安装依赖标记为 masked，导致 chinadns-ng、dns2socks、
+      # libuci-lua 等明明在索引中的包全部变成“masked in: --no-network”。
+      apk add --upgrade --allow-untrusted --force-non-repository $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
       if [ -n "$repo_ver" ] && apk_optional_binary_matches "$pkg" "$repo_ver"; then
