@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260929.1 (集成官方 daed 最新版)
+# VERSION: 20260929.2 (DAED 独立菜单，不挂在 OpenClash 下)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="1"
+VERSION_SEQ="2"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -977,31 +977,7 @@ case "$MAIN_CHOICE" in
   2) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_MINIMAL=1; ok "选择: PassWall 最小化安装" ;;
   3) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
   4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: DAED" ;;
-  5)
-    echo ""
-    echo "OpenClash："
-    echo "  1) 安装 OpenClash"
-    echo "  2) 脚本列表"
-    echo ""
-    printf "请选择 OpenClash 项目 (1/2，回车默认1): "
-    read -r OPENCLASH_CHOICE
-    case "$OPENCLASH_CHOICE" in
-      2)
-        echo ""
-        echo "OpenClash 脚本列表："
-        echo "  1) 安装 daed 独立 Web 面板（端口 2023）"
-        echo ""
-        printf "请选择脚本 (1，回车返回): "
-        read -r OPENCLASH_SCRIPT_CHOICE
-        case "$OPENCLASH_SCRIPT_CHOICE" in
-          1) INSTALL_OC=1; INSTALL_DAED=1; ok "选择: OpenClash + daed" ;;
-          *) INSTALL_OC=1; ok "选择: OpenClash" ;;
-        esac
-        ;;
-      *) INSTALL_OC=1; ok "选择: OpenClash" ;;
-    esac
-    INSTALL_PW=0; INSTALL_PW2=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0
-    ;;
+  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
   6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
   7) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
   8) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
@@ -4711,7 +4687,7 @@ if [ "$INSTALL_OC" = "1" ]; then
   fi
 fi
 
-# daed 与 OpenClash 并列安装：仅在用户选择“OpenClash + daed”时执行。
+# DAED 独立安装：仅在用户选择 DAED 或全部安装时执行。
 if [ "${INSTALL_DAED:-0}" = "1" ]; then
   install_daed && DAED_INSTALL_OK=1 || DAED_INSTALL_OK=0
 fi
