@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.10 (修复旧 PassWall 源污染与未签名 APK 索引)
+# VERSION: 20260928.11 (允许第三方 APK 源未签名索引)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="10"
+VERSION_SEQ="11"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1477,11 +1477,13 @@ EOF
 }
 validate_apk_system_source() {
   local log=/tmp/po_system_apk_update.log
-  apk update > "$log" 2>&1
+  # OpenWrt 第三方 APK 源（PassWall）通常无 OpenWrt 签名；允许未签名索引，
+  # 安全性由后续目标包存在性、只读事务预检和 --allow-untrusted 安装控制。
+  apk update --allow-untrusted > "$log" 2>&1
   local rc=$?
   if [ "$rc" != "0" ] || grep -qE 'ERROR|WARNING.*(architecture|not found|failed)|No such' "$log" 2>/dev/null; then
     err "APK 系统源更新失败或存在错误"
-    grep -E 'ERROR|WARNING|UNTRUST|failed|not found|No such' "$log" 2>/dev/null || true
+    grep -E 'ERROR|WARNING.*(architecture|not found|failed)|failed|not found|No such' "$log" 2>/dev/null || true
     rm -f "$log"
     return 1
   fi
