@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.7 (修复 ip-tiny 与 ip-full 冲突)
+# VERSION: 20260928.8 (安全闭锁：禁止失败事务清理系统包)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="7"
+VERSION_SEQ="8"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -333,17 +333,9 @@ APK_PW_INDEX_OK=0
 # 只删除本脚本管理的 SourceForge PassWall 行，保留其它 APK 源和用户配置。
 cleanup_apk_passwall_feeds() {
   [ "$PKG_MGR" = "apk" ] || return 0
-  local file tmp
-  for file in /etc/apk/repositories /etc/apk/repositories.d/*.list; do
-    [ -f "$file" ] || continue
-    tmp="/tmp/$(basename "$file").po-passwall-clean.$$"
-    grep -vE 'openwrt-passwall-build/(releases/packages-[^/]+|snapshots/packages/)|/(passwall_luci|passwall_packages|passwall2)/packages\.adb' "$file" > "$tmp" 2>/dev/null || true
-    if ! cmp -s "$file" "$tmp" 2>/dev/null; then
-      cat "$tmp" > "$file"
-      info "已清理旧版 PassWall APK 源: $file"
-    fi
-    rm -f "$tmp"
-  done
+  # APK 源必须保持原样，直到新 PassWall 源完成索引校验；调用方在事务前
+  # 负责原子备份/追加/失败恢复。这里禁止预先清理持久源文件。
+  return 0
 }
 # 延迟到安装选择完成后执行：更新模式必须保留已有 SourceForge
 # PassWall 源，供后续恢复 SF_BASE；新装模式才清理旧版错误源。
@@ -930,7 +922,7 @@ echo "  8) 卸载插件"
 echo "  9) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
 echo "  0) 退出"
 echo ""
-printf "请输入选项 (0/1/2/3/4/5/6/7/8/9): "
+printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -941,7 +933,7 @@ while :; do
   # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
-    0|1|2|3|4|5|6|7|8|9) break ;;
+    0|1|2|3|4|5|6|7|8|9|10) break ;;
     10) [ "$LOW_SPACE_MODE" = "1" ] && break || printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
     *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
   esac
@@ -1098,6 +1090,13 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
   ok "Overlay 可用: ${OVERLAY_SPACE}MB"
   info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
+  # 安全硬闭锁：空间不足时禁止进入 apk/opkg 事务，避免包管理器为满足
+  # world 约束批量 Purge/替换无关软件包。
+  if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt "$REQUIRED_SPACE_MB" ]; then
+    err "可用空间不足：${OVERLAY_SPACE}MB < 预计最低 ${REQUIRED_SPACE_MB}MB"
+    err "已停止；未执行安装/卸载事务"
+    exit 1
+  fi
 fi
 
 # 直接更新模式：已安装插件只使用现有插件 source，绝不探测、注销或追加系统源。
@@ -1869,6 +1868,8 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     elif [ "$INSTALL_PW$INSTALL_PW2" = "00" ] && [ "$INSTALL_OC" = "1" ]; then
       ok "源配置完成 (OpenClash 使用 GitHub Release 直装，不写代理源)"
     elif [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
+      APK_REPO_BACKUP="/tmp/po-apk-repo.$$.bak"
+      cp -f "$APK_REPO_FILE" "$APK_REPO_BACKUP" 2>/dev/null || true
       sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' "$APK_REPO_FILE" 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
@@ -1887,11 +1888,18 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       APK_PW_INDEX_OK=1
       if [ "$APK_UPDATE_RC" != "0" ]; then
         APK_PW_INDEX_OK=0
-        err "SourceForge APK 索引刷新失败 (rc=$APK_UPDATE_RC)，禁止进入 PassWall 安装事务"
+        err "SourceForge APK 索引刷新失败 (rc=$APK_UPDATE_RC)，保留原软件源，禁止进入安装事务"
+        if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
+          cat "$APK_REPO_BACKUP" > "$APK_REPO_FILE" 2>/dev/null || true
+          info "已恢复原 APK 软件源：$APK_REPO_FILE"
+        fi
       fi
       if grep -qE 'UNTRUST|No such file|not found|ERROR|failed|unable|cannot|signature' /tmp/po_apk_update.log 2>/dev/null; then
         APK_PW_INDEX_OK=0
-        err "SourceForge APK 索引校验失败，禁止进入 PassWall 安装事务"
+        err "SourceForge APK 索引校验失败，保留原软件源，禁止进入安装事务"
+        if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
+          cat "$APK_REPO_BACKUP" > "$APK_REPO_FILE" 2>/dev/null || true
+        fi
       fi
       if [ "$INSTALL_PW" = "1" ] && ! apk list luci-app-passwall 2>/dev/null | grep -v WARNING | grep -q '^luci-app-passwall-'; then
         APK_PW_INDEX_OK=0
@@ -1906,6 +1914,10 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       else
         SF_OK=0
         SF_BASE=""
+        if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
+          cat "$APK_REPO_BACKUP" > "$APK_REPO_FILE" 2>/dev/null || true
+          info "已恢复原 APK 软件源：$APK_REPO_FILE"
+        fi
         err "PassWall APK 源索引刷新失败或构建残缺，已禁用该源"
         grep -E "ERROR|WARNING|UNTRUST|failed|unable|not found|permission|cannot" /tmp/po_apk_update.log 2>/dev/null || true
       fi
@@ -2469,6 +2481,28 @@ apk_file_valid() {
   [ "$magic" = "ADBd" ]
 }
 
+apk_preflight_safe() {
+  local pkg="$1" log="/tmp/apk_preflight.$$.log" rc=0
+  [ "$PKG_MGR" = "apk" ] || return 0
+  # --simulate/--no-changes 必须先通过；若计划 Purge/Remove 非目标包，立即闭锁。
+  apk add --simulate --no-changes --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
+  rc=$?
+  if [ "$rc" != "0" ]; then
+    err "APK 只读依赖预检失败：$pkg"
+    grep -E "ERROR|WARNING|unable|cannot|breaks|conflict|not found|No space|required by" "$log" 2>/dev/null || cat "$log"
+    rm -f "$log"
+    return 1
+  fi
+  if grep -Eq '(^|[[:space:]])(Purging|Removing|Deleting)[[:space:]]' "$log"; then
+    err "APK 预检计划删除/清理其它包，已停止：$pkg"
+    grep -E 'Purging|Removing|Deleting' "$log" || true
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+  return 0
+}
+
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
@@ -2636,6 +2670,7 @@ apk_install() {
   fi
   return $rc
   fi
+  apk_preflight_safe "$pkg" || return 2
   local log=/tmp/apk_add.log url prog repo_ver
   : > "$log"
   # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本。
@@ -2741,41 +2776,21 @@ clean_luci_cache() {
 }
 clean_apk_broken_world() {
   [ "$PKG_MGR" = "apk" ] || return 0
+  # 安全策略：APK world 是持久系统状态，只读检查，不自动编辑或删除任何约束。
+  # 破损 world 交给安装前 --simulate 预检报告，避免触发级联 Purge。
   [ -f /etc/apk/world ] || return 0
-  cp /etc/apk/world /tmp/apk.world.po-bak 2>/dev/null || true
-  # OpenWrt apk world 可带约束/校验后缀，如 luci-app-ssr-plus><Qxxx；按前缀清理。
-  # naiveprox4 是错误包名；naiveproxy 在 25.12/APK 上可能依赖不存在的 libatomic1，留在 world 会让 iStore 内安装任何插件都失败。
-  awk '
-    $0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box|ip-tiny)([<>=~].*)?$/ {next}
-    $0 ~ /^naiveprox/ {next}
-    $0 ~ /^libatomic/ {next}
-    {print}
-  ' /etc/apk/world > /tmp/apk.world.po-clean 2>/dev/null || cp /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null
-  if ! cmp -s /etc/apk/world /tmp/apk.world.po-clean 2>/dev/null; then
-    cat /tmp/apk.world.po-clean > /etc/apk/world 2>/dev/null || true
-    ok "已清理 APK world 残留约束: naiveprox*/libatomic*/ip-tiny"
-  fi
-  rm -f /tmp/apk.world.po-clean 2>/dev/null || true
-  # ip-tiny 与 PassWall 声明的 ip-full 提供同一虚拟能力，二者不能并存。
-  # 无论 ip-full 是否已落盘，都先移除已安装的 ip-tiny；后续由 ip-full 满足
-  # zerotier 等软件的虚拟依赖。失败只保留原包，交给主事务输出真实冲突。
-  if apk list --installed ip-tiny 2>/dev/null | grep -v WARNING | grep -q '^ip-tiny-'; then
-    info "检测到已安装 ip-tiny，PassWall 需要 ip-full，先移除冲突包"
-    apk del --force-broken-world ip-tiny 2>&1 || true
+  if grep -qE '^(naiveprox|libatomic|ip-tiny|ip-full|sing-box|luci-app-ssr-plus)' /etc/apk/world 2>/dev/null; then
+    info "检测到 APK world 中存在插件/虚拟包约束；保持原样，禁止自动清理"
   fi
 }
 
 
 clean_apk_broken_installed() {
   [ "$PKG_MGR" = "apk" ] || return 0
-  clean_apk_broken_world
-  # 如果已安装 naiveproxy 但系统没有 libatomic1，APK 求解器会继续报 libatomic1 missing；先移除这个已破损包。
+  # 仅做只读诊断；禁止为修复 world 自动 apk del 任意现有包。
   if apk list --installed 'naiveproxy' 2>/dev/null | grep -q '^naiveproxy-'; then
     if ! apk info 'libatomic1' >/dev/null 2>&1 && ! apk list --installed 'libatomic1' 2>/dev/null | grep -q '^libatomic1-'; then
-      info "检测到已安装 naiveproxy 依赖缺失 libatomic1，先移除破损 naiveproxy"
-      apk del --force-broken-world naiveproxy >/tmp/apk_clean_naiveproxy.log 2>&1 || true
-      grep -E "ERROR|WARNING|failed|not found|unable|cannot|conflict|breaks" /tmp/apk_clean_naiveproxy.log 2>/dev/null || true
-      rm -f /tmp/apk_clean_naiveproxy.log 2>/dev/null || true
+      info "检测到 naiveproxy 缺少 libatomic1；不自动卸载，安装事务将被闭锁"
     fi
   fi
 }
@@ -2792,16 +2807,9 @@ remove_pkg_keep_config() {
     rc=$?
     grep -v -e "^Removing package" -e "^Configuring" -e "^Collected errors:$" -e "opkg\.lock" "$log" || true
   else
-    # APK 的 world 里如果残留不存在的约束，apk del 任何包都会先解依赖失败；先清理已知 PO/SSR 残留再删。
-    clean_apk_broken_world
-    apk del --force-broken-world "$pkg" > "$log" 2>&1
+    # APK 卸载同样禁止 force-broken-world；仅允许用户明确选择卸载时删除目标包。
+    apk del "$pkg" > "$log" 2>&1
     rc=$?
-    if [ "$rc" != "0" ] && grep -q "unable to select packages\|no such package\|required by: world" "$log" 2>/dev/null; then
-      info "APK world/依赖存在残留约束，清理后强制重试..."
-      clean_apk_broken_world
-      apk del --force-broken-world "$pkg" > "$log" 2>&1
-      rc=$?
-    fi
     grep -v "^WARNING.*opening" "$log" || true
   fi
   rm -f "$log"
@@ -4210,7 +4218,7 @@ ensure_istore_runtime_deps() {
   : > "$log"
   if [ "$PKG_MGR" = "apk" ]; then
     clean_apk_broken_installed
-    apk add --upgrade --latest --allow-untrusted --force-broken-world $need > "$log" 2>&1
+    apk add --upgrade --latest --allow-untrusted $need > "$log" 2>&1
     rc=$?
   else
     opkg install $need --force-downgrade --force-overwrite > "$log" 2>&1
