@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.8 (安全闭锁：禁止失败事务清理系统包)
+# VERSION: 20260928.9 (修正 PassWall 最小化空间估算)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="8"
+VERSION_SEQ="9"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1078,8 +1078,14 @@ report_install_space_error() {
 }
 if [ "$UNINSTALL_ONLY" != "1" ]; then
   hdr "空间检测"
-  REQUIRED_SPACE_MB=30
-  [ "$INSTALL_PW" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
+  # 最小化 PassWall 只安装主程序和必需 Xray，不按完整安装估算。
+  # 完整 PassWall 需要较大空间；最小化模式保守按 35MB 估算。
+  if [ "$PASSWALL_MINIMAL" = "1" ]; then
+    REQUIRED_SPACE_MB=35
+  else
+    REQUIRED_SPACE_MB=30
+    [ "$INSTALL_PW" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
+  fi
   [ "$INSTALL_PW2" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
   [ "$INSTALL_OC" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 30))
   [ "$INSTALL_SSR" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 60))
