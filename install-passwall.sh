@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.13 (集成 daed 独立面板安装)
+# VERSION: 20260928.14 (OpenClash 脚本列表归入 OpenClash 菜单)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="13"
+VERSION_SEQ="14"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -946,7 +946,6 @@ echo "  6) iStore 商店"
 echo "  7) 全部安装"
 echo "  8) 卸载插件"
 echo "  9) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
-echo "  11) OpenClash + daed（独立 Web 面板，端口 2023）"
 echo "  0) 退出"
 echo ""
 printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10): "
@@ -960,7 +959,7 @@ while :; do
   # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
-    0|1|2|3|4|5|6|7|8|9|10|11) break ;;
+    0|1|2|3|4|5|6|7|8|9|10) break ;;
     10) [ "$LOW_SPACE_MODE" = "1" ] && break || printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
     *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
   esac
@@ -982,8 +981,31 @@ case "$MAIN_CHOICE" in
   1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
   10) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_MINIMAL=1; ok "选择: PassWall 最小化安装" ;;
   2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
-  3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
-  11) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash + daed" ;;
+  3)
+    echo ""
+    echo "OpenClash："
+    echo "  1) 安装 OpenClash"
+    echo "  2) 脚本列表"
+    echo ""
+    printf "请选择 OpenClash 项目 (1/2，回车默认1): "
+    read -r OPENCLASH_CHOICE
+    case "$OPENCLASH_CHOICE" in
+      2)
+        echo ""
+        echo "OpenClash 脚本列表："
+        echo "  1) 安装 daed 独立 Web 面板（端口 2023）"
+        echo ""
+        printf "请选择脚本 (1，回车返回): "
+        read -r OPENCLASH_SCRIPT_CHOICE
+        case "$OPENCLASH_SCRIPT_CHOICE" in
+          1) INSTALL_OC=1; INSTALL_DAED=1; ok "选择: OpenClash + daed" ;;
+          *) INSTALL_OC=1; ok "选择: OpenClash" ;;
+        esac
+        ;;
+      *) INSTALL_OC=1; ok "选择: OpenClash" ;;
+    esac
+    INSTALL_PW=0; INSTALL_PW2=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0
+    ;;
   4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
   5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
   6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
