@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.3 (明确每日版本序号规则)
+# VERSION: 20260928.4 (修复 25.12 APK 更新源优先级)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="2"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -433,7 +433,7 @@ if echo "$SYS_DESC" | grep -qi '^OpenWrt ' && [ "$SYS_RELEASE" = "24.10.4" ] && 
 fi
 ok "系统: $SYS_DESC ($SYS_RELEASE)"
 
-PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9][0-9]*$/\1/p')
+PW_VER=$(echo "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\|25\.12\)\.[0-9][0-9]*$/\1/p')
 [ -z "$PW_VER" ] && PW_VER="unknown"
 IS_EXACT_RELEASE=0
 [ "$PW_VER" != "unknown" ] && IS_EXACT_RELEASE=1
@@ -541,7 +541,7 @@ esac
 # opkg 固件的用户态包线优先以固件声明版本为准；内核版本只用于 kmod 兼容性判断。
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$PW_VER" in
-    19.07|21.02|22.03|23.05|24.10) SERIES_CHAIN="$PW_VER" ;;
+    21.02|22.03|23.05|24.10|25.12) SERIES_CHAIN="$PW_VER" ;;
     *) SERIES_CHAIN="" ;;
   esac
   [ -n "$SERIES_CHAIN" ] && info "opkg 系统: 按固件用户态版本选择可用包线 → $SERIES_CHAIN" || info "opkg 系统: 未识别正式版本，禁止 release fallback"
@@ -712,21 +712,24 @@ if [ "$PKG_MGR" = "opkg" ] && [ "$SF_PW_VER" = "unknown" ]; then
   SF_PW_VER="24.10"
 fi
 # SourceForge 的 21/22 旧目录兼容 aarch64 generic，但不能覆盖明确的 24.10。
+# APK/OpenWrt 25.12 uses SourceForge's packages.adb under releases/packages-25.12.
+# opkg releases still use Packages.gz; do not map APK 25.12 to snapshots.
 if [ "$PKG_MGR" = "opkg" ]; then
   case "$SF_PW_VER" in
-    25.12|snapshots) SF_PW_VER="24.10" ;;
-  esac
-  case "$SF_PW_VER" in
+    25.12) SF_PATH="releases/packages-25.12/$SF_ARCH" ;;
     21.02|22.03|23.05|24.10) SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH" ;;
     *) SF_PATH=""; SF_OK=0 ;;
   esac
 else
-  # PassWall 的 APK 包线使用 SourceForge snapshots；OpenWrt 25.12
-  # 正式版系统不能按系统版本拼接 releases/packages-25.12。
-  SF_PATH="snapshots/packages/$SYS_ARCH"
+  case "$SF_PW_VER" in
+    25.12) SF_PATH="releases/packages-25.12/$SYS_ARCH" ;;
+    *) SF_PATH="snapshots/packages/$SYS_ARCH" ;;
+  esac
 fi
 
 # SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
+SF_INDEX_FILE="Packages.gz"
+[ "$PKG_MGR" = "apk" ] && SF_INDEX_FILE="packages.adb"
 if [ "$PKG_MGR" = "opkg" ] && [ -z "$SF_PATH" ]; then
   SF_OK=0
   info "当前 OPKG 固件无匹配 PassWall release 源，跳过 SourceForge release fallback"
@@ -812,7 +815,7 @@ if [ -n "$SF_PROBE_URL" ]; then
   ok "PassWall 源 ✓ (SourceForge 实际索引校验通过)"
   if [ -n "$SF_MIRROR" ]; then
     info "使用手动指定 SourceForge 节点: $SF_MIRROR"
-    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
+    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/$SF_INDEX_FILE")
     SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
     SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
     SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
@@ -825,7 +828,7 @@ if [ -n "$SF_PROBE_URL" ]; then
     ok "PassWall 下载节点: downloads ($SF_PREFIX)"
   else
     info "SF 多节点测速，选最快下载节点..."
-    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/Packages.gz")
+    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/$SF_INDEX_FILE")
     SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
     SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
     SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
@@ -1609,7 +1612,10 @@ if [ "$UNINSTALL_ONLY" != "1" ] && [ "$SYS_SOURCE_OK" = "1" ] && [ "$PASSWALL_SO
   SF_MIRROR_QUERY=""
   if [ "$PKG_MGR" = "apk" ]; then
     # SourceForge PassWall APK 统一使用 snapshots 包线，正式版/快照版均如此。
-    SF_PATH="snapshots/packages/$SYS_ARCH"
+    case "$SF_PW_VER" in
+      25.12) SF_PATH="releases/packages-25.12/$SYS_ARCH" ;;
+      *) SF_PATH="snapshots/packages/$SYS_ARCH" ;;
+    esac
   else
     SF_PATH="releases/packages-$SF_PW_VER/$SYS_ARCH"
   fi
@@ -1784,7 +1790,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     if [ -n "$SF_BASE" ] && [ "$SF_OK" = "1" ]; then
       for feed in passwall_luci passwall_packages passwall2; do
         tmp="/tmp/passwall_${feed}.$$"
-        if curl -fsL --connect-timeout 10 --max-time 20 "$SF_BASE/$feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        if curl -fsL --connect-timeout 10 --max-time 20 "$SF_BASE/$feed/$SF_INDEX_FILE$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
           cat "$tmp" > "/var/opkg-lists/$feed"
           ok "PassWall $feed 索引已缓存"
         else
@@ -1801,7 +1807,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     if [ "$PW_INDEX_OK" != "1" ] && [ "$SF_OK" = "1" ]; then
       # 某些 24.10/opkg 固件会因第三方源签名失败导致索引未落盘；SF 已探测可用时，手动拉取索引兜底。
       for feed in passwall_luci passwall_packages passwall2; do
-        curl -fsL --max-time 20 "$SF_BASE/$feed/Packages.gz$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "/var/opkg-lists/$feed" 2>/dev/null || rm -f "/var/opkg-lists/$feed"
+        curl -fsL --max-time 20 "$SF_BASE/$feed/$SF_INDEX_FILE$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "/var/opkg-lists/$feed" 2>/dev/null || rm -f "/var/opkg-lists/$feed"
       done
       for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
         [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1 && PW_INDEX_FALLBACK=1
@@ -2017,41 +2023,53 @@ fi
 if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "apk" ] &&
    { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
   SF_OK=0
-  SF_BASE=$(cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null |
-    awk '/^[[:space:]]*https?:\/\/[^#]*sourceforge\.net\/project\/openwrt-passwall-build\// {
-      sub(/[?#].*$/, "", $1)
-      sub(/\/(passwall_luci|passwall_packages|passwall2)\/packages\.adb\/?$/, "", $1)
-      if ($1 !~ /\/(passwall_luci|passwall_packages|passwall2)\//) {print $1; exit}
-    }')
-  SF_BASE=${SF_BASE%/}
-  if [ -n "$SF_BASE" ]; then
-    for sf_feed in passwall_luci passwall_packages passwall2; do
-      sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
-        "$SF_BASE/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
-      if [ "$sf_magic" = "ADBd" ]; then
-        SF_OK=1
-        ok "更新模式：从现有 APK SourceForge source 恢复包源"
-        break
-      fi
-    done
+  # 25.12 正式版必须优先探测 releases/packages-25.12；跳过已配置的
+  # snapshots source，避免旧 source 的有效 ADB 索引遮蔽正式包线。
+  if [ "$PW_VER" != "25.12" ]; then
+    SF_BASE=$(cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null |
+      awk '/^[[:space:]]*https?:\/\/[^#]*sourceforge\.net\/project\/openwrt-passwall-build\// {
+        sub(/[?#].*$/, "", $1)
+        sub(/\/(passwall_luci|passwall_packages|passwall2)\/packages\.adb\/?$/, "", $1)
+        if ($1 !~ /\/(passwall_luci|passwall_packages|passwall2)\//) {print $1; exit}
+      }')
+    SF_BASE=${SF_BASE%/}
+    if [ -n "$SF_BASE" ]; then
+      for sf_feed in passwall_luci passwall_packages passwall2; do
+        sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
+          "$SF_BASE/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
+        if [ "$sf_magic" = "ADBd" ]; then
+          SF_OK=1
+          ok "更新模式：从现有 APK SourceForge source 恢复包源"
+          break
+        fi
+      done
+    fi
   fi
   # 已安装插件的 APK 更新模式不能只依赖本地 repositories：旧版脚本可能
   # 没有保存 SourceForge source，或保存的是单个 feed/带查询参数的 URL。
-  # 25.12 PassWall 官方 APK 源固定使用 snapshots/packages/<包架构>；
-  # 直接探测官方索引后恢复 SF_BASE，不改系统源文件。
+  # 25.12 正式版必须优先使用 releases/packages-25.12；不能只凭 ADBd
+  # 魔数判定，因为 snapshots 同样会返回有效 ADB 索引。
   if [ "$SF_OK" != "1" ]; then
     SF_BASE=""
+    # 更新模式不经过 probe_proxy_sources，按当前固件声明补齐包线。
+    SF_PW_VER="$PW_VER"
+    [ "$SF_PW_VER" = "unknown" ] && SF_PW_VER=$(printf '%s' "$OW_VER" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\|25\.12\)\..*/\1/p')
+    [ -z "$SF_PW_VER" ] && SF_PW_VER=$(printf '%s' "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\|25\.12\)\..*/\1/p')
+    case "$SF_PW_VER" in
+      25.12) SF_UPDATE_PATH="releases/packages-25.12/$SYS_ARCH" ;;
+      *) SF_UPDATE_PATH="snapshots/packages/$SYS_ARCH" ;;
+    esac
     for sf_prefix in \
       https://downloads.sourceforge.net/project/openwrt-passwall-build \
       https://master.dl.sourceforge.net/project/openwrt-passwall-build; do
-      sf_candidate="$sf_prefix/snapshots/packages/$SYS_ARCH"
+      sf_candidate="$sf_prefix/$SF_UPDATE_PATH"
       for sf_feed in passwall_luci passwall_packages passwall2; do
         sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
           "$sf_candidate/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
         if [ "$sf_magic" = "ADBd" ]; then
           SF_BASE="$sf_candidate"
           SF_OK=1
-          info "更新模式：恢复 SourceForge 官方 APK 源 (snapshots/$SYS_ARCH)"
+          info "更新模式：恢复 SourceForge 官方 APK 源 ($SF_UPDATE_PATH)"
           break 2
         fi
       done
