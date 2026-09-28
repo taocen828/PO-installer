@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.9 (修正 PassWall 最小化空间估算)
+# VERSION: 20260928.10 (修复旧 PassWall 源污染与未签名 APK 索引)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="9"
+VERSION_SEQ="10"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -331,11 +331,37 @@ APK_PW_INDEX_OK=0
 # 旧版曾把 25.x 源写成 packages-unknown，apk update 会在系统源校验阶段
 # 先访问这些坏索引，导致即使本次后面能探测到正确源，也提前进入 fallback。
 # 只删除本脚本管理的 SourceForge PassWall 行，保留其它 APK 源和用户配置。
+APK_REPO_BACKUP_DIR="/tmp/po-apk-repos.$$"
 cleanup_apk_passwall_feeds() {
   [ "$PKG_MGR" = "apk" ] || return 0
-  # APK 源必须保持原样，直到新 PassWall 源完成索引校验；调用方在事务前
-  # 负责原子备份/追加/失败恢复。这里禁止预先清理持久源文件。
-  return 0
+  # 旧版脚本留下的 PassWall 源会污染系统 apk update；先备份，再只移除
+  # 本脚本管理的 PassWall 行。任何后续失败都由 restore_apk_passwall_feeds 恢复。
+  mkdir -p "$APK_REPO_BACKUP_DIR" 2>/dev/null || return 1
+  local file tmp base
+  for file in /etc/apk/repositories /etc/apk/repositories.d/*.list; do
+    [ -f "$file" ] || continue
+    base=$(basename "$file")
+    cp -f "$file" "$APK_REPO_BACKUP_DIR/$base" 2>/dev/null || return 1
+    tmp="/tmp/$base.po-passwall-clean.$$"
+    grep -vE 'openwrt-passwall-build/(releases/packages-[^/]+|snapshots/packages/)|/(passwall_luci|passwall_packages|passwall2)/packages\.adb' "$file" > "$tmp" 2>/dev/null || true
+    cat "$tmp" > "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+  done
+}
+restore_apk_passwall_feeds() {
+  [ -d "$APK_REPO_BACKUP_DIR" ] || return 0
+  local backup base target
+  for backup in "$APK_REPO_BACKUP_DIR"/*; do
+    [ -f "$backup" ] || continue
+    base=$(basename "$backup")
+    case "$base" in
+      repositories) target="/etc/apk/repositories" ;;
+      *) target="/etc/apk/repositories.d/$base" ;;
+    esac
+    cat "$backup" > "$target" 2>/dev/null || true
+  done
+  info "已恢复原 APK 软件源"
+  rm -rf "$APK_REPO_BACKUP_DIR"
 }
 # 延迟到安装选择完成后执行：更新模式必须保留已有 SourceForge
 # PassWall 源，供后续恢复 SF_BASE；新装模式才清理旧版错误源。
@@ -1134,7 +1160,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
   cleanup_opkg_duplicate_feeds
 fi
 if [ "$PKG_MGR" = "apk" ] && [ "$SOURCE_UPDATE_ONLY" != "1" ]; then
-  cleanup_apk_passwall_feeds
+  cleanup_apk_passwall_feeds || { err "无法安全备份/清理 APK PassWall 源，停止"; exit 1; }
 fi
 
 # 新装才执行系统源/阿里云/官方源候选探测；更新模式完全跳过。
@@ -1453,7 +1479,7 @@ validate_apk_system_source() {
   local log=/tmp/po_system_apk_update.log
   apk update > "$log" 2>&1
   local rc=$?
-  if [ "$rc" != "0" ] || grep -qE 'ERROR|WARNING.*(architecture|not found|failed)|UNTRUST|No such' "$log" 2>/dev/null; then
+  if [ "$rc" != "0" ] || grep -qE 'ERROR|WARNING.*(architecture|not found|failed)|No such' "$log" 2>/dev/null; then
     err "APK 系统源更新失败或存在错误"
     grep -E 'ERROR|WARNING|UNTRUST|failed|not found|No such' "$log" 2>/dev/null || true
     rm -f "$log"
