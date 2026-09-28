@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.5 (修复 APK 本地包安装误用 --no-network)
+# VERSION: 20260928.6 (补齐 APK PassWall 用户态依赖源检测)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="5"
+VERSION_SEQ="6"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1456,13 +1456,27 @@ validate_apk_system_source() {
   fi
   cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null | awk '!/^#/ && NF {print $1}' | sort -u > /tmp/po_apk_source_urls
   validate_source_path_compatibility /tmp/po_apk_source_urls || { rm -f "$log" /tmp/po_apk_source_urls; return 1; }
-  for pkg in base-files libc luci-base; do
-    apk search --exact "$pkg" 2>/dev/null | grep -q "$pkg" || {
-      err "APK 索引缺少基础包: $pkg"
+  # 系统源“能更新”不等于包含 PassWall 所需的完整 userspace 包。
+  # 厂商 25.12 源常只带基础包，缺少 coreutils 拆分包/lyaml/ip-tiny，
+  # 后续本地 APK 事务就会报 no such package。缺少任一项时进入精确
+  # OpenWrt 25.12 release userspace fallback，而不是继续使用不完整源。
+  local required_pkg
+  for required_pkg in base-files libc luci-base; do
+    apk search --exact "$required_pkg" 2>/dev/null | grep -q "$required_pkg" || {
+      err "APK 索引缺少基础包: $required_pkg"
       rm -f "$log" /tmp/po_apk_source_urls
       return 1
     }
   done
+  if [ "$INSTALL_PW" = "1" ]; then
+    for required_pkg in ip-tiny coreutils coreutils-base64 coreutils-nohup coreutils-timeout lyaml; do
+      apk search --exact "$required_pkg" 2>/dev/null | grep -q "$required_pkg" || {
+        info "APK 系统源缺少 PassWall 依赖: $required_pkg，切换匹配的 OpenWrt userspace 源"
+        rm -f "$log" /tmp/po_apk_source_urls
+        return 1
+      }
+    done
+  fi
   rm -f "$log" /tmp/po_apk_source_urls
   return 0
 }
