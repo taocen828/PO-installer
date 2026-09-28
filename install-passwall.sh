@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260924.3 (明确每日版本序号规则)
+# VERSION: 20260928.2 (明确每日版本序号规则)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="4"
+VERSION_SEQ="2"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -224,9 +224,14 @@ fi
 # 用"能否运行"判断而非文件头检测（ELF 二进制/symlink 会误判）
 WGET_FIXED=0
 if ! wget_works; then
-  if [ -w /usr/bin ]; then
-    cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
-    cat > /usr/bin/wget << 'WGETEOF'
+  # 只有 curl 本身可执行且真实下载探针成功时，才允许覆盖 wget。
+  # 否则必须保留原文件，避免把不可用的 curl 包装器写入系统。
+  if curl_works && [ -w /usr/bin ]; then
+    wget_probe=/tmp/po-wget-probe.$$
+    if curl -fsSL --connect-timeout 8 --max-time 15 -o "$wget_probe" "https://openwrt.org/" >/dev/null 2>&1 && [ -s "$wget_probe" ]; then
+      rm -f "$wget_probe"
+      cp /usr/bin/wget /tmp/wget.bak 2>/dev/null
+      cat > /usr/bin/wget << 'WGETEOF'
 #!/bin/sh
 URL=""; OUT=""; OUT_DIR=""; TIMEOUT="60"
 while [ $# -gt 0 ]; do
@@ -253,8 +258,12 @@ WGETEOF
     chmod +x /usr/bin/wget
     WGET_FIXED=1
     ok "修复 wget（不可用，替换为 curl 包装器）"
+    else
+      rm -f "$wget_probe"
+      info "curl 可执行但下载探针失败，不覆盖 wget"
+    fi
   else
-    info "wget 不可用且 /usr/bin 只读，跳过（后续使用 curl）"
+    info "wget 不可用且 curl 不可用/不可写，跳过（停止网络安装）"
   fi
 fi
 PKG_MGR=""
@@ -315,6 +324,8 @@ fi
 # APK 兼容性：不使用 --force-reinstall
 # 不同 OpenWrt/apk-tools 版本对该参数支持不一致，普通 add/upgrade 已足够。
 APK_FORCE_REINSTALL_OPT=""
+# APK PassWall 源校验状态：默认失败闭锁，只有本次明确验证通过才允许事务。
+APK_PW_INDEX_OK=0
 
 # 清理旧版脚本遗留的 PassWall APK 源。
 # 旧版曾把 25.x 源写成 packages-unknown，apk update 会在系统源校验阶段
@@ -1839,7 +1850,15 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       else
         apk update >/tmp/po_apk_update.log 2>&1 || true
       fi
+      # 这里必须把“索引可下载”与“索引可用”严格区分：
+      # apk update 即使返回警告/部分成功，也可能留下未签名、残缺或旧缓存。
+      # 这种状态禁止进入任何 PassWall APK 事务，避免 apk 为满足 world
+      # 约束而 Purge/Reinstall 无关包。
       APK_PW_INDEX_OK=1
+      if grep -qE 'UNTRUST|No such file|not found|ERROR|failed|unable|cannot|signature' /tmp/po_apk_update.log 2>/dev/null; then
+        APK_PW_INDEX_OK=0
+        err "SourceForge APK 索引校验失败，禁止进入 PassWall 安装事务"
+      fi
       if [ "$INSTALL_PW" = "1" ] && ! apk list luci-app-passwall 2>/dev/null | grep -v WARNING | grep -q '^luci-app-passwall-'; then
         APK_PW_INDEX_OK=0
         err "SourceForge APK 源缺少 luci-app-passwall"
@@ -1848,7 +1867,14 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
         APK_PW_INDEX_OK=0
         err "SourceForge APK 源缺少 luci-app-passwall2"
       fi
-      [ "$APK_PW_INDEX_OK" = "1" ] && ok "源配置完成 (SourceForge)" || { err "PassWall APK 源索引刷新失败或构建残缺"; grep -E "ERROR|WARNING|failed|unable|not found|permission|cannot" /tmp/po_apk_update.log 2>/dev/null || true; }
+      if [ "$APK_PW_INDEX_OK" = "1" ]; then
+        ok "源配置完成 (SourceForge)"
+      else
+        SF_OK=0
+        SF_BASE=""
+        err "PassWall APK 源索引刷新失败或构建残缺，已禁用该源"
+        grep -E "ERROR|WARNING|UNTRUST|failed|unable|not found|permission|cannot" /tmp/po_apk_update.log 2>/dev/null || true
+      fi
     else
       err "PassWall 源不可用：SourceForge 无法连接"
     fi
@@ -2323,14 +2349,14 @@ apk_optional_core() {
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
-    apk add --upgrade --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
+    apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
     apk_installed_exact "$pkg" "$want_ver" && return 0
     # 不再回退 apk upgrade --available：OpenWrt APK 会为满足 world 约束顺手升级大量 LuCI/系统包，
     # 用户只想装一个可选组件时不应触发全系统事务。
     return $rc
   fi
-  apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg" >> "$log" 2>&1
+  apk add --upgrade --latest --allow-untrusted "$pkg" >> "$log" 2>&1
 }
 
 # 包安装/升级
@@ -2390,6 +2416,13 @@ opkg_preflight_installable() {
   rm -f "$log"
   return 0
 }
+apk_file_valid() {
+  local file="$1" magic
+  [ -s "$file" ] || return 1
+  magic=$(dd if="$file" bs=1 count=4 2>/dev/null)
+  [ "$magic" = "ADBd" ]
+}
+
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
@@ -2566,10 +2599,10 @@ apk_install() {
   if [ -n "$url" ]; then
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
     info "下载 $pkg (带进度)..."
-    if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
+    if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url" && apk_file_valid "/tmp/pkg_$pkg.apk"; then
       # SourceForge APK 必须实际替换二进制；apk 的 OK 只表示事务/索引同步，
       # 不代表目标包已经安装。安装输出保持实时显示，失败时保留旧版本。
-      apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world $APK_FORCE_REINSTALL_OPT --no-network "/tmp/pkg_$pkg.apk" 2>&1
+      apk add --upgrade --allow-untrusted --force-non-repository $APK_FORCE_REINSTALL_OPT --no-network "/tmp/pkg_$pkg.apk" 2>&1
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
       if [ -n "$repo_ver" ] && apk_optional_binary_matches "$pkg" "$repo_ver"; then
@@ -2622,7 +2655,7 @@ pkg_update() {
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
-          apk add --upgrade --latest --allow-untrusted --force-broken-world "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
+          apk add --upgrade --latest --allow-untrusted "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
           rc=$?
           rm -f "/tmp/pkg_$pkg.apk"
         else
@@ -2638,7 +2671,7 @@ pkg_update() {
         rc=$?
       fi
     else
-      apk add --upgrade --latest --allow-untrusted --force-broken-world "$pkg" > "$log" 2>&1
+      apk add --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
       rc=$?
     fi
     # apk upgrade --available 可能为满足 world 约束安装/卸载无关包；如果目标包没实际变更，避免刷出误导性 Purging/Installing 噪音。
@@ -3159,7 +3192,7 @@ install_passwall2_release() {
   done
   [ -s "$pkgfile" ] || { err "PassWall2 官方 Release 下载失败"; return 1; }
   if [ "$ext" = "apk" ]; then
-    apk add --upgrade --allow-untrusted --force-non-repository --force-broken-world "$pkgfile" 2>&1
+    apk add --upgrade --allow-untrusted --force-non-repository "$pkgfile" 2>&1
     rc=$?
   else
     # 必须实时显示 OPKG 的依赖/格式错误；不能只写临时日志再过滤，
@@ -3186,11 +3219,13 @@ if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
     # APK 的 SourceForge 索引探测只用于提示，不能阻断实际安装：
     # 部分 apk-tools/代理环境下 apk update 不落本地索引，但直链仓库仍可正常解析。
-    if [ "$PKG_MGR" = "apk" ] && [ -n "$SF_BASE" ]; then
-      info "使用 SourceForge APK 官方包源安装 PassWall（跳过易失的索引状态判断）"
+    if [ "$PKG_MGR" = "apk" ] && [ "$SF_OK" = "1" ] && [ "$APK_PW_INDEX_OK" = "1" ] && [ -n "$SF_BASE" ]; then
+      info "使用 SourceForge APK 官方包源安装 PassWall（已通过索引与目标包校验）"
       PASSWALL_PACKAGE_FALLBACK_OK=1
       PASSWALL_INSTALL_OK=1
       pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
+    elif [ "$PKG_MGR" = "apk" ]; then
+      err "PassWall APK 源索引/主包校验未通过，禁止回退到无版本 apk add，未执行安装事务"
     elif [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
       info "优先使用 SourceForge 官方 PassWall 用户态主包"
       PASSWALL_PACKAGE_FALLBACK_OK=1
@@ -3236,8 +3271,10 @@ if [ "$INSTALL_PW2" = "1" ]; then
       install_passwall2_release "ipk" && PASSWALL2_INSTALL_OK=1
     fi
   else
-    if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ] && pkginstall "luci-app-passwall2" "PassWall2"; then
+    if [ "$PKG_MGR" = "apk" ] && [ "$SF_OK" = "1" ] && [ "$APK_PW_INDEX_OK" = "1" ] && [ -n "$SF_BASE" ] && pkginstall "luci-app-passwall2" "PassWall2"; then
       PASSWALL2_INSTALL_OK=1
+    elif [ "$PKG_MGR" = "apk" ]; then
+      err "PassWall2 APK 源索引/主包校验未通过，禁止回退到无版本 apk add"
     else
       info "PassWall2 SourceForge 主包不可用，回退官方 Release APK..."
       install_passwall2_release "apk" && PASSWALL2_INSTALL_OK=1
