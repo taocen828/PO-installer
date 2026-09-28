@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.11 (允许第三方 APK 源未签名索引)
+# VERSION: 20260928.12 (修复 SourceForge APK 下载参数与签名警告误判)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="11"
+VERSION_SEQ="12"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1906,7 +1906,9 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       cp -f "$APK_REPO_FILE" "$APK_REPO_BACKUP" 2>/dev/null || true
       sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' "$APK_REPO_FILE" 2>/dev/null || true
       for feed in passwall_luci passwall_packages passwall2; do
-        echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
+        # SourceForge 的 packages.adb 必须带 ?download，否则 apk/wget 可能拿到
+        # SourceForge HTML 下载页而不是二进制索引。
+        echo "$SF_BASE/$feed/packages.adb?download" >> "$APK_REPO_FILE"
       done
       APK_UPDATE_RC=0
       if [ -n "$PROXY_URL" ]; then
@@ -1920,7 +1922,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       # 这种状态禁止进入任何 PassWall APK 事务，避免 apk 为满足 world
       # 约束而 Purge/Reinstall 无关包。
       APK_PW_INDEX_OK=1
-      if [ "$APK_UPDATE_RC" != "0" ]; then
+      if [ "$APK_UPDATE_RC" != "0" ] && ! grep -qE 'UNTRUSTED|UNTRUSTED signature' /tmp/po_apk_update.log 2>/dev/null; then
         APK_PW_INDEX_OK=0
         err "SourceForge APK 索引刷新失败 (rc=$APK_UPDATE_RC)，保留原软件源，禁止进入安装事务"
         if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
@@ -1928,7 +1930,8 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
           info "已恢复原 APK 软件源：$APK_REPO_FILE"
         fi
       fi
-      if grep -qE 'UNTRUST|No such file|not found|ERROR|failed|unable|cannot|signature' /tmp/po_apk_update.log 2>/dev/null; then
+      # APK 第三方索引允许未签名；不能把 UNTRUSTED 警告当作索引失败。
+      if grep -qE 'No such file|not found|ERROR|failed|unable|cannot|signature check failed|unexpected end' /tmp/po_apk_update.log 2>/dev/null; then
         APK_PW_INDEX_OK=0
         err "SourceForge APK 索引校验失败，保留原软件源，禁止进入安装事务"
         if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
