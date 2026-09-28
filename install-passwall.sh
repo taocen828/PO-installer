@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.2 (明确每日版本序号规则)
+# VERSION: 20260928.3 (明确每日版本序号规则)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
@@ -1843,18 +1843,22 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       for feed in passwall_luci passwall_packages passwall2; do
         echo "$SF_BASE/$feed/packages.adb" >> "$APK_REPO_FILE"
       done
-      # apk 进程不一定继承 curl 的代理配置；显式传递代理，并保留日志，避免把代理可用误判为源不可用。
+      APK_UPDATE_RC=0
       if [ -n "$PROXY_URL" ]; then
         https_proxy="$PROXY_URL" http_proxy="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" \
-          apk update >/tmp/po_apk_update.log 2>&1 || true
+          apk update >/tmp/po_apk_update.log 2>&1 || APK_UPDATE_RC=$?
       else
-        apk update >/tmp/po_apk_update.log 2>&1 || true
+        apk update >/tmp/po_apk_update.log 2>&1 || APK_UPDATE_RC=$?
       fi
       # 这里必须把“索引可下载”与“索引可用”严格区分：
       # apk update 即使返回警告/部分成功，也可能留下未签名、残缺或旧缓存。
       # 这种状态禁止进入任何 PassWall APK 事务，避免 apk 为满足 world
       # 约束而 Purge/Reinstall 无关包。
       APK_PW_INDEX_OK=1
+      if [ "$APK_UPDATE_RC" != "0" ]; then
+        APK_PW_INDEX_OK=0
+        err "SourceForge APK 索引刷新失败 (rc=$APK_UPDATE_RC)，禁止进入 PassWall 安装事务"
+      fi
       if grep -qE 'UNTRUST|No such file|not found|ERROR|failed|unable|cannot|signature' /tmp/po_apk_update.log 2>/dev/null; then
         APK_PW_INDEX_OK=0
         err "SourceForge APK 索引校验失败，禁止进入 PassWall 安装事务"
