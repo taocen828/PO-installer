@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260928.14 (OpenClash 脚本列表归入 OpenClash 菜单)
+# VERSION: 20260929.1 (集成官方 daed 最新版)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="14"
+VERSION_SEQ="1"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -932,23 +932,25 @@ if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt 50 ]; then
   LOW_SPACE_MODE=1
   info "检测到 Overlay 可用空间 ${OVERLAY_SPACE}MB（低于 50MB）"
 fi
+INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0
+PASSWALL_MINIMAL=0
+DAED_INSTALL_OK=0
 echo "请选择要安装的软件："
 echo ""
 echo "  1) PassWall (经典版，推荐)"
-if [ "$LOW_SPACE_MODE" = "1" ]; then
-  echo "  10) PassWall 最小化安装（仅主程序+必需代理内核）"
-fi
-echo "  2) PassWall2 (新版，可与 PassWall 共存)"
-echo "  3) OpenClash (Clash 内核)"
-echo "  4) SSR Plus (ShadowSocksR Plus+)"
-echo "  5) AdGuardHome (DNS 广告过滤)"
-echo "  6) iStore 商店"
-echo "  7) 全部安装"
-echo "  8) 卸载插件"
-echo "  9) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
+echo "  2) PassWall 最小化安装（仅主程序+必需代理内核）"
+echo "  3) PassWall2 (新版，可与 PassWall 共存)"
+echo "  4) DAED (独立代理内核/面板)"
+echo "  5) OpenClash (Clash 内核)"
+echo "  6) SSR Plus (ShadowSocksR Plus+)"
+echo "  7) AdGuardHome (DNS 广告过滤)"
+echo "  8) iStore 商店"
+echo "  9) 全部安装"
+echo "  10) 卸载插件"
+echo "  11) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
 echo "  0) 退出"
 echo ""
-printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10): "
+printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -956,32 +958,26 @@ while :; do
     MAIN_CHOICE="1"
     break
   fi
-  # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
-    0|1|2|3|4|5|6|7|8|9|10) break ;;
-    10) [ "$LOW_SPACE_MODE" = "1" ] && break || printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
-    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9): " ;;
+    0|1|2|3|4|5|6|7|8|9|10|11) break ;;
+    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9/10/11): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
   0)
-    # 仅删除 /tmp 中的临时安装脚本，绝不删除仓库或其它位置的脚本。
     EXIT_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
     case "$EXIT_SCRIPT" in
-      /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
-        rm -f "$EXIT_SCRIPT" 2>/dev/null || true
-        ;;
-      *)
-        info "已退出（保留当前脚本）"
-        ;;
+      /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh) rm -f "$EXIT_SCRIPT" 2>/dev/null || true ;;
+      *) info "已退出（保留当前脚本）" ;;
     esac
     exit 0
     ;;
   1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
-  10) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_MINIMAL=1; ok "选择: PassWall 最小化安装" ;;
-  2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
-  3)
+  2) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_MINIMAL=1; ok "选择: PassWall 最小化安装" ;;
+  3) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
+  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: DAED" ;;
+  5)
     echo ""
     echo "OpenClash："
     echo "  1) 安装 OpenClash"
@@ -1006,11 +1002,11 @@ case "$MAIN_CHOICE" in
     esac
     INSTALL_PW=0; INSTALL_PW2=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0
     ;;
-  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
-  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
-  6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
-  7) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "选择: 全部安装" ;;
-  8)
+  6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
+  7) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
+  8) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
+  9) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "选择: 全部安装" ;;
+  10)
     echo ""
     echo "请选择要卸载的软件："
     echo ""
@@ -1045,7 +1041,7 @@ case "$MAIN_CHOICE" in
     esac
     FORCE_REINSTALL=0; UNINSTALL_ONLY=1
     ;;
-  9)
+  11)
     ok "选择: 修复路由器自身联网"
     repair_router_self_network
     exit $?
@@ -3805,11 +3801,22 @@ install_openclash_dependencies() {
   return 0
 }
 
-# daed：作为 OpenClash 旁边的独立 Web 面板安装，不写入 OpenClash 目录。
+# daed 官方发行包同时包含 dae-wing 后端、GraphQL API 和 Web UI；不安装独立 dae。
+get_daed_release_json() {
+  local api="https://api.github.com/repos/daeuniverse/daed/releases/latest" u json
+  for u in $(gh_candidates "$api"); do
+    json=$(curl -sL --max-time 30 "$u" 2>/dev/null) || continue
+    echo "$json" | grep -q '"tag_name"' || continue
+    echo "$json"
+    return 0
+  done
+  return 1
+}
+
 install_daed() {
   [ "${INSTALL_DAED:-0}" = "1" ] || return 0
-  local daed_arch daed_asset daed_url zip=/tmp/daed.zip root bin service
-  hdr "daed 独立 Web 面板安装"
+  local daed_arch daed_asset daed_url daed_tag json zip=/tmp/daed.zip root bin service
+  hdr "官方 daed 独立 Web 面板安装"
   case "$(uname -m 2>/dev/null)" in
     aarch64) daed_arch="arm64" ;;
     mipsel*) daed_arch="mips32le" ;;
@@ -3819,12 +3826,15 @@ install_daed() {
     riscv64) daed_arch="riscv64" ;;
     *) err "daed 不支持当前 CPU 架构: $(uname -m 2>/dev/null)"; return 1 ;;
   esac
+  command -v unzip >/dev/null 2>&1 || { err "缺少 unzip，无法解压官方 daed 发布包"; return 1; }
+  json=$(get_daed_release_json) || { err "无法获取 daed 官方 Release 信息"; return 1; }
+  daed_tag=$(printf '%s\n' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+' | head -1 | sed 's/.*"//')
   daed_asset="daed-linux-$daed_arch.zip"
-  daed_url="https://github.com/daeuniverse/daed/releases/download/v2.1.1/$daed_asset"
-  command -v unzip >/dev/null 2>&1 || { err "缺少 unzip，无法解压 daed 官方发布包"; return 1; }
+  daed_url=$(printf '%s\n' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+' | sed 's/.*"//' | grep "/$daed_asset$" | head -1)
+  [ -n "$daed_tag" ] && [ -n "$daed_url" ] || { err "官方 daed Release 缺少 $daed_asset"; return 1; }
   rm -f "$zip"
-  info "下载 daed v2.1.1 ($daed_arch)..."
-  curl -fL --connect-timeout 10 --max-time 180 -o "$zip" "$daed_url" || { err "daed 下载失败: $daed_url"; rm -f "$zip"; return 1; }
+  info "下载官方 daed $daed_tag ($daed_arch)..."
+  curl -fL --connect-timeout 10 --max-time 300 -o "$zip" "$daed_url" || { err "daed 下载失败: $daed_url"; rm -f "$zip"; return 1; }
   root=$(unzip -Z1 "$zip" 2>/dev/null | sed -n 's#^\([^/]*/\)daed-linux-[^/]*$#\1#p' | head -1)
   bin=$(unzip -Z1 "$zip" 2>/dev/null | grep "/daed-linux-$daed_arch$" | head -1)
   [ -n "$root" ] && [ -n "$bin" ] || { err "daed 压缩包内容无效"; rm -f "$zip"; return 1; }
@@ -3855,11 +3865,11 @@ DAEDINIT
   chmod 755 "$service"
   "$service" enable >/dev/null 2>&1 || true
   "$service" restart >/dev/null 2>&1 || { err "daed 服务启动失败，请查看 logread -e daed"; return 1; }
-  ok "daed 已安装并启动: http://路由器IP:2023/"
-  info "daed 使用 /etc/daed；它是独立服务，不属于 OpenClash 目录。不要与 dae 服务同时运行。"
+  /usr/bin/daed --version 2>/dev/null | grep -q "$daed_tag" || { err "daed 版本验证失败"; return 1; }
+  ok "官方 daed $daed_tag 已安装并启动: http://路由器IP:2023/"
+  info "官方 daed 自带 dae-wing 后端、GraphQL API 和 Web UI，使用 /etc/daed。"
   return 0
 }
-
 opkg_prepare_local_package_arches() {
   [ "$PKG_MGR" = "opkg" ] || return 0
   local changed=0
