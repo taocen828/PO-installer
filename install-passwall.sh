@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260929.5 (明确区分 OPKG 预检输出与实际安装结果)
+# VERSION: 20260929.7 (修正 daed 监听端点检测)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="5"
+VERSION_SEQ="7"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -3843,6 +3843,20 @@ DAEDINIT
   chmod 755 "$service"
   "$service" enable >/dev/null 2>&1 || true
   "$service" restart >/dev/null 2>&1 || { err "daed 服务启动失败，请查看 logread -e daed"; return 1; }
+  # procd 启动是异步的；等待进程和 2023 监听端口实际稳定，避免启动后随后因 veth/netns 失败仍误报成功。
+  local daed_ready=0 i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if pidof daed >/dev/null 2>&1 && (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -qE '[^[:space:]]*:2023([[:space:]]|$)'; then
+      daed_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$daed_ready" != "1" ]; then
+    err "daed 服务未能稳定启动或未监听 2023，请查看: logread -e daed"
+    "$service" stop >/dev/null 2>&1 || true
+    return 1
+  fi
   /usr/bin/daed --version 2>/dev/null | grep -q "$daed_tag" || { err "daed 版本验证失败"; return 1; }
   ok "官方 daed $daed_tag 已安装并启动: http://路由器IP:2023/"
   info "官方 daed 自带 dae-wing 后端、GraphQL API 和 Web UI，使用 /etc/daed。"
