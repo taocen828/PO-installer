@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260929.7 (修正 daed 监听端点检测)
+# VERSION: 20260929.8 (安装前检测 daed veth/netns 能力)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="7"
+VERSION_SEQ="8"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -3805,6 +3805,17 @@ install_daed() {
     *) err "daed 不支持当前 CPU 架构: $(uname -m 2>/dev/null)"; return 1 ;;
   esac
   command -v unzip >/dev/null 2>&1 || { err "缺少 unzip，无法解压官方 daed 发布包"; return 1; }
+  # daed 运行 dae 需要内核支持 veth 与 network namespace；提前做真实创建/删除测试，
+  # 避免下载并启动后才因 operation not supported 进入 procd 重启循环。
+  if command -v modprobe >/dev/null 2>&1; then
+    modprobe veth >/dev/null 2>&1 || true
+  fi
+  if ! command -v ip >/dev/null 2>&1 || ! ip link add "po-daed-veth-$$" type veth peer name "po-daed-veth-peer-$$" >/dev/null 2>&1; then
+    err "当前内核不支持 daed 所需的 veth 网络设备，已停止安装"
+    info "请检查 CONFIG_VETH、匹配当前内核的 kmod-veth，以及虚拟化环境是否允许创建 veth"
+    return 1
+  fi
+  ip link del "po-daed-veth-$$" >/dev/null 2>&1 || true
   json=$(get_daed_release_json) || { err "无法获取 daed 官方 Release 信息"; return 1; }
   daed_tag=$(printf '%s\n' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+' | head -1 | sed 's/.*"//')
   daed_asset="daed-linux-$daed_arch.zip"
