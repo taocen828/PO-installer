@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260929.2 (DAED 独立菜单，不挂在 OpenClash 下)
+# VERSION: 20260929.3 (空间不足改为警告并继续安装)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="2"
+VERSION_SEQ="3"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -16,6 +16,7 @@ VERSION=$(printf '%s.%s' "$VERSION_DATE" "$VERSION_SEQ")
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
 # 检查 URL 可达性: 优先 curl(Range 只取1KB省流量), curl 不可用回退 wget
@@ -1118,12 +1119,10 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
   ok "Overlay 可用: ${OVERLAY_SPACE}MB"
   info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
-  # 安全硬闭锁：空间不足时禁止进入 apk/opkg 事务，避免包管理器为满足
-  # world 约束批量 Purge/替换无关软件包。
+  # 估算值仅作提示，不作为安装门槛；实际写入失败时由包管理器错误处理终止。
   if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt "$REQUIRED_SPACE_MB" ]; then
-    err "可用空间不足：${OVERLAY_SPACE}MB < 预计最低 ${REQUIRED_SPACE_MB}MB"
-    err "已停止；未执行安装/卸载事务"
-    exit 1
+    warn "可用空间可能不足：${OVERLAY_SPACE}MB < 预计最低 ${REQUIRED_SPACE_MB}MB"
+    warn "将继续安装；若实际写入失败，将按错误原因终止"
   fi
 fi
 
