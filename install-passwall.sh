@@ -2622,23 +2622,24 @@ apk_install() {
           if [ "$installed_main" = "1" ]; then
             info "已安装插件跳过本地依赖预检，直接覆盖安装匹配架构 IPK"
           elif ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
+            # 预检失败必须立即返回，禁止继续执行真实安装；预检函数已保留完整日志。
             rc=2
+            rm -f "/tmp/pkg_$pkg.ipk" "$log"
+            return 2
           fi
-          if [ "$installed_main" = "1" ] || [ "$rc" != "2" ]; then
-            # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
-            # 直链校验下载，安装时只替换当前包，不重装已有依赖。
-            # 主包不得用 --force-depends：它会把缺失/ABI 不匹配依赖伪装成成功。
-            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
-            rc=$?
-            cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
-            # opkg 可能在主包已成功写入后，因附带依赖候选报非零。
-            # 以实际安装数据库中的目标版本为准，避免误报升级失败。
-            if [ "$installed_main" = "1" ] && [ -n "$repo_ver" ] && [ "$(get_version "$pkg")" = "$repo_ver" ]; then
-              rc=0
-            fi
-            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
-            grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
+          # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
+          # 直链校验下载，安装时只替换当前包，不重装已有依赖。
+          # 主包不得用 --force-depends：它会把缺失/ABI 不匹配依赖伪装成成功。
+          opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
+          rc=$?
+          cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
+          # opkg 可能在主包已成功写入后，因附带依赖候选报非零。
+          # 以实际安装数据库中的目标版本为准，避免误报升级失败。
+          if [ "$installed_main" = "1" ] && [ -n "$repo_ver" ] && [ "$(get_version "$pkg")" = "$repo_ver" ]; then
+            rc=0
           fi
+          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
+          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           report_install_space_error "$pkg" "$log" "$rc" || true
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
         else
