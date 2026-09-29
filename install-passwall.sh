@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260929.4 (修复 OPKG 预检失败后仍执行安装)
+# VERSION: 20260929.5 (明确区分 OPKG 预检输出与实际安装结果)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="4"
+VERSION_SEQ="5"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -3084,7 +3084,8 @@ pkginstall() {
     if verify_package_installed "$pkg"; then
       ok "$desc $(get_version "$pkg") ✓"
     else
-      err "$desc 安装失败（包已登记但文件未落盘）"
+      err "$desc 安装结果校验失败：包管理器状态已登记，但目标文件未确认落盘";
+      [ "$PKG_MGR" = "opkg" ] && info "完整 OPKG 预检日志：/tmp/po-last-opkg-preflight.log"
       return 1
     fi
   fi
@@ -3138,7 +3139,8 @@ pkgupgrade() {
     if verify_package_installed "$pkg"; then
       ok "$desc $(get_version "$pkg") ✓"
     else
-      err "$desc 安装失败（包已登记但文件未落盘）"
+      err "$desc 安装结果校验失败：包管理器状态已登记，但目标文件未确认落盘";
+      [ "$PKG_MGR" = "opkg" ] && info "完整 OPKG 预检日志：/tmp/po-last-opkg-preflight.log"
       return 1
     fi
   fi
