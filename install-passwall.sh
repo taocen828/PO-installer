@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.2 (修复 APK 更新模式索引校验状态)
+# VERSION: 20261001.3 (修复 APK world 哈希约束升级)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="2"
+VERSION_SEQ="3"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2455,6 +2455,15 @@ apk_add_repo_exact() {
   if [ -n "$want_ver" ]; then
     apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
+    apk_installed_exact "$pkg" "$want_ver" && return 0
+    # OpenWrt 25.12 的 APK world 可能含有 sing-box 的哈希约束。
+    # 精确升级主包时若仅因 breaks: world[...] 被拒绝，允许 APK
+    # 重算该事务的 world；其它错误仍然原样失败，绝不盲目 force。
+    if [ "$rc" != "0" ] && grep -q 'breaks: world\[' "$log" 2>/dev/null; then
+      info "$pkg 精确升级受到 APK world 哈希约束，重算本次事务..."
+      apk add --upgrade --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
+      rc=$?
+    fi
     apk_installed_exact "$pkg" "$want_ver" && return 0
     # 不再回退 apk upgrade --available：OpenWrt APK 会为满足 world 约束顺手升级大量 LuCI/系统包，
     # 用户只想装一个可选组件时不应触发全系统事务。
