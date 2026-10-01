@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.6 (修复 APK world 临时包与内容哈希预检)
+# VERSION: 20261001.7 (修复 APK 缓存索引导致的 ADB integrity error)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="6"
+VERSION_SEQ="7"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2506,7 +2506,7 @@ apk_repair_stale_hash_world() {
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
-    apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
+    apk add --no-cache --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
     apk_installed_exact "$pkg" "$want_ver" && return 0
     apk_installed_exact "$pkg" "$want_ver" && return 0
