@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.3 (修复 APK world 哈希约束升级)
+# VERSION: 20261001.4 (精确处理 APK sing-box 内容哈希约束)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2450,21 +2450,50 @@ apk_optional_core() {
   return 1
 }
 
+# APK 从本地文件安装的包会在 /etc/apk/world 写入内容哈希约束，例如
+# sing-box><Q1Xf...=。该约束不是普通版本约束，SourceForge 新版依赖
+# 无法替换它；--force-broken-world 还可能清理无关插件，因此只允许
+# 针对日志明确指出的 sing-box 哈希行做最小化、可回滚的处理。
+apk_retry_without_hash_constraint() {
+  local pkg="$1" want_ver="$2" log="$3" backup="/tmp/apk-world.$$.bak" rc=1
+  [ -f /etc/apk/world ] || return 1
+  grep -q "breaks: world\\[sing-box><" "$log" 2>/dev/null || return 1
+  cp -f /etc/apk/world "$backup" 2>/dev/null || return 1
+  # 只删除 sing-box 的内容哈希行；保留其它 world 约束和注释。
+  awk '!/^sing-box><[^[:space:]]+$/ {print}' /etc/apk/world > "/tmp/apk-world.$$" || {
+    cp -f "$backup" /etc/apk/world 2>/dev/null || true
+    rm -f "$backup" "/tmp/apk-world.$$"
+    return 1
+  }
+  cat "/tmp/apk-world.$$" > /etc/apk/world || {
+    cp -f "$backup" /etc/apk/world 2>/dev/null || true
+    rm -f "$backup" "/tmp/apk-world.$$"
+    return 1
+  }
+  info "移除 sing-box 旧内容哈希约束后重试 $pkg（原 world 已备份）"
+  apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
+  rc=$?
+  if [ "$rc" = "0" ] && apk_installed_exact "$pkg" "$want_ver"; then
+    rm -f "$backup" "/tmp/apk-world.$$"
+    return 0
+  fi
+  cp -f "$backup" /etc/apk/world 2>/dev/null || true
+  rm -f "$backup" "/tmp/apk-world.$$"
+  return "$rc"
+}
+
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
     apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
     apk_installed_exact "$pkg" "$want_ver" && return 0
-    # OpenWrt 25.12 的 APK world 可能含有 sing-box 的哈希约束。
-    # 精确升级主包时若仅因 breaks: world[...] 被拒绝，允许 APK
-    # 重算该事务的 world；其它错误仍然原样失败，绝不盲目 force。
-    if [ "$rc" != "0" ] && grep -q 'breaks: world\[' "$log" 2>/dev/null; then
-      info "$pkg 精确升级受到 APK world 哈希约束，重算本次事务..."
-      apk add --upgrade --allow-untrusted --force-broken-world "$pkg=$want_ver" >> "$log" 2>&1
-      rc=$?
-    fi
     apk_installed_exact "$pkg" "$want_ver" && return 0
+    # 不使用 --force-broken-world：它可能为解决 world 冲突清理无关插件。
+    # 仅移除日志明确对应的 sing-box 内容哈希约束后重试。
+    if [ "$rc" != "0" ] && apk_retry_without_hash_constraint "$pkg" "$want_ver" "$log"; then
+      return 0
+    fi
     # 不再回退 apk upgrade --available：OpenWrt APK 会为满足 world 约束顺手升级大量 LuCI/系统包，
     # 用户只想装一个可选组件时不应触发全系统事务。
     return $rc
