@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.5 (兼容 APK 25.12 simulate 预检参数)
+# VERSION: 20261001.6 (修复 APK world 临时包与内容哈希预检)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="5"
+VERSION_SEQ="6"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2482,6 +2482,27 @@ apk_retry_without_hash_constraint() {
   return "$rc"
 }
 
+apk_repair_stale_hash_world() {
+  local log="$1" backup="/tmp/apk-world.$$.preflight.bak" tmp="/tmp/apk-world.$$.preflight" rc=1
+  [ -f /etc/apk/world ] || return 1
+  # 只处理 apk 明确报告的内容哈希约束，以及临时本地 APK 路径约束；
+  # 普通包名=版本约束全部保留。
+  grep -qE 'breaks: world\[[^]]+><[^]]+\]|required by: world\[/tmp/[^]]+\.apk\]' "$log" 2>/dev/null || return 1
+  cp -f /etc/apk/world "$backup" 2>/dev/null || return 1
+  awk '!/^[^#[:space:]][^[:space:]]*><[^[:space:]]+$/ && !/^\/tmp\/[^[:space:]]+\.apk$/ {print}' /etc/apk/world > "$tmp" || { rm -f "$backup" "$tmp"; return 1; }
+  cat "$tmp" > /etc/apk/world || { cp -f "$backup" /etc/apk/world 2>/dev/null || true; rm -f "$backup" "$tmp"; return 1; }
+  info "检测到 APK 临时包/内容哈希约束，已临时清理后重新预检"
+  apk add --simulate --upgrade --latest --allow-untrusted "$2" > "$log" 2>&1
+  rc=$?
+  if [ "$rc" = "0" ] && ! grep -qE 'breaks: world\[[^]]+><|required by: world\[/tmp/' "$log" 2>/dev/null; then
+    rm -f "$backup" "$tmp"
+    return 0
+  fi
+  cp -f "$backup" /etc/apk/world 2>/dev/null || true
+  rm -f "$backup" "$tmp"
+  return 1
+}
+
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
@@ -2572,8 +2593,11 @@ apk_preflight_safe() {
   # 本身就是只读预检，不能把兼容性参数错误当作依赖失败。
   apk add --simulate --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
   rc=$?
+  if [ "$rc" != "0" ] && apk_repair_stale_hash_world "$log" "$pkg"; then
+    rm -f "$log"
+    return 0
+  fi
   if [ "$rc" != "0" ]; then
-    err "APK 只读依赖预检失败：$pkg"
     grep -E "ERROR|WARNING|unable|cannot|breaks|conflict|not found|No space|required by" "$log" 2>/dev/null || cat "$log"
     rm -f "$log"
     return 1
