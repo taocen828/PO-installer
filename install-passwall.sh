@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.7 (修复 APK 缓存索引导致的 ADB integrity error)
+# VERSION: 20261001.8 (APK 更新模式允许本地索引抗 SourceForge CDN 超时)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="7"
+VERSION_SEQ="8"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2116,6 +2116,12 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "apk" ] &&
           break
         fi
       done
+      # SourceForge CDN 节点临时超时时，不能把已配置且已有本地 APK
+      # 索引的插件源判定为不存在；apk policy 可从本地索引确认包源。
+      if [ "$SF_OK" != "1" ] && apk policy luci-app-passwall 2>/dev/null | grep -qE '^[[:space:]]+[0-9]'; then
+        SF_OK=1
+        info "更新模式：SourceForge CDN 暂时不可达，使用本地 APK 索引继续"
+      fi
     fi
   fi
   # 已安装插件的 APK 更新模式不能只依赖本地 repositories：旧版脚本可能
