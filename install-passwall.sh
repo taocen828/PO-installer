@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20260929.8 (安装前检测 daed veth/netns 能力)
+# VERSION: 20261001.1 (保留 OPKG 原系统源并修复管道执行)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="8"
+VERSION_SEQ="1"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -127,15 +127,18 @@ repair_router_self_network() {
   return 1
 }
 
-# 管道模式: stdin 不是 TTY, 且 $0 为 sh/ash/bash/dash/-sh/"" 时说明被管道/heredoc 传入，
-# 此时交互式 read 不可用, 先保存到 /tmp 提示手动执行。
+# 管道模式: stdin 不是 TTY, 且 $0 为 sh/ash/bash/dash/-sh/"" 时说明被管道/heredoc 传入。
+# 先保存完整脚本，再从控制终端重新执行；否则 curl ... | sh 只会保存脚本并直接退出。
 if [ ! -t 0 ]; then
   case "$0" in
     sh|ash|bash|dash|-sh|"")
       echo "检测到管道模式执行，正在保存脚本..."
       cat > /tmp/install-passwall.sh
       echo "脚本已保存到 /tmp/install-passwall.sh"
-      echo "请执行: sh /tmp/install-passwall.sh"
+      if [ -c /dev/tty ]; then
+        exec sh /tmp/install-passwall.sh </dev/tty
+      fi
+      echo "当前无控制终端，请执行: sh /tmp/install-passwall.sh"
       exit 0
       ;;
   esac
@@ -1540,14 +1543,11 @@ else
   # OpenWrt userspace 源追加到 customfeeds，供 PassWall 依赖使用。
   NETWORK_SOURCE_BLOCK=0
   if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
-    # 新装且系统源异常：停用原系统源，分别从阿里云和官方目录动态匹配
-    # 当前系列/架构的 userspace 源。版本、架构均来自前面的探测，不写死。
-    if [ -f /etc/opkg/distfeeds.conf ]; then
-      awk '/^[[:space:]]*src(\/gz)?[[:space:]]/ {print "# PO-installer disabled broken system feed: " $0; next} {print}' \
-        /etc/opkg/distfeeds.conf > /tmp/distfeeds.po-disabled && cat /tmp/distfeeds.po-disabled > /etc/opkg/distfeeds.conf
-      rm -f /tmp/distfeeds.po-disabled
-      info "已注销异常系统源（原配置保留为注释）"
-    fi
+    # 网络失败或单个 feed 异常时保留原系统源：不能因一次整体刷新失败
+    # 就把所有启用源统一注释，否则任意镜像超时都会让后续依赖源全部消失。
+    # fallback 仅追加/替换本脚本管理的条目；明确失败 feed 的精确处理
+    # 应由 opkg 日志解析后单独完成，不能用全量 awk 覆盖。
+    info "保留原 distfeeds.conf，避免单个异常源导致全部系统源失效"
     OW_SERIES="$PW_VER"
     [ -z "$OW_SERIES" -o "$OW_SERIES" = "unknown" ] && OW_SERIES=$(printf '%s\n' "$KERNEL_VER" | sed -n 's/^5\.4\..*/21.02/p; s/^5\.10\..*/22.03/p; s/^5\.15\..*/23.05/p; s/^6\..*/24.10/p')
     ALIYUN_BASE="https://mirrors.aliyun.com/openwrt/releases/packages-$OW_SERIES/$SYS_ARCH"
@@ -1557,8 +1557,8 @@ else
       opkg_update_isolated_named_feeds "istore_compat is_nas" /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
     if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ "$ALIYUN_OK" = "1" ]; then
-      # 新装且系统源异常：将匹配源写入系统源文件；原失效 src 行已在上面注释保留。
-      # 只替换本脚本管理的 fallback 行，不覆盖用户其它系统源。
+      # 将匹配源写入系统源文件；只替换本脚本管理的 fallback 行，
+      # 不覆盖用户其它系统源。
       FEED_FILE=/etc/opkg/distfeeds.conf
       [ -f "$FEED_FILE" ] || : > "$FEED_FILE"
       : > /tmp/systemfeeds.po-new
