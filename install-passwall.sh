@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.4 (精确处理 APK sing-box 内容哈希约束)
+# VERSION: 20261001.5 (兼容 APK 25.12 simulate 预检参数)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="4"
+VERSION_SEQ="5"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2568,8 +2568,9 @@ apk_file_valid() {
 apk_preflight_safe() {
   local pkg="$1" log="/tmp/apk_preflight.$$.log" rc=0
   [ "$PKG_MGR" = "apk" ] || return 0
-  # --simulate/--no-changes 必须先通过；若计划 Purge/Remove 非目标包，立即闭锁。
-  apk add --simulate --no-changes --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
+  # OpenWrt 25.12 部分 apk-tools 不支持 --no-changes；--simulate
+  # 本身就是只读预检，不能把兼容性参数错误当作依赖失败。
+  apk add --simulate --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
   rc=$?
   if [ "$rc" != "0" ]; then
     err "APK 只读依赖预检失败：$pkg"
