@@ -6,7 +6,7 @@
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="1"
+VERSION_SEQ="9"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -16,7 +16,6 @@ VERSION=$(printf '%s.%s' "$VERSION_DATE" "$VERSION_SEQ")
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
 info() { echo -e "${YELLOW}[→]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; }
 hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
 # 检查 URL 可达性: 优先 curl(Range 只取1KB省流量), curl 不可用回退 wget
@@ -127,18 +126,15 @@ repair_router_self_network() {
   return 1
 }
 
-# 管道模式: stdin 不是 TTY, 且 $0 为 sh/ash/bash/dash/-sh/"" 时说明被管道/heredoc 传入。
-# 先保存完整脚本，再从控制终端重新执行；否则 curl ... | sh 只会保存脚本并直接退出。
+# 管道模式: stdin 不是 TTY, 且 $0 为 sh/ash/bash/dash/-sh/"" 时说明被管道/heredoc 传入，
+# 此时交互式 read 不可用, 先保存到 /tmp 提示手动执行。
 if [ ! -t 0 ]; then
   case "$0" in
     sh|ash|bash|dash|-sh|"")
       echo "检测到管道模式执行，正在保存脚本..."
       cat > /tmp/install-passwall.sh
       echo "脚本已保存到 /tmp/install-passwall.sh"
-      if [ -c /dev/tty ]; then
-        exec sh /tmp/install-passwall.sh </dev/tty
-      fi
-      echo "当前无控制终端，请执行: sh /tmp/install-passwall.sh"
+      echo "请执行: sh /tmp/install-passwall.sh"
       exit 0
       ;;
   esac
@@ -957,6 +953,7 @@ echo "  12) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
 echo "  0) 退出"
 echo ""
 printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11/12): "
+
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -964,6 +961,7 @@ while :; do
     MAIN_CHOICE="1"
     break
   fi
+  # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
     0|1|2|3|4|5|6|7|8|9|10|11|12) break ;;
@@ -972,10 +970,15 @@ while :; do
 done
 case "$MAIN_CHOICE" in
   0)
+    # 仅删除 /tmp 中的临时安装脚本，绝不删除仓库或其它位置的脚本。
     EXIT_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
     case "$EXIT_SCRIPT" in
-      /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh) rm -f "$EXIT_SCRIPT" 2>/dev/null || true ;;
-      *) info "已退出（保留当前脚本）" ;;
+      /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
+        rm -f "$EXIT_SCRIPT" 2>/dev/null || true
+        ;;
+      *)
+        info "已退出（保留当前脚本）"
+        ;;
     esac
     exit 0
     ;;
@@ -990,6 +993,7 @@ case "$MAIN_CHOICE" in
   9) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
   10) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; PASSWALL_CORE_MODE="full"; ok "选择: 全部安装" ;;
   11)
+
     echo ""
     echo "请选择要卸载的软件："
     echo ""
@@ -1121,15 +1125,10 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   [ "$INSTALL_ISTORE" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 20))
   OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
   [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
-  # 取消基于可用空间/预估值的安装拦截，仅输出诊断信息；
-  # 真正的 ENOSPC 仍由 opkg/apk 事务失败结果处理。
-  OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
-  [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
-  if [ -n "$OVERLAY_SPACE" ]; then
-    ok "Overlay 可用: $((OVERLAY_SPACE / 1024))MB（仅诊断，不拦截安装）"
-  else
-    info "无法读取 Overlay 可用空间，继续由包管理器执行安装"
-  fi
+  # 仅输出空间诊断，不按估算值拦截安装；实际 ENOSPC 由包管理器返回。
+  OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
+  ok "Overlay 可用: ${OVERLAY_SPACE}MB（仅诊断，不拦截安装）"
+  info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
 fi
 
 # 直接更新模式：已安装插件只使用现有插件 source，绝不探测、注销或追加系统源。
@@ -1546,11 +1545,14 @@ else
   # OpenWrt userspace 源追加到 customfeeds，供 PassWall 依赖使用。
   NETWORK_SOURCE_BLOCK=0
   if [ "$PKG_MGR" = "opkg" ] && [ "$NETWORK_SOURCE_BLOCK" != "1" ]; then
-    # 网络失败或单个 feed 异常时保留原系统源：不能因一次整体刷新失败
-    # 就把所有启用源统一注释，否则任意镜像超时都会让后续依赖源全部消失。
-    # fallback 仅追加/替换本脚本管理的条目；明确失败 feed 的精确处理
-    # 应由 opkg 日志解析后单独完成，不能用全量 awk 覆盖。
-    info "保留原 distfeeds.conf，避免单个异常源导致全部系统源失效"
+    # 新装且系统源异常：停用原系统源，分别从阿里云和官方目录动态匹配
+    # 当前系列/架构的 userspace 源。版本、架构均来自前面的探测，不写死。
+    if [ -f /etc/opkg/distfeeds.conf ]; then
+      awk '/^[[:space:]]*src(\/gz)?[[:space:]]/ {print "# PO-installer disabled broken system feed: " $0; next} {print}' \
+        /etc/opkg/distfeeds.conf > /tmp/distfeeds.po-disabled && cat /tmp/distfeeds.po-disabled > /etc/opkg/distfeeds.conf
+      rm -f /tmp/distfeeds.po-disabled
+      info "已注销异常系统源（原配置保留为注释）"
+    fi
     OW_SERIES="$PW_VER"
     [ -z "$OW_SERIES" -o "$OW_SERIES" = "unknown" ] && OW_SERIES=$(printf '%s\n' "$KERNEL_VER" | sed -n 's/^5\.4\..*/21.02/p; s/^5\.10\..*/22.03/p; s/^5\.15\..*/23.05/p; s/^6\..*/24.10/p')
     ALIYUN_BASE="https://mirrors.aliyun.com/openwrt/releases/packages-$OW_SERIES/$SYS_ARCH"
@@ -1560,8 +1562,8 @@ else
       opkg_update_isolated_named_feeds "istore_compat is_nas" /tmp/po_istore_update.log 30 && { ISTORE_FALLBACK_OK=1; ok "iStoreOS 专用源更新成功"; } || { info "iStoreOS 专用源刷新失败，继续使用其它可用源"; }
     fi
     if [ "$ISTORE_FALLBACK_OK" != "1" ] && [ "$ALIYUN_OK" = "1" ]; then
-      # 将匹配源写入系统源文件；只替换本脚本管理的 fallback 行，
-      # 不覆盖用户其它系统源。
+      # 新装且系统源异常：将匹配源写入系统源文件；原失效 src 行已在上面注释保留。
+      # 只替换本脚本管理的 fallback 行，不覆盖用户其它系统源。
       FEED_FILE=/etc/opkg/distfeeds.conf
       [ -f "$FEED_FILE" ] || : > "$FEED_FILE"
       : > /tmp/systemfeeds.po-new
@@ -2094,26 +2096,29 @@ fi
 if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "apk" ] &&
    { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; }; then
   SF_OK=0
-  # 25.12 正式版必须优先探测 releases/packages-25.12；跳过已配置的
-  # snapshots source，避免旧 source 的有效 ADB 索引遮蔽正式包线。
-  if [ "$PW_VER" != "25.12" ]; then
-    SF_BASE=$(cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null |
-      awk '/^[[:space:]]*https?:\/\/[^#]*sourceforge\.net\/project\/openwrt-passwall-build\// {
-        sub(/[?#].*$/, "", $1)
-        sub(/\/(passwall_luci|passwall_packages|passwall2)\/packages\.adb\/?$/, "", $1)
-        if ($1 !~ /\/(passwall_luci|passwall_packages|passwall2)\//) {print $1; exit}
-      }')
-    SF_BASE=${SF_BASE%/}
-    if [ -n "$SF_BASE" ]; then
-      for sf_feed in passwall_luci passwall_packages passwall2; do
-        sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
-          "$SF_BASE/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
-        if [ "$sf_magic" = "ADBd" ]; then
-          SF_OK=1
-          ok "更新模式：从现有 APK SourceForge source 恢复包源"
-          break
-        fi
-      done
+  # 所有正式版都优先恢复现有 SourceForge source；25.12 也不能跳过。
+  # 旧逻辑仅在 PW_VER != 25.12 时执行，导致 25.12.4 直接漏掉本地有效索引。
+  SF_BASE=$(cat /etc/apk/repositories /etc/apk/repositories.d/*.list 2>/dev/null |
+    awk '/^[[:space:]]*https?:\/\/[^#]*sourceforge\.net\/project\/openwrt-passwall-build\// {
+      sub(/[?#].*$/, "", $1)
+      sub(/\/(passwall_luci|passwall_packages|passwall2)\/packages\.adb\/?$/, "", $1)
+      if ($1 !~ /\/(passwall_luci|passwall_packages|passwall2)\//) {print $1; exit}
+    }')
+  SF_BASE=${SF_BASE%/}
+  if [ -n "$SF_BASE" ]; then
+    for sf_feed in passwall_luci passwall_packages passwall2; do
+      sf_magic=$(curl -fsSL --connect-timeout 15 --max-time 60 \
+        "$SF_BASE/$sf_feed/packages.adb" 2>/dev/null | dd bs=1 count=4 2>/dev/null)
+      if [ "$sf_magic" = "ADBd" ]; then
+        SF_OK=1
+        ok "更新模式：从现有 APK SourceForge source 恢复包源"
+        break
+      fi
+    done
+    # CDN 暂时不可达时，已有本地 apk 索引仍可继续安装/升级。
+    if [ "$SF_OK" != "1" ] && apk policy luci-app-passwall 2>/dev/null | grep -qE '^[[:space:]]+[0-9]'; then
+      SF_OK=1
+      info "更新模式：SourceForge CDN 暂时不可达，使用本地 APK 索引继续"
     fi
   fi
   # 已安装插件的 APK 更新模式不能只依赖本地 repositories：旧版脚本可能
@@ -2146,7 +2151,16 @@ if [ "$SOURCE_UPDATE_ONLY" = "1" ] && [ "$PKG_MGR" = "apk" ] &&
       done
     done
   fi
-  [ "$SF_OK" = "1" ] || err "更新模式：无法从现有或官方 APK source 获取 PassWall 包索引"
+  if [ "$SF_OK" = "1" ]; then
+    # 更新模式没有经过新装分支的 apk update/主包校验；这里已通过
+    # packages.adb 的 ADBd 魔数确认 SourceForge 索引可下载，后续
+    # pkginstall 会继续校验真实 APK 文件和安装后的版本，不能让未初始化
+    # 的空变量把已确认可用的 25.12 源误判为校验失败。
+    APK_PW_INDEX_OK=1
+  else
+    APK_PW_INDEX_OK=0
+    err "更新模式：无法从现有或官方 APK source 获取 PassWall 包索引"
+  fi
 fi
 
 #==============================================
@@ -2439,12 +2453,71 @@ apk_optional_core() {
   return 1
 }
 
+# APK 从本地文件安装的包会在 /etc/apk/world 写入内容哈希约束，例如
+# sing-box><Q1Xf...=。该约束不是普通版本约束，SourceForge 新版依赖
+# 无法替换它；--force-broken-world 还可能清理无关插件，因此只允许
+# 针对日志明确指出的 sing-box 哈希行做最小化、可回滚的处理。
+apk_retry_without_hash_constraint() {
+  local pkg="$1" want_ver="$2" log="$3" backup="/tmp/apk-world.$$.bak" rc=1
+  [ -f /etc/apk/world ] || return 1
+  grep -q "breaks: world\\[sing-box><" "$log" 2>/dev/null || return 1
+  cp -f /etc/apk/world "$backup" 2>/dev/null || return 1
+  # 只删除 sing-box 的内容哈希行；保留其它 world 约束和注释。
+  awk '!/^sing-box><[^[:space:]]+$/ {print}' /etc/apk/world > "/tmp/apk-world.$$" || {
+    cp -f "$backup" /etc/apk/world 2>/dev/null || true
+    rm -f "$backup" "/tmp/apk-world.$$"
+    return 1
+  }
+  cat "/tmp/apk-world.$$" > /etc/apk/world || {
+    cp -f "$backup" /etc/apk/world 2>/dev/null || true
+    rm -f "$backup" "/tmp/apk-world.$$"
+    return 1
+  }
+  info "移除 sing-box 旧内容哈希约束后重试 $pkg（原 world 已备份）"
+  apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
+  rc=$?
+  if [ "$rc" = "0" ] && apk_installed_exact "$pkg" "$want_ver"; then
+    rm -f "$backup" "/tmp/apk-world.$$"
+    return 0
+  fi
+  cp -f "$backup" /etc/apk/world 2>/dev/null || true
+  rm -f "$backup" "/tmp/apk-world.$$"
+  return "$rc"
+}
+
+apk_repair_stale_hash_world() {
+  local log="$1" backup="/tmp/apk-world.$$.preflight.bak" tmp="/tmp/apk-world.$$.preflight" rc=1
+  [ -f /etc/apk/world ] || return 1
+  # 只处理 apk 明确报告的内容哈希约束，以及临时本地 APK 路径约束；
+  # 普通包名=版本约束全部保留。
+  grep -qE 'breaks: world\[[^]]+><[^]]+\]|required by: world\[/tmp/[^]]+\.apk\]' "$log" 2>/dev/null || return 1
+  cp -f /etc/apk/world "$backup" 2>/dev/null || return 1
+  awk '!/^[^#[:space:]][^[:space:]]*><[^[:space:]]+$/ && !/^\/tmp\/[^[:space:]]+\.apk$/ {print}' /etc/apk/world > "$tmp" || { rm -f "$backup" "$tmp"; return 1; }
+  cat "$tmp" > /etc/apk/world || { cp -f "$backup" /etc/apk/world 2>/dev/null || true; rm -f "$backup" "$tmp"; return 1; }
+  info "检测到 APK 临时包/内容哈希约束，已临时清理后重新预检"
+  apk add --simulate --upgrade --latest --allow-untrusted "$2" > "$log" 2>&1
+  rc=$?
+  if [ "$rc" = "0" ] && ! grep -qE 'breaks: world\[[^]]+><|required by: world\[/tmp/' "$log" 2>/dev/null; then
+    rm -f "$backup" "$tmp"
+    return 0
+  fi
+  cp -f "$backup" /etc/apk/world 2>/dev/null || true
+  rm -f "$backup" "$tmp"
+  return 1
+}
+
 apk_add_repo_exact() {
   local pkg="$1" want_ver="$2" log="$3" rc=0
   if [ -n "$want_ver" ]; then
-    apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
+    apk add --no-cache --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
     apk_installed_exact "$pkg" "$want_ver" && return 0
+    apk_installed_exact "$pkg" "$want_ver" && return 0
+    # 不使用 --force-broken-world：它可能为解决 world 冲突清理无关插件。
+    # 仅移除日志明确对应的 sing-box 内容哈希约束后重试。
+    if [ "$rc" != "0" ] && apk_retry_without_hash_constraint "$pkg" "$want_ver" "$log"; then
+      return 0
+    fi
     # 不再回退 apk upgrade --available：OpenWrt APK 会为满足 world 约束顺手升级大量 LuCI/系统包，
     # 用户只想装一个可选组件时不应触发全系统事务。
     return $rc
@@ -2519,11 +2592,15 @@ apk_file_valid() {
 apk_preflight_safe() {
   local pkg="$1" log="/tmp/apk_preflight.$$.log" rc=0
   [ "$PKG_MGR" = "apk" ] || return 0
-  # --simulate/--no-changes 必须先通过；若计划 Purge/Remove 非目标包，立即闭锁。
-  apk add --simulate --no-changes --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
+  # OpenWrt 25.12 部分 apk-tools 不支持 --no-changes；--simulate
+  # 本身就是只读预检，不能把兼容性参数错误当作依赖失败。
+  apk add --simulate --upgrade --latest --allow-untrusted "$pkg" > "$log" 2>&1
   rc=$?
+  if [ "$rc" != "0" ] && apk_repair_stale_hash_world "$log" "$pkg"; then
+    rm -f "$log"
+    return 0
+  fi
   if [ "$rc" != "0" ]; then
-    err "APK 只读依赖预检失败：$pkg"
     grep -E "ERROR|WARNING|unable|cannot|breaks|conflict|not found|No space|required by" "$log" 2>/dev/null || cat "$log"
     rm -f "$log"
     return 1
@@ -2643,24 +2720,23 @@ apk_install() {
           if [ "$installed_main" = "1" ]; then
             info "已安装插件跳过本地依赖预检，直接覆盖安装匹配架构 IPK"
           elif ! opkg_preflight_installable "/tmp/pkg_$pkg.ipk"; then
-            # 预检失败必须立即返回，禁止继续执行真实安装；预检函数已保留完整日志。
             rc=2
-            rm -f "/tmp/pkg_$pkg.ipk" "$log"
-            return 2
           fi
-          # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
-          # 直链校验下载，安装时只替换当前包，不重装已有依赖。
-          # 主包不得用 --force-depends：它会把缺失/ABI 不匹配依赖伪装成成功。
-          opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
-          rc=$?
-          cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
-          # opkg 可能在主包已成功写入后，因附带依赖候选报非零。
-          # 以实际安装数据库中的目标版本为准，避免误报升级失败。
-          if [ "$installed_main" = "1" ] && [ -n "$repo_ver" ] && [ "$(get_version "$pkg")" = "$repo_ver" ]; then
-            rc=0
+          if [ "$installed_main" = "1" ] || [ "$rc" != "2" ]; then
+            # Geo/用户态包的索引可能被旧 kmod/混源依赖污染；本地 IPK 已由
+            # 直链校验下载，安装时只替换当前包，不重装已有依赖。
+            # 主包不得用 --force-depends：它会把缺失/ABI 不匹配依赖伪装成成功。
+            opkg install "/tmp/pkg_$pkg.ipk" --force-downgrade --force-overwrite > "$log" 2>&1
+            rc=$?
+            cp "$log" /tmp/po-last-opkg-install.log 2>/dev/null || true
+            # opkg 可能在主包已成功写入后，因附带依赖候选报非零。
+            # 以实际安装数据库中的目标版本为准，避免误报升级失败。
+            if [ "$installed_main" = "1" ] && [ -n "$repo_ver" ] && [ "$(get_version "$pkg")" = "$repo_ver" ]; then
+              rc=0
+            fi
+            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
+            grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
-          grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
-          grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           report_install_space_error "$pkg" "$log" "$rc" || true
           rm -f "/tmp/pkg_$pkg.ipk" "$log"
         else
@@ -3127,8 +3203,7 @@ pkginstall() {
     if verify_package_installed "$pkg"; then
       ok "$desc $(get_version "$pkg") ✓"
     else
-      err "$desc 安装结果校验失败：包管理器状态已登记，但目标文件未确认落盘";
-      [ "$PKG_MGR" = "opkg" ] && info "完整 OPKG 预检日志：/tmp/po-last-opkg-preflight.log"
+      err "$desc 安装失败（包已登记但文件未落盘）"
       return 1
     fi
   fi
@@ -3182,8 +3257,7 @@ pkgupgrade() {
     if verify_package_installed "$pkg"; then
       ok "$desc $(get_version "$pkg") ✓"
     else
-      err "$desc 安装结果校验失败：包管理器状态已登记，但目标文件未确认落盘";
-      [ "$PKG_MGR" = "opkg" ] && info "完整 OPKG 预检日志：/tmp/po-last-opkg-preflight.log"
+      err "$desc 安装失败（包已登记但文件未落盘）"
       return 1
     fi
   fi
@@ -3822,100 +3896,6 @@ install_openclash_dependencies() {
   return 0
 }
 
-# daed 官方发行包同时包含 dae-wing 后端、GraphQL API 和 Web UI；不安装独立 dae。
-get_daed_release_json() {
-  local api="https://api.github.com/repos/daeuniverse/daed/releases/latest" u json
-  for u in $(gh_candidates "$api"); do
-    json=$(curl -sL --max-time 30 "$u" 2>/dev/null) || continue
-    echo "$json" | grep -q '"tag_name"' || continue
-    echo "$json"
-    return 0
-  done
-  return 1
-}
-
-install_daed() {
-  [ "${INSTALL_DAED:-0}" = "1" ] || return 0
-  local daed_arch daed_asset daed_url daed_tag json zip=/tmp/daed.zip root bin service
-  hdr "官方 daed 独立 Web 面板安装"
-  case "$(uname -m 2>/dev/null)" in
-    aarch64) daed_arch="arm64" ;;
-    mipsel*) daed_arch="mips32le" ;;
-    mips*) daed_arch="mips32" ;;
-    x86_64) daed_arch="x86_64" ;;
-    i[3-6]86) daed_arch="x86_32" ;;
-    riscv64) daed_arch="riscv64" ;;
-    *) err "daed 不支持当前 CPU 架构: $(uname -m 2>/dev/null)"; return 1 ;;
-  esac
-  command -v unzip >/dev/null 2>&1 || { err "缺少 unzip，无法解压官方 daed 发布包"; return 1; }
-  # daed 运行 dae 需要内核支持 veth 与 network namespace；提前做真实创建/删除测试，
-  # 避免下载并启动后才因 operation not supported 进入 procd 重启循环。
-  if command -v modprobe >/dev/null 2>&1; then
-    modprobe veth >/dev/null 2>&1 || true
-  fi
-  if ! command -v ip >/dev/null 2>&1 || ! ip link add "po-daed-veth-$$" type veth peer name "po-daed-veth-peer-$$" >/dev/null 2>&1; then
-    err "当前内核不支持 daed 所需的 veth 网络设备，已停止安装"
-    info "请检查 CONFIG_VETH、匹配当前内核的 kmod-veth，以及虚拟化环境是否允许创建 veth"
-    return 1
-  fi
-  ip link del "po-daed-veth-$$" >/dev/null 2>&1 || true
-  json=$(get_daed_release_json) || { err "无法获取 daed 官方 Release 信息"; return 1; }
-  daed_tag=$(printf '%s\n' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+' | head -1 | sed 's/.*"//')
-  daed_asset="daed-linux-$daed_arch.zip"
-  daed_url=$(printf '%s\n' "$json" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+' | sed 's/.*"//' | grep "/$daed_asset$" | head -1)
-  [ -n "$daed_tag" ] && [ -n "$daed_url" ] || { err "官方 daed Release 缺少 $daed_asset"; return 1; }
-  rm -f "$zip"
-  info "下载官方 daed $daed_tag ($daed_arch)..."
-  curl -fL --connect-timeout 10 --max-time 300 -o "$zip" "$daed_url" || { err "daed 下载失败: $daed_url"; rm -f "$zip"; return 1; }
-  root=$(unzip -Z1 "$zip" 2>/dev/null | sed -n 's#^\([^/]*/\)daed-linux-[^/]*$#\1#p' | head -1)
-  bin=$(unzip -Z1 "$zip" 2>/dev/null | grep "/daed-linux-$daed_arch$" | head -1)
-  [ -n "$root" ] && [ -n "$bin" ] || { err "daed 压缩包内容无效"; rm -f "$zip"; return 1; }
-  mkdir -p /etc/daed
-  unzip -p "$zip" "$bin" > /usr/bin/daed || { err "写入 /usr/bin/daed 失败"; rm -f "$zip"; return 1; }
-  chmod 755 /usr/bin/daed
-  unzip -p "$zip" "${root}geoip.dat" > /etc/daed/geoip.dat 2>/dev/null || true
-  unzip -p "$zip" "${root}geosite.dat" > /etc/daed/geosite.dat 2>/dev/null || true
-  rm -f "$zip"
-  service=/etc/init.d/daed
-  cat > "$service" <<'DAEDINIT'
-#!/bin/sh /etc/rc.common
-START=99
-STOP=10
-USE_PROCD=1
-PROG=/usr/bin/daed
-start_service() {
-        [ -x "$PROG" ] || return 1
-        procd_open_instance
-        procd_set_param command "$PROG" run -c /etc/daed/
-        procd_set_param respawn
-        procd_set_param limits nofile="1048576 1048576"
-        procd_set_param stdout 1
-        procd_set_param stderr 1
-        procd_close_instance
-}
-DAEDINIT
-  chmod 755 "$service"
-  "$service" enable >/dev/null 2>&1 || true
-  "$service" restart >/dev/null 2>&1 || { err "daed 服务启动失败，请查看 logread -e daed"; return 1; }
-  # procd 启动是异步的；等待进程和 2023 监听端口实际稳定，避免启动后随后因 veth/netns 失败仍误报成功。
-  local daed_ready=0 i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    if pidof daed >/dev/null 2>&1 && (ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null) | grep -qE '[^[:space:]]*:2023([[:space:]]|$)'; then
-      daed_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [ "$daed_ready" != "1" ]; then
-    err "daed 服务未能稳定启动或未监听 2023，请查看: logread -e daed"
-    "$service" stop >/dev/null 2>&1 || true
-    return 1
-  fi
-  /usr/bin/daed --version 2>/dev/null | grep -q "$daed_tag" || { err "daed 版本验证失败"; return 1; }
-  ok "官方 daed $daed_tag 已安装并启动: http://路由器IP:2023/"
-  info "官方 daed 自带 dae-wing 后端、GraphQL API 和 Web UI，使用 /etc/daed。"
-  return 0
-}
 opkg_prepare_local_package_arches() {
   [ "$PKG_MGR" = "opkg" ] || return 0
   local changed=0
@@ -4755,11 +4735,6 @@ if [ "$INSTALL_OC" = "1" ]; then
     err "无法获取 OpenClash 官方内核版本，保留当前内核"
     OPENCLASH_CORE_OK=0
   fi
-fi
-
-# DAED 独立安装：仅在用户选择 DAED 或全部安装时执行。
-if [ "${INSTALL_DAED:-0}" = "1" ]; then
-  install_daed && DAED_INSTALL_OK=1 || DAED_INSTALL_OK=0
 fi
 
 #==============================================
