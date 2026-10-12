@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261001.1 (保留 OPKG 原系统源并修复管道执行)
+# VERSION: 20261012.1 (APK 完整性失败重取缓存)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
@@ -938,23 +938,25 @@ if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt 50 ]; then
 fi
 INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0
 PASSWALL_MINIMAL=0
+PASSWALL_CORE_MODE="full"
 DAED_INSTALL_OK=0
 echo "请选择要安装的软件："
 echo ""
-echo "  1) PassWall (经典版，推荐)"
-echo "  2) PassWall 最小化安装（仅主程序+必需代理内核）"
-echo "  3) PassWall2 (新版，可与 PassWall 共存)"
-echo "  4) DAED (独立代理内核/面板)"
-echo "  5) OpenClash (Clash 内核)"
-echo "  6) SSR Plus (ShadowSocksR Plus+)"
-echo "  7) AdGuardHome (DNS 广告过滤)"
-echo "  8) iStore 商店"
-echo "  9) 全部安装"
-echo "  10) 卸载插件"
-echo "  11) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
+echo "  1) PassWall（全量核心：Xray + sing-box）"
+echo "  2) PassWall（仅 Xray 核心）"
+echo "  3) PassWall（仅 sing-box 核心）"
+echo "  4) PassWall2 (新版，可与 PassWall 共存）"
+echo "  5) DAED (独立代理内核/面板）"
+echo "  6) OpenClash (Clash 内核）"
+echo "  7) SSR Plus (ShadowSocksR Plus+）"
+echo "  8) AdGuardHome (DNS 广告过滤）"
+echo "  9) iStore 商店"
+echo "  10) 全部安装"
+echo "  11) 卸载插件"
+echo "  12) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
 echo "  0) 退出"
 echo ""
-printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11): "
+printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11/12): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
@@ -964,8 +966,8 @@ while :; do
   fi
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
-    0|1|2|3|4|5|6|7|8|9|10|11) break ;;
-    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9/10/11): " ;;
+    0|1|2|3|4|5|6|7|8|9|10|11|12) break ;;
+    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9/10/11/12): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
@@ -977,51 +979,49 @@ case "$MAIN_CHOICE" in
     esac
     exit 0
     ;;
-  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall" ;;
-  2) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_MINIMAL=1; ok "选择: PassWall 最小化安装" ;;
-  3) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
-  4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: DAED" ;;
-  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
-  6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
-  7) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
-  8) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
-  9) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "选择: 全部安装" ;;
-  10)
+  1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; PASSWALL_CORE_MODE="full"; ok "选择: PassWall（全量核心）" ;;
+    2) PASSWALL_CORE_MODE="xray"; PASSWALL_MINIMAL=0; INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall（仅 Xray 核心）" ;;
+  3) PASSWALL_CORE_MODE="singbox"; PASSWALL_MINIMAL=1; INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall（仅 sing-box 核心）" ;;
+  4) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
+  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: DAED" ;;
+  6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
+  7) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
+  8) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
+  9) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
+  10) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; PASSWALL_CORE_MODE="full"; ok "选择: 全部安装" ;;
+  11)
     echo ""
     echo "请选择要卸载的软件："
     echo ""
-    echo "  1) PassWall"
-    echo "  2) PassWall2"
-    echo "  3) OpenClash"
-    echo "  4) SSR Plus"
-    echo "  5) AdGuardHome"
-    echo "  6) iStore 商店"
-    echo "  7) 全部卸载"
+    echo "  1) PassWall（全量）"
+    echo "  2) PassWall（仅 Xray）"
+    echo "  3) PassWall（仅 sing-box）"
+    echo "  4) PassWall2"
+    echo "  5) OpenClash"
+    echo "  6) SSR Plus"
+    echo "  7) AdGuardHome"
+    echo "  8) iStore 商店"
+    echo "  9) 全部卸载"
     echo ""
-    printf "请输入选项 (1/2/3/4/5/6/7): "
+    printf "请输入选项 (1/2/3/4/5/6/7/8/9): "
     while :; do
-      if ! read -r UNINSTALL_CHOICE; then
-        echo ""
-        info "输入流已关闭，默认不执行卸载"
-        exit 0
-      fi
-      case "$UNINSTALL_CHOICE" in
-        1|2|3|4|5|6|7) break ;;
-        *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7): " ;;
-      esac
+      if ! read -r UNINSTALL_CHOICE; then echo ""; info "输入流已关闭，默认不执行卸载"; exit 0; fi
+      case "$UNINSTALL_CHOICE" in 1|2|3|4|5|6|7|8|9) break ;; *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8/9): " ;; esac
     done
     case "$UNINSTALL_CHOICE" in
-      1) INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: PassWall" ;;
-      2) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: PassWall2" ;;
-      3) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: OpenClash" ;;
-      4) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "卸载: SSR Plus" ;;
-      5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "卸载: AdGuardHome" ;;
-      6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "卸载: iStore 商店" ;;
-      7) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; ok "卸载: 全部插件" ;;
+      1) INSTALL_PW=1; PASSWALL_CORE_MODE="full"; PASSWALL_MINIMAL=0; ok "卸载: PassWall（全量）" ;;
+      2) INSTALL_PW=1; PASSWALL_CORE_MODE="xray"; PASSWALL_MINIMAL=0; ok "卸载: PassWall（仅 Xray）" ;;
+      3) INSTALL_PW=1; PASSWALL_CORE_MODE="singbox"; PASSWALL_MINIMAL=1; ok "卸载: PassWall（仅 sing-box）" ;;
+      4) INSTALL_PW2=1; ok "卸载: PassWall2" ;;
+      5) INSTALL_OC=1; ok "卸载: OpenClash" ;;
+      6) INSTALL_SSR=1; ok "卸载: SSR Plus" ;;
+      7) INSTALL_AGH=1; ok "卸载: AdGuardHome" ;;
+      8) INSTALL_ISTORE=1; ok "卸载: iStore 商店" ;;
+      9) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; PASSWALL_CORE_MODE="full"; ok "卸载: 全部插件" ;;
     esac
     FORCE_REINSTALL=0; UNINSTALL_ONLY=1
     ;;
-  11)
+  12)
     ok "选择: 修复路由器自身联网"
     repair_router_self_network
     exit $?
@@ -1104,10 +1104,12 @@ report_install_space_error() {
 }
 if [ "$UNINSTALL_ONLY" != "1" ]; then
   hdr "空间检测"
-  # 最小化 PassWall 只安装主程序和必需 Xray，不按完整安装估算。
+  # 最小化 PassWall 只安装主程序和必需 sing-box，不按完整安装估算。
   # 完整 PassWall 需要较大空间；最小化模式保守按 35MB 估算。
   if [ "$PASSWALL_MINIMAL" = "1" ]; then
     REQUIRED_SPACE_MB=35
+  elif [ "$PASSWALL_CORE_MODE" = "xray" ]; then
+    REQUIRED_SPACE_MB=55
   else
     REQUIRED_SPACE_MB=30
     [ "$INSTALL_PW" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 80))
@@ -1119,13 +1121,14 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   [ "$INSTALL_ISTORE" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 20))
   OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
   [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
-  OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
-  ok "Overlay 可用: ${OVERLAY_SPACE}MB"
-  info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
-  # 估算值仅作提示，不作为安装门槛；实际写入失败时由包管理器错误处理终止。
-  if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt "$REQUIRED_SPACE_MB" ]; then
-    warn "可用空间可能不足：${OVERLAY_SPACE}MB < 预计最低 ${REQUIRED_SPACE_MB}MB"
-    warn "将继续安装；若实际写入失败，将按错误原因终止"
+  # 取消基于可用空间/预估值的安装拦截，仅输出诊断信息；
+  # 真正的 ENOSPC 仍由 opkg/apk 事务失败结果处理。
+  OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
+  [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
+  if [ -n "$OVERLAY_SPACE" ]; then
+    ok "Overlay 可用: $((OVERLAY_SPACE / 1024))MB（仅诊断，不拦截安装）"
+  else
+    info "无法读取 Overlay 可用空间，继续由包管理器执行安装"
   fi
 fi
 
@@ -2535,6 +2538,24 @@ apk_preflight_safe() {
   return 0
 }
 
+# OpenWrt APK 的包缓存可能保留下载不完整或与 packages.adb 摘要不一致的
+# ADB 文件。仅在事务明确报告完整性错误时清理缓存并重取，避免正常安装时
+# 改变缓存状态；第二次仍失败则把原始事务错误交给上层处理。
+apk_retry_integrity_transaction() {
+  local log="$1"; shift
+  "$@" > "$log" 2>&1
+  local rc=$?
+  if [ "$rc" != "0" ] && grep -qiE 'ADB integrity error|integrity error|bad checksum|checksum mismatch' "$log" 2>/dev/null; then
+    warn "APK 检测到包完整性错误，清理损坏缓存后重取并重试"
+    apk cache clean >/dev/null 2>&1 || true
+    rm -f /var/cache/apk/* 2>/dev/null || true
+    apk update >/tmp/po-apk-refresh.log 2>&1 || true
+    "$@" > "$log" 2>&1
+    rc=$?
+  fi
+  return "$rc"
+}
+
 apk_install() {
   local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
@@ -2719,7 +2740,8 @@ apk_install() {
       # 本地 APK 只跳过仓库归属校验；依赖仍必须从已验证的系统/SF 索引解析。
       # --no-network 会把所有未安装依赖标记为 masked，导致 chinadns-ng、dns2socks、
       # libuci-lua 等明明在索引中的包全部变成“masked in: --no-network”。
-      apk add --upgrade --allow-untrusted --force-non-repository $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk" 2>&1
+      # 新装事务不使用 --upgrade：避免为满足插件安装而级联升级 rpcd/LuCI 等无关系统包。
+      apk_retry_integrity_transaction "$log" apk add --allow-untrusted --force-non-repository $APK_FORCE_REINSTALL_OPT "/tmp/pkg_$pkg.apk"
       rc=$?
       rm -f "/tmp/pkg_$pkg.apk"
       if [ -n "$repo_ver" ] && apk_optional_binary_matches "$pkg" "$repo_ver"; then
@@ -2772,7 +2794,7 @@ pkg_update() {
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
-          apk add --upgrade --latest --allow-untrusted "/tmp/pkg_$pkg.apk" >> "$log" 2>&1
+          apk_retry_integrity_transaction "$log" apk add --latest --allow-untrusted "/tmp/pkg_$pkg.apk"
           rc=$?
           rm -f "/tmp/pkg_$pkg.apk"
         else
@@ -2926,6 +2948,24 @@ remove_plugin_config() {
       ;;
   esac
 }
+# 按 PassWall 核心模式清理核心包；仅清理用户明确选择的核心，避免误删另一模式共用组件。
+remove_passwall_core_selection() {
+  case "${PASSWALL_CORE_MODE:-full}" in
+    full)
+      remove_pkg_keep_config "xray-core" "Xray 内核" || true
+      remove_pkg_keep_config "sing-box" "sing-box 内核" || true
+      ;;
+    xray)
+      remove_pkg_keep_config "xray-core" "Xray 内核" || true
+      ;;
+    singbox)
+      remove_pkg_keep_config "sing-box" "sing-box 内核" || true
+      ;;
+    *)
+      err "未知 PassWall 核心模式: ${PASSWALL_CORE_MODE:-空}，跳过核心清理"
+      ;;
+  esac
+}
 config_action_text() {
   [ "$UNINSTALL_KEEP_CONFIG" = "0" ] && echo "删除配置" || echo "保留配置"
 }
@@ -2936,6 +2976,7 @@ force_reinstall_selected() {
   if [ "$INSTALL_PW" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
     remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
+    remove_passwall_core_selection
     remove_plugin_config "passwall"
   fi
   if [ "$INSTALL_PW2" = "1" ]; then
@@ -2975,6 +3016,7 @@ uninstall_selected_only() {
   if [ "$INSTALL_PW" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
     remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
+    remove_passwall_core_selection
     remove_plugin_config "passwall"
   fi
   if [ "$INSTALL_PW2" = "1" ]; then
@@ -3046,8 +3088,9 @@ pkginstall() {
   local pkg="$1" desc="$2"
   PKG_LAST_RESULT=0
   # Xray 官方/手动更新可能已经放置 /usr/bin/xray，但 opkg 数据库没有
-  # xray-core 记录；不要因此重复走错误的仓库安装路径。
-  if [ "$pkg" = "xray-core" ] && command -v xray >/dev/null 2>&1; then
+  # xray-core 记录；仅这种“未登记包”才跳过包管理器安装。已登记的
+  # xray-core 必须继续进入统一版本比较/升级流程，避免漏掉新版本。
+  if [ "$pkg" = "xray-core" ] && ! check_installed "$pkg" && command -v xray >/dev/null 2>&1; then
     local xray_ver=$(xray version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     ok "$desc 已存在 (${xray_ver:-未知}) ✓"
     return 0
@@ -4720,7 +4763,7 @@ if [ "${INSTALL_DAED:-0}" = "1" ]; then
 fi
 
 #==============================================
-# 6. Geo 数据库（仅 PassWall/PassWall2 需要）
+# 6. Geo 数据库（仅完整 PassWall/PassWall2 需要）
 #==============================================
 # geoview 在 21.02 源缺失时，使用 PassWall 22.03 的同架构完整预编译包。
 # kiddin9 latest 的 1KB geoview 包仅含控制信息、不含 /usr/bin/geoview，会导致组件页显示“版本无”。
@@ -4751,11 +4794,38 @@ install_geoview_fallback() {
 
 if { [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" = "1" ]; } || [ "$INSTALL_PW2" = "1" ]; then
   hdr "默认核心组件"
-  PASSWALL_XRAY_OK=0
-  pkginstall "xray-core" "Xray 内核" && PASSWALL_XRAY_OK=1 || true
   if [ "$PASSWALL_MINIMAL" = "1" ]; then
+    # 最小化安装的核心选择是显式且封闭的：只允许 sing-box。
+    # 不调用 xray-core，也不让失败路径降级到 Xray；安装后必须确认
+    # 包管理器状态和实际可执行文件，否则该阶段失败并阻止成功提示。
+    PASSWALL_CORE_OK=0
+    info "最小化模式：仅安装 sing-box，明确跳过 Xray、ChinaDNS-NG、GeoIP、GeoSite、GeoView"
+    if pkginstall "sing-box" "sing-box 内核" && { command -v sing-box >/dev/null 2>&1 || [ -x /usr/bin/sing-box ]; }; then
+      PASSWALL_CORE_OK=1
+      ok "sing-box 内核已安装并可执行"
+    else
+      err "sing-box 内核安装或可执行性校验失败；不降级安装 Xray"
+      PASSWALL_CORE_OK=0
+    fi
+    if [ "$PASSWALL_CORE_OK" != "1" ]; then
+      err "PassWall 最小化安装失败：缺少可运行的 sing-box 核心"
+      exit 1
+    fi
     info "最小化模式：跳过 ChinaDNS-NG、GeoIP、GeoSite、GeoView，减少存储占用"
+  elif [ "$PASSWALL_CORE_MODE" = "xray" ]; then
+    # 仅 Xray：跳过 sing-box 与 Geo/可选核心。
+    PASSWALL_CORE_OK=0
+    info "仅 Xray 模式：跳过 sing-box、ChinaDNS-NG、GeoIP、GeoSite、GeoView"
+    if pkginstall "xray-core" "Xray 内核" && { check_installed xray-core || command -v xray >/dev/null 2>&1 || [ -x /usr/bin/xray ]; }; then
+      PASSWALL_CORE_OK=1
+      ok "Xray 内核已安装并可执行"
+    else
+      err "Xray 内核安装或可执行性校验失败；不降级安装 sing-box"
+    fi
+    [ "$PASSWALL_CORE_OK" = "1" ] || { err "PassWall 仅 Xray 安装失败：缺少可运行的 Xray 核心"; exit 1; }
   else
+    PASSWALL_XRAY_OK=0
+    pkginstall "xray-core" "Xray 内核" && PASSWALL_XRAY_OK=1 || true
     PASSWALL_GEO_OK=1
     for pkg in chinadns-ng v2ray-geoip v2ray-geosite; do
       pkgupgrade "$pkg" "$pkg" || PASSWALL_GEO_OK=0
@@ -4843,7 +4913,9 @@ if { [ "$INSTALL_PW" = "1" ] && [ "${PASSWALL_INSTALL_OK:-0}" = "1" ]; } ||
    { [ "$INSTALL_PW2" = "1" ] && [ "${PASSWALL2_INSTALL_OK:-0}" = "1" ]; }; then
   hdr "可选组件"
   if [ "$PASSWALL_MINIMAL" = "1" ]; then
-    info "最小化模式：跳过可选代理核心，安装已完成"
+    # 最小化模式已在默认核心阶段完成 sing-box 安装；这里不再提供可选核心，
+    # 防止用户误以为最小化模式会安装其它代理组件。
+    info "最小化模式：跳过所有可选代理核心，安装已完成"
   else
   echo "可选组件列表："
   i=1
