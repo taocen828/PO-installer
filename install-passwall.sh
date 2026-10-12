@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261012.3 (修复 APK 失败误报与告警函数)
+# VERSION: 20261012.4 (修复可选组件描述与 sing-box 依赖提示)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -4882,14 +4882,21 @@ opt_pkginstall() {
       if [ "$rc" = "0" ] || apk_optional_binary_matches "$pkg" "$repo_ver"; then
         return 0
       fi
+      if [ "$pkg" = "sing-box" ] && [ "$PKG_MGR" = "apk" ]; then
+        err "$desc 安装失败：当前固件/软件源不提供匹配的 kmod-netlink-diag 依赖，已跳过，不回退混装其它 kmod"
+      fi
       return "$rc"
     else
       ok "$desc 已存在二进制 ($ver)，跳过安装"
     fi
     return
   fi
-  pkginstall "$pkg"
-  return $?
+  pkginstall "$pkg" "$desc"
+  local rc=$?
+  if [ "$rc" != "0" ] && [ "$pkg" = "sing-box" ] && [ "$PKG_MGR" = "apk" ]; then
+    err "$desc 安装失败：当前固件/软件源不提供匹配的 kmod-netlink-diag 依赖，已跳过，不回退混装其它 kmod"
+  fi
+  return "$rc"
 }
 
 #==============================================
