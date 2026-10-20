@@ -1858,18 +1858,42 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       done
     fi
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
-    PW_INDEX_OK=0; PW_INDEX_FALLBACK=0; PW_INDEX_FATAL=0
-    for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
-      [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
-    done
+    PW_INDEX_OK=1; PW_INDEX_FALLBACK=0; PW_INDEX_FATAL=0
+    if [ "$INSTALL_PW" = "1" ]; then
+      PW_PASSWALL_INDEX_OK=0
+      for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
+        [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_PASSWALL_INDEX_OK=1
+      done
+      [ "$PW_PASSWALL_INDEX_OK" = "1" ] || PW_INDEX_OK=0
+    fi
+    if [ "$INSTALL_PW2" = "1" ]; then
+      PW_PASSWALL2_INDEX_OK=0
+      for idx in /var/opkg-lists/passwall2 /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
+        [ -f "$idx" ] && grep -q "^Package: luci-app-passwall2$" "$idx" 2>/dev/null && PW_PASSWALL2_INDEX_OK=1
+      done
+      [ "$PW_PASSWALL2_INDEX_OK" = "1" ] || PW_INDEX_OK=0
+    fi
     if [ "$PW_INDEX_OK" != "1" ] && [ "$SF_OK" = "1" ]; then
       # 某些 24.10/opkg 固件会因第三方源签名失败导致索引未落盘；SF 已探测可用时，手动拉取索引兜底。
       for feed in passwall_luci passwall_packages passwall2; do
         curl -fsL --max-time 20 "$SF_BASE/$feed/$SF_INDEX_FILE$SF_MIRROR_QUERY" 2>/dev/null | gzip -dc > "/var/opkg-lists/$feed" 2>/dev/null || rm -f "/var/opkg-lists/$feed"
       done
-      for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
-        [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1 && PW_INDEX_FALLBACK=1
-      done
+      PW_INDEX_OK=1
+      if [ "$INSTALL_PW" = "1" ]; then
+        PW_PASSWALL_INDEX_OK=0
+        for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
+          [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_PASSWALL_INDEX_OK=1
+        done
+        [ "$PW_PASSWALL_INDEX_OK" = "1" ] || PW_INDEX_OK=0
+      fi
+      if [ "$INSTALL_PW2" = "1" ]; then
+        PW_PASSWALL2_INDEX_OK=0
+        for idx in /var/opkg-lists/passwall2 /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
+          [ -f "$idx" ] && grep -q "^Package: luci-app-passwall2$" "$idx" 2>/dev/null && PW_PASSWALL2_INDEX_OK=1
+        done
+        [ "$PW_PASSWALL2_INDEX_OK" = "1" ] || PW_INDEX_OK=0
+      fi
+      [ "$PW_INDEX_OK" = "1" ] && PW_INDEX_FALLBACK=1
     fi
     if [ "$PW_INDEX_OK" != "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       PW_INDEX_FATAL=1
