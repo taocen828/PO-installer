@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261020.1 (APK 完整性错误时轮换 SourceForge 直链并合并依赖事务)
+# VERSION: 20261020.2 (修复完整性重试镜像轮换与依赖临时文件隔离)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="1"
+VERSION_SEQ="2"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -2621,7 +2621,7 @@ apk_preflight_safe() {
 # 改变缓存状态；第二次仍失败则把原始事务错误交给上层处理。
 apk_retry_integrity_transaction() {
   local log="$1"; shift
-  local retry_file token dep dep_ver dep_url retry_ok
+  local retry_file retry_url retry_path token dep dep_ver dep_url retry_ok
   local retry_files=""
   "$@" > "$log" 2>&1
   local rc=$?
@@ -2639,22 +2639,26 @@ apk_retry_integrity_transaction() {
       [ -n "$dep" ] && [ -n "$dep_ver" ] || continue
       dep_url=$(find_apk_url "$dep" "$dep_ver")
       # 轮换 SourceForge 节点，避免只重复同一个失真的镜像响应。
-      for retry_file in \
+      # 每个依赖使用独立文件；不能让 find_apk_url 覆盖后续候选 URL。
+      retry_path="/tmp/apk-retry-${dep}-$$.apk"
+      rm -f "$retry_path"
+      for retry_url in \
+        "$dep_url" \
         "$SF_BASE/passwall_packages/$dep-$dep_ver.apk" \
         "$SF_BASE/passwall_luci/$dep-$dep_ver.apk" \
         "https://master.dl.sourceforge.net/project/openwrt-passwall-build/$SF_PATH/passwall_packages/$dep-$dep_ver.apk" \
         "https://downloads.sourceforge.net/project/openwrt-passwall-build/$SF_PATH/passwall_packages/$dep-$dep_ver.apk?use_mirror=jaist" \
         "https://downloads.sourceforge.net/project/openwrt-passwall-build/$SF_PATH/passwall_packages/$dep-$dep_ver.apk?use_mirror=nchc"; do
-        [ -n "$dep_url" ] && retry_file="$dep_url"
+        [ -n "$retry_url" ] || continue
         retry_ok=0
-        if curl -fsSL --max-time 60 -o "/tmp/apk-retry-$dep.apk" "$retry_file" 2>/dev/null && apk_file_valid "/tmp/apk-retry-$dep.apk"; then
+        if curl -fsSL --max-time 60 -o "$retry_path" "$retry_url" 2>/dev/null && apk_file_valid "$retry_path"; then
           retry_ok=1
-          retry_files="$retry_files /tmp/apk-retry-$dep.apk"
+          retry_files="$retry_files $retry_path"
           break
         fi
-        dep_url=""
+        rm -f "$retry_path"
       done
-      [ "$retry_ok" = "1" ] || rm -f "/tmp/apk-retry-$dep.apk"
+      [ "$retry_ok" = "1" ] || rm -f "$retry_path"
     done
     if [ -n "$retry_files" ]; then
       # shellcheck disable=SC2086
