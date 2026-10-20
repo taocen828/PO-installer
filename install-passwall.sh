@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261020.2 (修复完整性重试镜像轮换与依赖临时文件隔离)
+# VERSION: 20261020.3 (修复 OPKG coreutils 依赖与源索引失败状态)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="2"
+VERSION_SEQ="3"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -1724,9 +1724,9 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     MISSING_OC_DEPS=""
     # 检查“索引中是否存在”而不是只检查 Packages.gz 是否能访问。
     if [ "$INSTALL_PW" = "1" ] && [ "$PASSWALL_MINIMAL" != "1" ]; then
-      # coreutils 子包由 OpenWrt 24.10 packages 源提供；若当前系统索引已有
-      # coreutils 主包但没有 applet 子包，继续从匹配的 userspace 源补齐。
-      for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl chinadns-ng dns2socks dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
+      # OPKG 的 coreutils 已包含 base64/nohup/timeout applet；不要把 APK
+      # 拆分包名加入 OPKG 依赖清单。
+      for dep in coreutils curl chinadns-ng dns2socks dnsmasq-full ip-full libuci-lua lua luci-compat luci-lib-jsonc microsocks resolveip tcping lyaml; do
         opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW_DEPS="$MISSING_PW_DEPS $dep"
       done
       [ -n "$MISSING_PW_DEPS" ] && NEED_PW_USERSPACE_DEPS=1
@@ -1734,7 +1734,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     fi
     # PassWall2 与 PassWall 依赖不同：它额外需要 geoview/geo 数据包，通常不需要 chinadns/dns2socks。
     if [ "$INSTALL_PW2" = "1" ]; then
-      for dep in coreutils coreutils-base64 coreutils-nohup coreutils-timeout curl ip-full libuci-lua lua luci-compat luci-lib-jsonc lyaml resolveip tcping geoview v2ray-geoip v2ray-geosite unzip; do
+      for dep in coreutils curl ip-full libuci-lua lua luci-compat luci-lib-jsonc lyaml resolveip tcping geoview v2ray-geoip v2ray-geosite unzip; do
         opkg list "$dep" 2>/dev/null | grep -q "^$dep " || MISSING_PW2_DEPS="$MISSING_PW2_DEPS $dep"
       done
       # 23.05/24.10 的 PassWall2 才声明 luci-lua-runtime；21/22.03 不把它当硬依赖。
@@ -1858,7 +1858,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       done
     fi
     # 不再只凭 URL 探测报“源配置完成”，还要确认索引里真的有 PassWall 包。
-    PW_INDEX_OK=0; PW_INDEX_FALLBACK=0
+    PW_INDEX_OK=0; PW_INDEX_FALLBACK=0; PW_INDEX_FATAL=0
     for idx in /var/opkg-lists/passwall_luci /var/opkg-lists/iw_luci; do
       [ -f "$idx" ] && grep -q "^Package: luci-app-passwall$" "$idx" 2>/dev/null && PW_INDEX_OK=1
     done
@@ -1872,6 +1872,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       done
     fi
     if [ "$PW_INDEX_OK" != "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
+      PW_INDEX_FATAL=1
       err "PassWall 源索引刷新失败（可能仍在使用旧缓存/源下载失败）"
       grep -E "Failed|Signature check failed|wget|curl|not found|Permission|ERROR" /tmp/po_opkg_update.log 2>/dev/null || true
     elif [ "$PW_INDEX_FALLBACK" = "1" ]; then
@@ -2062,8 +2063,8 @@ EOF
     if [ "$SF_OK" = "1" ] && [ -n "$SF_BASE" ]; then
       ok "更新模式：将从已配置 PassWall source 直接下载对应版本包"
     elif [ -n "$SF_BASE" ]; then
-      info "更新模式：PassWall source 已配置，使用现有 opkg 索引继续"
-      SF_OK=1
+      err "更新模式：PassWall source 索引不可用，停止 PassWall 安装"
+      PW_INDEX_FATAL=1
     else
       err "更新模式：未找到已配置的 PassWall 插件 source"
     fi
@@ -3481,6 +3482,9 @@ install_passwall2_release() {
 # PassWall
 if [ "$INSTALL_PW" = "1" ]; then
     PASSWALL_INSTALL_OK=0
+    if [ "$PKG_MGR" = "opkg" ] && [ "${PW_INDEX_FATAL:-0}" = "1" ]; then
+      err "PassWall 源索引刷新失败，已停止安装主程序（避免使用未知/旧索引）"
+    elif [ "${PW_INDEX_FATAL:-0}" != "1" ]; then
     # PassWall 声明 ip-full；ip-tiny 与它提供同一虚拟能力 ip，APK 不允许共存。
     # 清理失败安装/旧 world 残留后再进入主包事务，避免 ip-tiny 与 ip-full 冲突。
     [ "$PKG_MGR" = "apk" ] && clean_apk_broken_world
@@ -3504,6 +3508,7 @@ if [ "$INSTALL_PW" = "1" ]; then
       pkginstall "luci-app-passwall" "PassWall" || PASSWALL_INSTALL_OK=0
     else
       err "系统源无 PassWall 且 SourceForge 主包源不可用，停止安装"
+    fi
     fi
     if [ "$PASSWALL_INSTALL_OK" = "1" ]; then
       pkginstall "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
@@ -3677,7 +3682,11 @@ ssr_depinstall() {
 }
 install_ssr_dependencies() {
   ssr_depinstall "coreutils" "Coreutils" 1
-  ssr_depinstall "coreutils-base64" "Coreutils Base64" 1
+  # OPKG/iStoreOS 的 base64 applet 已由 coreutils 主包提供；APK 才有
+  # coreutils-base64 拆分包，不能把该包名传给 OPKG。
+  if [ "$PKG_MGR" = "apk" ]; then
+    ssr_depinstall "coreutils-base64" "Coreutils Base64" 1
+  fi
   ssr_depinstall "dnsmasq-full" "dnsmasq-full" 1
   ssr_depinstall "jq" "jq" 1
   ssr_depinstall "ip-full" "ip-full" 1
