@@ -3159,6 +3159,27 @@ force_reinstall_selected() {
   fi
   clean_luci_cache
 }
+partexp_release_asset_url() {
+  local asset="$1" api json
+  api="https://api.github.com/repos/sirpdboy/luci-app-partexp/releases/tags/v2.0.5"
+  json=$(curl -fsSL --connect-timeout 10 --max-time 30 "$api") || return 1
+  printf '%s\n' "$json" | awk -v asset="$asset" '
+    /"name"[[:space:]]*:/ {
+      name=$0
+      sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", name)
+      sub(/".*$/, "", name)
+      wanted=(name == asset)
+    }
+    wanted && /"browser_download_url"[[:space:]]*:/ {
+      url=$0
+      sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", url)
+      sub(/".*$/, "", url)
+      print url
+      exit
+    }
+  '
+}
+
 install_partexp() {
   local channel="SNAPSHOT" suffix="" archive url work pkg lang rc=0
   case "$SYS_RELEASE" in
@@ -3166,9 +3187,13 @@ install_partexp() {
   esac
   suffix="$CPU_ARCH"
   archive="${channel}-${suffix}.tar.gz"
-  url="https://github.com/sirpdboy/luci-app-partexp/releases/download/v2.0.5/${archive}"
   work="/tmp/po-partexp.$$"
   mkdir -p "$work" || return 1
+  url=$(partexp_release_asset_url "$archive") || {
+    err "GitHub Release v2.0.5 未找到匹配资产: $archive"
+    rm -rf "$work"
+    return 1
+  }
   info "下载分区扩容插件 luci-app-partexp ($archive)..."
   if ! command -v tar >/dev/null 2>&1 || ! curl -fL -sS -o "$work/$archive" "$url"; then
     err "分区扩容插件下载失败（未执行安装）"
