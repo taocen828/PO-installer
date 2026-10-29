@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261020.4 (新增分区扩容 luci-app-partexp 安装选项)
+# VERSION: 20261029.1 (校验分区扩容归档路径安全)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="4"
+VERSION_SEQ="1"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -3180,6 +3180,15 @@ partexp_release_asset_url() {
   '
 }
 
+validate_tar_paths() {
+  local archive="$1" member
+  tar -tzf "$archive" 2>/dev/null | while IFS= read -r member; do
+    case "$member" in
+      /*|../*|*/../*|*/..|.|./*|*'\n'*|*'\r'*) exit 1 ;;
+    esac
+  done
+}
+
 install_partexp() {
   local channel="SNAPSHOT" suffix="" archive url work pkg lang rc=0
   case "$SYS_RELEASE" in
@@ -3209,7 +3218,7 @@ install_partexp() {
     rm -rf "$work"
     return 1
   fi
-  if ! tar -tzf "$work/$archive" >/dev/null 2>&1 || ! tar -xzf "$work/$archive" -C "$work"; then
+  if ! tar -tzf "$work/$archive" >/dev/null 2>&1 || ! validate_tar_paths "$work/$archive" || ! tar -xzf "$work/$archive" -C "$work"; then
     err "分区扩容插件解包失败（未执行安装）"
     rm -rf "$work"
     return 1
