@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261029.3 (预检 partexp IPK 架构与依赖)
+# VERSION: 20261029.4 (逐项预检 partexp OPKG 依赖候选)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
@@ -3218,6 +3218,26 @@ opkg_partexp_preflight() {
   esac
   deps=$(printf '%s\n' "$control" | sed -n 's/^Depends:[[:space:]]*//p' | head -1)
   info "分区扩容依赖预检: ${deps:-无}"
+  # 先逐项检查简单依赖是否存在于已安装数据库或当前索引；不注册额外架构，
+  # 也不把“有同名包但架构不兼容”误判为可安装候选。
+  local missing="" dep_name candidate found
+  for dep in $(printf '%s' "$deps" | tr ',' '\n'); do
+    dep_name=$(printf '%s' "$dep" | sed 's/[|].*//' | sed 's/[[:space:]]*(.*$//' | awk '{print $1}')
+    [ -n "$dep_name" ] || continue
+    check_installed "$dep_name" && continue
+    found=0
+    while IFS= read -r candidate; do
+      [ "$candidate" = "$dep_name" ] && { found=1; break; }
+    done <<EOF
+$(opkg list 2>/dev/null | awk -v p="$dep_name" '$1==p {print $1}')
+EOF
+    [ "$found" = "1" ] || missing="$missing $dep_name"
+  done
+  if [ -n "$missing" ]; then
+    err "分区扩容依赖在当前 OPKG 索引中无可用候选:$missing"
+    err "未注册额外架构或混用软件源；请先配置与当前固件/内核匹配的依赖源"
+    return 1
+  fi
   opkg install --noaction "$ipk" >"$log" 2>&1 || rc=$?
   if [ "$rc" != "0" ]; then
     err "分区扩容 OPKG 依赖/架构预检失败，已停止安装（未混装其它源）"
