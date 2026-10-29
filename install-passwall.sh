@@ -3170,8 +3170,22 @@ install_partexp() {
   work="/tmp/po-partexp.$$"
   mkdir -p "$work" || return 1
   info "下载分区扩容插件 luci-app-partexp ($archive)..."
-  if ! curl -fL -sS -o "$work/$archive" "$url" || ! tar -xzf "$work/$archive" -C "$work"; then
-    err "分区扩容插件下载或解包失败（未执行安装）"
+  if ! command -v tar >/dev/null 2>&1 || ! curl -fL -sS -o "$work/$archive" "$url"; then
+    err "分区扩容插件下载失败（未执行安装）"
+    rm -rf "$work"
+    return 1
+  fi
+  # 外部归档先拒绝绝对路径和 ../ 路径，避免路径遍历。
+  if ! tar -tzf "$work/$archive" 2>/dev/null | awk '
+    /^\// || /(^|\/)\.\.($|\/)/ {bad=1}
+    END {exit bad}
+  '; then
+    err "分区扩容插件归档路径校验失败（未执行安装）"
+    rm -rf "$work"
+    return 1
+  fi
+  if ! tar -tzf "$work/$archive" >/dev/null 2>&1 || ! tar -xzf "$work/$archive" -C "$work"; then
+    err "分区扩容插件解包失败（未执行安装）"
     rm -rf "$work"
     return 1
   fi
@@ -3180,16 +3194,26 @@ install_partexp() {
     lang=$(find "$work" -type f -name 'luci-i18n-partexp-zh-cn_*.ipk' | head -1)
     [ -n "$pkg" ] || { err "发布包缺少 OPKG 主包"; rm -rf "$work"; return 1; }
     opkg install "$pkg" || rc=1
-    [ "$rc" = "0" ] && [ -n "$lang" ] && opkg install "$lang" || true
+    if [ "$rc" = "0" ] && [ -n "$lang" ]; then
+      opkg install "$lang" || warn "分区扩容中文包安装失败，保留主程序"
+    fi
   else
     pkg=$(find "$work" -type f -name 'luci-app-partexp-*.apk' | head -1)
     lang=$(find "$work" -type f -name 'luci-i18n-partexp-zh-cn-*.apk' | head -1)
     [ -n "$pkg" ] || { err "发布包缺少 APK 主包"; rm -rf "$work"; return 1; }
     apk add --allow-untrusted "$pkg" || rc=1
-    [ "$rc" = "0" ] && [ -n "$lang" ] && apk add --allow-untrusted "$lang" || true
+    if [ "$rc" = "0" ] && [ -n "$lang" ]; then
+      apk add --allow-untrusted "$lang" || warn "分区扩容中文包安装失败，保留主程序"
+    fi
   fi
   rm -rf "$work"
   if [ "$rc" = "0" ] && check_installed luci-app-partexp; then
+    if [ "$PKG_MGR" = "opkg" ]; then
+      opkg files luci-app-partexp 2>/dev/null | grep -qE '/(usr|www)/' || { err "分区扩容主包已登记但文件校验失败"; return 1; }
+    elif ! apk info -e luci-app-partexp >/dev/null 2>&1; then
+      err "分区扩容主包 APK 数据库校验失败"
+      return 1
+    fi
     ok "分区扩容插件 luci-app-partexp 已安装"
     return 0
   fi
