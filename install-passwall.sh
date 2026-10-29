@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261029.4 (逐项预检 partexp OPKG 依赖候选)
+# VERSION: 20261029.5 (校验 partexp OPKG 依赖候选架构)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
@@ -3218,20 +3218,25 @@ opkg_partexp_preflight() {
   esac
   deps=$(printf '%s\n' "$control" | sed -n 's/^Depends:[[:space:]]*//p' | head -1)
   info "分区扩容依赖预检: ${deps:-无}"
-  # 先逐项检查简单依赖是否存在于已安装数据库或当前索引；不注册额外架构，
-  # 也不把“有同名包但架构不兼容”误判为可安装候选。
-  local missing="" dep_name candidate found
-  for dep in $(printf '%s' "$deps" | tr ',' '\n'); do
+  # 依赖表达式可能含 OR/版本约束；这里只做保守的包名+架构候选检查，
+  # 最终可满足性仍由 noaction 门禁决定，不尝试自行实现完整依赖求解。
+  local missing="" dep_name candidate candidate_arch arch_ok
+  local opkg_arches
+  opkg_arches=$(opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}')
+  for dep in $(printf '%s\n' "$deps" | tr ',' ' '); do
     dep_name=$(printf '%s' "$dep" | sed 's/[|].*//' | sed 's/[[:space:]]*(.*$//' | awk '{print $1}')
     [ -n "$dep_name" ] || continue
     check_installed "$dep_name" && continue
-    found=0
+    arch_ok=0
     while IFS= read -r candidate; do
-      [ "$candidate" = "$dep_name" ] && { found=1; break; }
+      candidate_arch=$(printf '%s' "$candidate" | awk '{print $NF}')
+      case " $opkg_arches " in
+        *" $candidate_arch "*) arch_ok=1 ;;
+      esac
     done <<EOF
-$(opkg list 2>/dev/null | awk -v p="$dep_name" '$1==p {print $1}')
+$(opkg list 2>/dev/null | awk -v p="$dep_name" '$1==p {print $0}')
 EOF
-    [ "$found" = "1" ] || missing="$missing $dep_name"
+    [ "$arch_ok" = "1" ] || missing="$missing $dep_name"
   done
   if [ -n "$missing" ]; then
     err "分区扩容依赖在当前 OPKG 索引中无可用候选:$missing"
