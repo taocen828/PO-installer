@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261029.5 (校验 partexp OPKG 依赖候选架构)
+# VERSION: 20261029.6 (从 OPKG 索引读取依赖架构)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
@@ -3202,6 +3202,25 @@ partexp_apk_preflight() {
   return 0
 }
 
+opkg_index_candidate_arches() {
+  local wanted="$1" idx
+  for idx in /var/opkg-lists/*; do
+    [ -f "$idx" ] || continue
+    awk -v wanted="$wanted" '
+      /^Package:[[:space:]]*/ {
+        pkg=$0; sub(/^Package:[[:space:]]*/, "", pkg)
+        hit=(pkg == wanted); arch=""
+        next
+      }
+      hit && /^Architecture:[[:space:]]*/ {
+        arch=$0; sub(/^Architecture:[[:space:]]*/, "", arch)
+        print arch
+        hit=0
+      }
+    ' "$idx" 2>/dev/null
+  done
+}
+
 opkg_partexp_preflight() {
   local ipk="$1" control arch deps dep log="/tmp/po-partexp-opkg-preflight.$$" rc=0
   control=$(tar -xOzf "$ipk" ./control.tar.gz 2>/dev/null | gzip -dc 2>/dev/null | tar -xO ./control 2>/dev/null) || {
@@ -3228,13 +3247,12 @@ opkg_partexp_preflight() {
     [ -n "$dep_name" ] || continue
     check_installed "$dep_name" && continue
     arch_ok=0
-    while IFS= read -r candidate; do
-      candidate_arch=$(printf '%s' "$candidate" | awk '{print $NF}')
+    while IFS= read -r candidate_arch; do
       case " $opkg_arches " in
         *" $candidate_arch "*) arch_ok=1 ;;
       esac
     done <<EOF
-$(opkg list 2>/dev/null | awk -v p="$dep_name" '$1==p {print $0}')
+$(opkg_index_candidate_arches "$dep_name")
 EOF
     [ "$arch_ok" = "1" ] || missing="$missing $dep_name"
   done
