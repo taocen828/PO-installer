@@ -2,11 +2,11 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261020.3 (修复 OPKG coreutils 依赖与源索引失败状态)
+# VERSION: 20261020.4 (新增分区扩容 luci-app-partexp 安装选项)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="3"
+VERSION_SEQ="4"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -933,7 +933,7 @@ if [ -n "$OVERLAY_SPACE" ] && [ "$OVERLAY_SPACE" -lt 50 ]; then
   LOW_SPACE_MODE=1
   info "检测到 Overlay 可用空间 ${OVERLAY_SPACE}MB（低于 50MB）"
 fi
-INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0
+INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; INSTALL_PARTEXP=0
 PASSWALL_MINIMAL=0
 PASSWALL_CORE_MODE="full"
 DAED_INSTALL_OK=0
@@ -948,12 +948,13 @@ echo "  6) OpenClash (Clash 内核）"
 echo "  7) SSR Plus (ShadowSocksR Plus+）"
 echo "  8) AdGuardHome (DNS 广告过滤）"
 echo "  9) iStore 商店"
-echo "  10) 全部安装"
-echo "  11) 卸载插件"
-echo "  12) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
+echo "  10) 分区扩容 (luci-app-partexp)"
+echo "  11) 全部安装"
+echo "  12) 卸载插件"
+echo "  13) 修复路由器自身联网（SSH 进路由器后 ping 不通）"
 echo "  0) 退出"
 echo ""
-printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11/12): "
+printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11/12/13): "
 
 while :; do
   if ! read -r MAIN_CHOICE; then
@@ -965,8 +966,8 @@ while :; do
   # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   case "$MAIN_CHOICE" in
-    0|1|2|3|4|5|6|7|8|9|10|11|12) break ;;
-    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9/10/11/12): " ;;
+    0|1|2|3|4|5|6|7|8|9|10|11|12|13) break ;;
+    *) printf "  无效输入，请重新选择 (0/1/2/3/4/5/6/7/8/9/10/11/12/13): " ;;
   esac
 done
 case "$MAIN_CHOICE" in
@@ -992,9 +993,9 @@ case "$MAIN_CHOICE" in
   7) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
   8) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
   9) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
-  10) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; PASSWALL_CORE_MODE="full"; ok "选择: 全部安装" ;;
-  11)
-
+  10) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; INSTALL_PARTEXP=1; ok "选择: 分区扩容 (luci-app-partexp)" ;;
+  11) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; INSTALL_PARTEXP=0; PASSWALL_CORE_MODE="full"; ok "选择: 全部安装（不含高风险分区扩容）" ;;
+  12)
     echo ""
     echo "请选择要卸载的软件："
     echo ""
@@ -1006,12 +1007,13 @@ case "$MAIN_CHOICE" in
     echo "  6) SSR Plus"
     echo "  7) AdGuardHome"
     echo "  8) iStore 商店"
-    echo "  9) 全部卸载"
+    echo "  9) 分区扩容"
+    echo "  10) 全部卸载"
     echo ""
-    printf "请输入选项 (1/2/3/4/5/6/7/8/9): "
+    printf "请输入选项 (1/2/3/4/5/6/7/8/9/10): "
     while :; do
       if ! read -r UNINSTALL_CHOICE; then echo ""; info "输入流已关闭，默认不执行卸载"; exit 0; fi
-      case "$UNINSTALL_CHOICE" in 1|2|3|4|5|6|7|8|9) break ;; *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8/9): " ;; esac
+      case "$UNINSTALL_CHOICE" in 1|2|3|4|5|6|7|8|9|10) break ;; *) printf "  无效输入，请重新选择 (1/2/3/4/5/6/7/8/9/10): " ;; esac
     done
     case "$UNINSTALL_CHOICE" in
       1) INSTALL_PW=1; PASSWALL_CORE_MODE="full"; PASSWALL_MINIMAL=0; ok "卸载: PassWall（全量）" ;;
@@ -1022,11 +1024,12 @@ case "$MAIN_CHOICE" in
       6) INSTALL_SSR=1; ok "卸载: SSR Plus" ;;
       7) INSTALL_AGH=1; ok "卸载: AdGuardHome" ;;
       8) INSTALL_ISTORE=1; ok "卸载: iStore 商店" ;;
-      9) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; PASSWALL_CORE_MODE="full"; ok "卸载: 全部插件" ;;
+      9) INSTALL_PARTEXP=1; ok "卸载: 分区扩容" ;;
+      10) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; INSTALL_PARTEXP=1; PASSWALL_CORE_MODE="full"; ok "卸载: 全部插件" ;;
     esac
     FORCE_REINSTALL=0; UNINSTALL_ONLY=1
     ;;
-  12)
+  13)
     ok "选择: 修复路由器自身联网"
     repair_router_self_network
     exit $?
@@ -3074,6 +3077,9 @@ remove_plugin_config() {
     passwall2)
       rm -f /etc/config/passwall2 2>/dev/null || true
       ;;
+    partexp)
+      rm -f /etc/config/partexp 2>/dev/null || true
+      ;;
     openclash)
       rm -f /etc/config/openclash 2>/dev/null || true
       rm -rf /etc/openclash /etc/openclash_backup 2>/dev/null || true
@@ -3137,6 +3143,11 @@ force_reinstall_selected() {
     remove_adguardhome_keep_config
     ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
   fi
+  if [ "$INSTALL_PARTEXP" = "1" ]; then
+    remove_pkg_keep_config "luci-i18n-partexp-zh-cn" "分区扩容中文包" || true
+    remove_pkg_keep_config "luci-app-partexp" "分区扩容" || true
+    remove_plugin_config "partexp"
+  fi
   if [ "$INSTALL_ISTORE" = "1" ]; then
     remove_pkg_keep_config "luci-app-store" "iStore 商店" || true
     remove_pkg_keep_config "luci-lib-taskd" "iStore taskd 库" || true
@@ -3147,6 +3158,43 @@ force_reinstall_selected() {
     ok "iStore 商店已清理（$(config_action_text)）"
   fi
   clean_luci_cache
+}
+install_partexp() {
+  local channel="SNAPSHOT" suffix="" archive url work pkg lang rc=0
+  case "$SYS_RELEASE" in
+    24.10|24.10.*) channel="openwrt-24.10" ;;
+  esac
+  suffix="$CPU_ARCH"
+  archive="${channel}-${suffix}.tar.gz"
+  url="https://github.com/sirpdboy/luci-app-partexp/releases/download/v2.0.5/${archive}"
+  work="/tmp/po-partexp.$$"
+  mkdir -p "$work" || return 1
+  info "下载分区扩容插件 luci-app-partexp ($archive)..."
+  if ! curl -fL -sS -o "$work/$archive" "$url" || ! tar -xzf "$work/$archive" -C "$work"; then
+    err "分区扩容插件下载或解包失败（未执行安装）"
+    rm -rf "$work"
+    return 1
+  fi
+  if [ "$PKG_MGR" = "opkg" ]; then
+    pkg=$(find "$work" -type f -name 'luci-app-partexp_*.ipk' | head -1)
+    lang=$(find "$work" -type f -name 'luci-i18n-partexp-zh-cn_*.ipk' | head -1)
+    [ -n "$pkg" ] || { err "发布包缺少 OPKG 主包"; rm -rf "$work"; return 1; }
+    opkg install "$pkg" || rc=1
+    [ "$rc" = "0" ] && [ -n "$lang" ] && opkg install "$lang" || true
+  else
+    pkg=$(find "$work" -type f -name 'luci-app-partexp-*.apk' | head -1)
+    lang=$(find "$work" -type f -name 'luci-i18n-partexp-zh-cn-*.apk' | head -1)
+    [ -n "$pkg" ] || { err "发布包缺少 APK 主包"; rm -rf "$work"; return 1; }
+    apk add --allow-untrusted "$pkg" || rc=1
+    [ "$rc" = "0" ] && [ -n "$lang" ] && apk add --allow-untrusted "$lang" || true
+  fi
+  rm -rf "$work"
+  if [ "$rc" = "0" ] && check_installed luci-app-partexp; then
+    ok "分区扩容插件 luci-app-partexp 已安装"
+    return 0
+  fi
+  err "分区扩容插件安装失败"
+  return 1
 }
 uninstall_selected_only() {
   [ "$UNINSTALL_ONLY" = "1" ] || return 0
@@ -3176,6 +3224,11 @@ uninstall_selected_only() {
   if [ "$INSTALL_AGH" = "1" ]; then
     remove_adguardhome_keep_config
     ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
+  fi
+  if [ "$INSTALL_PARTEXP" = "1" ]; then
+    remove_pkg_keep_config "luci-i18n-partexp-zh-cn" "分区扩容中文包" || true
+    remove_pkg_keep_config "luci-app-partexp" "分区扩容" || true
+    remove_plugin_config "partexp"
   fi
   if [ "$INSTALL_ISTORE" = "1" ]; then
     remove_pkg_keep_config "luci-app-store" "iStore 商店" || true
@@ -3338,6 +3391,11 @@ pkgupgrade() {
 
 uninstall_selected_only
 force_reinstall_selected
+
+if [ "$INSTALL_PARTEXP" = "1" ] && [ "$UNINSTALL_ONLY" != "1" ]; then
+  PARTEXP_INSTALL_OK=0
+  install_partexp && PARTEXP_INSTALL_OK=1
+fi
 
 # 旧版 MIPS OPKG 源的 xray-core 常长期停留在 1.x；官方 Release 仍提供 mips32le 二进制。
 # 只替换独立 /usr/bin/xray，不改 LuCI、配置、内核模块；下载/解压/执行校验都成功才覆盖旧文件。
@@ -5112,6 +5170,14 @@ fi
 if [ "$INSTALL_ISTORE" = "1" ] && [ "${ISTORE_INSTALL_OK:-0}" != "1" ]; then
   err "iStore 安装失败"
   RESULT_RC=1
+fi
+if [ "$INSTALL_PARTEXP" = "1" ]; then
+  if [ "${PARTEXP_INSTALL_OK:-0}" = "1" ]; then
+    ok "分区扩容插件验证通过"
+  else
+    err "分区扩容插件安装失败"
+    RESULT_RC=1
+  fi
 fi
 if [ "$INSTALL_PW2" = "1" ] && [ "${PASSWALL2_INSTALL_OK:-0}" != "1" ]; then
   err "PassWall2 安装失败：主程序/依赖预检阶段未通过"
