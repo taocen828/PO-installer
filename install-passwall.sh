@@ -2,7 +2,7 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261029.1 (校验分区扩容归档路径安全)
+# VERSION: 20261029.2 (预检 partexp APK 内核依赖)
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
 # 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
@@ -3189,6 +3189,24 @@ validate_tar_paths() {
   done
 }
 
+partexp_apk_preflight() {
+  local pkg="$1" log="/tmp/po-partexp-apk-preflight.$$" rc=0
+  apk add --simulate --allow-untrusted "$pkg" >"$log" 2>&1 || rc=$?
+  if [ "$rc" != "0" ]; then
+    if grep -qE 'kmod-fs-btrfs|kmod-loop|btrfs-progs' "$log"; then
+      err "分区扩容 APK 依赖当前固件不可解析（需要匹配的 kmod-fs-btrfs/kmod-loop 与 btrfs-progs）"
+      err "已停止安装，未强装不匹配的内核模块；请使用厂商 25.12.4 匹配源或改用包含这些 kmod 的固件"
+    else
+      err "分区扩容 APK 依赖预检失败，已停止安装（未修改系统）"
+    fi
+    grep -E 'ERROR|not found|no such package|kmod-|btrfs' "$log" 2>/dev/null || true
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+  return 0
+}
+
 install_partexp() {
   local channel="SNAPSHOT" suffix="" archive url work pkg lang rc=0
   case "$SYS_RELEASE" in
@@ -3235,6 +3253,10 @@ install_partexp() {
     pkg=$(find "$work" -type f -name 'luci-app-partexp-*.apk' | head -1)
     lang=$(find "$work" -type f -name 'luci-i18n-partexp-zh-cn-*.apk' | head -1)
     [ -n "$pkg" ] || { err "发布包缺少 APK 主包"; rm -rf "$work"; return 1; }
+    if ! partexp_apk_preflight "$pkg"; then
+      rm -rf "$work"
+      return 1
+    fi
     apk add --allow-untrusted "$pkg" || rc=1
     if [ "$rc" = "0" ] && [ -n "$lang" ]; then
       apk add --allow-untrusted "$lang" || warn "分区扩容中文包安装失败，保留主程序"
