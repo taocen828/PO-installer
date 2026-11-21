@@ -2,23 +2,80 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261029.6 (从 OPKG 索引读取依赖架构)
+# VERSION: 运行时生成（见下方 VERSION_SEQ / VERSION_DATE），本行不需要手工维护
 #==============================================
 # 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
-# 每次修改脚本并发布时，先按当天已发布次数递增 VERSION_SEQ，再同步更新上面的 VERSION 注释。
-VERSION_SEQ="1"
+# 每次修改脚本并发布时，递增 VERSION_SEQ（同一天多次发布）即可，上面注释不再写死日期。
+VERSION_SEQ="2"
 VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
 case "$VERSION_DATE" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-  *) VERSION_DATE="20260913" ;;
+  *) printf '[✗] 无法获取系统日期（date 命令异常），已中止\n' >&2; exit 1 ;;
 esac
 VERSION=$(printf '%s.%s' "$VERSION_DATE" "$VERSION_SEQ")
-RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; NC='\e[0m'
-ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
-info() { echo -e "${YELLOW}[→]${NC} $1"; }
-warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-err()  { echo -e "${RED}[✗]${NC} $1"; }
-hdr()  { echo -e "${BLUE}━━━ $1 ━━━${NC}"; }
+# 不用 echo -e / \e：busybox ash 与 dash 的 echo 不解析 \e，颜色会原样打印出来。
+RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
+BLUE=$(printf '\033[34m'); NC=$(printf '\033[0m')
+ok()   { printf '%s[✓]%s %s\n' "$GREEN" "$NC" "$1"; }
+info() { printf '%s[→]%s %s\n' "$YELLOW" "$NC" "$1"; }
+warn() { printf '%s[!]%s %s\n' "$YELLOW" "$NC" "$1"; }
+err()  { printf '%s[✗]%s %s\n' "$RED" "$NC" "$1"; }
+hdr()  { printf '%s━━━ %s ━━━%s\n' "$BLUE" "$1" "$NC"; }
+
+# --- 超时与阈值常量（集中管理，避免散落的魔数） ----------------------------
+PO_CURL_CONNECT_TIMEOUT=15
+PO_CURL_MAX_TIME_SMALL=60
+PO_CURL_MAX_TIME_MID=120
+PO_CURL_MAX_TIME_BIG=300
+PO_CURL_RETRY=2
+PO_OPKG_UPDATE_TIMEOUT=180
+PO_APK_UPDATE_TIMEOUT=120
+PO_GEO_MIN_FREE_KB=45000
+
+# --- 全局临时资源与退出清理 ----------------------------------------------
+# /tmp 里的固定文件名在并发 SSH 会话、Ctrl-C、OOM 时会互相踩：后启动的实例
+# rm -rf 掉前一个实例的解包目录，或者下一次 ls -t /tmp/*.ipk 选中上次的残留包。
+# 因此本次执行的所有临时文件都放在同一个会话目录里，退出时整目录删除。
+# 注意：不能用 PO_TMP_LIST 累加——$(po_tmp) 在子 shell 里跑，累加结果会丢失。
+PO_WORKDIR=""
+_po_wd=$(mktemp -d "${TMPDIR:-/tmp}/po.work.XXXXXX" 2>/dev/null) || _po_wd=""
+if [ -n "$_po_wd" ]; then
+  PO_WORKDIR="$_po_wd"
+else
+  PO_WORKDIR="${TMPDIR:-/tmp}/po.work.$$"
+  mkdir -p "$PO_WORKDIR" 2>/dev/null || PO_WORKDIR=""
+fi
+unset _po_wd
+po_tmp() {
+  [ -n "$PO_WORKDIR" ] || return 1
+  mktemp "$PO_WORKDIR/t.XXXXXX" 2>/dev/null
+}
+po_tmpdir() {
+  [ -n "$PO_WORKDIR" ] || return 1
+  mktemp -d "$PO_WORKDIR/d.XXXXXX" 2>/dev/null
+}
+po_cleanup() {
+  local rc=$? f
+  trap - EXIT INT TERM HUP
+  [ -n "$PO_WORKDIR" ] && rm -rf "$PO_WORKDIR" 2>/dev/null
+  if [ "${PO_DNS_PATCHED:-0}" = "1" ] && type po_restore_dns >/dev/null 2>&1; then
+    po_restore_dns
+  fi
+  # 中断可能留下被截断的系统配置：空文件视为损坏，用 .po-bak 救回
+  if type po_restore_conf >/dev/null 2>&1; then
+    for f in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf; do
+      if [ -s "$f.po-bak" ] && [ ! -s "$f" ]; then
+        po_restore_conf "$f" >/dev/null 2>&1 \
+          && err "检测到 $f 为空（上次执行被中断），已从 $f.po-bak 恢复"
+      fi
+    done
+  fi
+  exit "$rc"
+}
+trap po_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 # 检查 URL 可达性: 优先 curl(Range 只取1KB省流量), curl 不可用回退 wget
 # 206(Partial Content)=成功归一化为200; 000/空=DNS失败/超时/无curl, 输出诊断
 check_url() {
@@ -58,6 +115,24 @@ gh_candidates() {
 
 # 修复“电脑可上网，但 SSH 到路由器后路由器自身 ping 不通”的常见问题。
 # 只处理路由器自身出网：默认路由缺失/网络服务卡住/DNS 文件异常，不改 LAN/DHCP/代理规则。
+# 本次执行改过 /tmp/resolv.conf 时，退出前必须还原：否则用户自建 DNS 分流
+# （AdGuardHome / 自定义 dnsmasq 上游）会被脚本临时改成的公共 DNS 一直覆盖。
+PO_DNS_PATCHED=0
+po_restore_dns() {
+  [ "${PO_DNS_PATCHED:-0}" = "1" ] || return 0
+  if [ -f /tmp/resolv.conf.po-bak ] || [ -L /tmp/resolv.conf.po-bak ]; then
+    rm -f /tmp/resolv.conf 2>/dev/null
+    cp -a /tmp/resolv.conf.po-bak /tmp/resolv.conf 2>/dev/null \
+      && info "已恢复原 /tmp/resolv.conf（脚本临时改动过 DNS）"
+  else
+    # 原本没有 resolv.conf：恢复为指向 dnsmasq 自动生成的文件
+    rm -f /tmp/resolv.conf 2>/dev/null
+    ln -s /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf 2>/dev/null || true
+  fi
+  /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+  PO_DNS_PATCHED=0
+}
+
 repair_router_self_network() {
   local ip_ok=0 dns_ok=0 gw="" wan_if="" wan_dev="" changed=0
   hdr "路由器自身联网检测"
@@ -110,6 +185,7 @@ repair_router_self_network() {
       rm -f /tmp/resolv.conf 2>/dev/null || true
       ln -s /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf 2>/dev/null || true
       /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+      PO_DNS_PATCHED=1
       changed=1
     fi
   fi
@@ -127,6 +203,14 @@ repair_router_self_network() {
   return 1
 }
 
+# --yes / -y：无人值守安装的显式开关（必须由调用者主动声明）
+PO_ASSUME_YES=0
+for _po_a in "$@"; do
+  case "$_po_a" in
+    --yes|-y) PO_ASSUME_YES=1 ;;
+  esac
+done
+
 # 管道模式: stdin 不是 TTY, 且 $0 为 sh/ash/bash/dash/-sh/"" 时说明被管道/heredoc 传入，
 # 此时交互式 read 不可用, 先保存到 /tmp 提示手动执行。
 if [ ! -t 0 ]; then
@@ -139,6 +223,14 @@ if [ ! -t 0 ]; then
       exit 0
       ;;
   esac
+  # 其余情形 $0 是脚本路径（sh file.sh </dev/null、ssh host 'sh x.sh'、Ansible script 模块）。
+  # 不能用 $0 判断"是否管道"，否则这些场景会一路走到 read 遇 EOF，静默按默认值安装。
+  if [ "$PO_ASSUME_YES" != "1" ]; then
+    echo "检测到非交互执行（stdin 不是终端）。"
+    echo "如确认无人值守安装，请显式加参数重跑：sh $0 --yes"
+    echo "如是想保存脚本再执行：cat install-passwall.sh > /tmp/install-passwall.sh"
+    exit 2
+  fi
 fi
 
 # 兼容用户通过 MY_PROXY 传入的代理配置；下载工具仅继承环境变量，避免凭据出现在命令行或日志中。
@@ -287,6 +379,90 @@ else
 fi
 
 
+# --- 系统配置文件安全写入 -------------------------------------------------
+# 所有 /etc/opkg/*.conf、/etc/apk/repositories、/bin/is-opkg 的改写都必须走这里：
+#   1) 在目标同目录建临时文件（同文件系统，保证 mv 原子）
+#   2) 覆盖前保留 <target>.po-bak
+#   3) mv -f 原子替换；失败回滚并返回非 0
+# 不用 sed -i：busybox sed -i 会破坏符号链接，且非原子。
+# 用法: po_write_conf [--allow-empty] <目标文件> <生成内容的命令...>
+po_write_conf() {
+  local allow_empty=0 target dir tmp bak rc_same
+  if [ "$1" = "--allow-empty" ]; then allow_empty=1; shift; fi
+  target="$1"; shift
+  [ -n "$target" ] || return 1
+  dir=$(dirname "$target")
+  [ -d "$dir" ] || { err "目录不存在: $dir"; return 1; }
+  tmp=$(mktemp "$target.po-new.XXXXXX" 2>/dev/null) || { err "无法在 $dir 创建临时文件（空间不足？）"; return 1; }
+  if ! "$@" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; err "生成新配置失败，保留原文件: $target"; return 1
+  fi
+  if [ "$allow_empty" != "1" ] && [ ! -s "$tmp" ]; then
+    rm -f "$tmp"; err "新配置为空，拒绝覆盖: $target"; return 1
+  fi
+  # 内容未变则直接返回：不动 mtime，也不用“已改过的文件”覆盖掉上一次的 .po-bak
+  if [ -f "$target" ] && cmp -s "$tmp" "$target"; then rm -f "$tmp"; return 0; fi
+  bak="$target.po-bak"
+  [ -f "$target" ] && { cp -p "$target" "$bak" 2>/dev/null || warn "无法备份 $target"; }
+  if ! mv -f "$tmp" "$target"; then
+    rm -f "$tmp"; err "写入失败: $target"
+    [ -s "$bak" ] && cp -p "$bak" "$target" 2>/dev/null
+    return 1
+  fi
+  return 0
+}
+
+# 从 .po-bak 恢复（供退出清理与手工救援使用）
+po_restore_conf() {
+  local target="$1" bak="$1.po-bak"
+  [ -s "$bak" ] || return 1
+  cp -p "$bak" "$target" 2>/dev/null || return 1
+  info "已恢复 $target（来源 $bak）"
+  return 0
+}
+
+# --- 安全解包 -------------------------------------------------------------
+# 全脚本唯一的归档解包入口：同时校验成员路径与成员类型。
+# 拒绝：绝对路径、任意 .. 跳转、符号链接/硬链接/设备/管道（tar 的 pax 或
+#       ../ 链接目标可以绕出目标目录，普通路径检查抓不到）。
+# 用法: po_safe_extract <归档> <目标目录>
+po_safe_extract() {
+  local archive="$1" dest="$2"
+  [ -f "$archive" ] || { err "归档不存在: $archive"; return 1; }
+  if ! tar -tzf "$archive" >/dev/null 2>&1; then
+    err "归档不可读（下载被截断或不是 gzip）: $archive"; return 1
+  fi
+  # 第一遍只看成员名（不经 tar -tv 的元数据格式，避免不同 tar/awk locale 差异）：
+  # 拒绝绝对路径与任何 .. 跳转。
+  if tar -tzf "$archive" 2>/dev/null | awk '
+      { if ($0 ~ /^\// || $0 ~ /(^|\/)\.\.($|\/)/) { printf "unsafe-path %s\n", $0 > "/dev/stderr"; bad=1 } }
+      END { exit bad }'; then :; else
+    err "归档含不安全成员路径，已拒绝解包: $archive"; return 1
+  fi
+  # 第二遍看成员类型：只允许普通文件(-)与目录(d)；符号链接仅当目标为相对且不越界。
+  # 设备、FIFO、硬链接一律拒绝（tar 的链接/设备节点可绕出目标目录）。
+  if tar -tvzf "$archive" 2>/dev/null | awk '
+      {
+        type=substr($0,1,1)
+        if (type == "-" || type == "d") next
+        if (type == "l") {
+          if (index($0, " -> ") > 0 && ($NF ~ /^\// || $NF ~ /(^|\/)\.\.($|\/)/)) {
+            printf "unsafe-link-target %s\n", $NF > "/dev/stderr"; bad=1
+          }
+          next
+        }
+        printf "unsafe-type %s\n", type > "/dev/stderr"; bad=1
+      }
+      END { exit bad }'; then :; else
+    err "归档含不安全成员类型（链接/设备/管道），已拒绝解包: $archive"; return 1
+  fi
+  mkdir -p "$dest" || { err "无法创建解包目录: $dest"; return 1; }
+  if ! tar -xzf "$archive" -C "$dest" 2>/dev/null; then
+    err "解包失败: $archive"; return 1
+  fi
+  return 0
+}
+
 # 清理上次运行追加的代理插件源及所有配置文件中的重复 feed 名称。
 # 必须在安装选择完成后执行：更新模式要保留已有 PassWall source，
 # 否则后续无法从现有 source 读取 Packages.gz。
@@ -295,21 +471,29 @@ cleanup_opkg_duplicate_feeds() {
   [ "$PKG_MGR" = "opkg" ] || return 0
   # 按 distfeeds → compatfeeds → customfeeds 顺序处理；状态文件让
   # 重名项跨文件也能被识别，而不是只清理 customfeeds 内部重复。
-  : > /tmp/opkg-fixed-feed-names
+  local file names="/tmp/opkg-fixed-feed-names.$$"
+  : > "$names" || return 0
   for file in /etc/opkg/distfeeds.conf /etc/opkg/compatfeeds.conf /etc/opkg/customfeeds.conf; do
     [ -f "$file" ] || continue
-    awk '
-      BEGIN { while ((getline n < "/tmp/opkg-fixed-feed-names") > 0) fixed[n]=1; close("/tmp/opkg-fixed-feed-names") }
+    po_write_conf "$file" awk -v statef="$names" '
+      BEGIN {
+        # 只精确匹配本脚本自己装的旧 feed 名 + kiddin9 系列的 iw_ 前缀。
+        # 不能用 /passwall|ssr/ 子串匹配：用户的 myssr_mirror、passwall_backup 之类会被误注释。
+        split("passwall_luci passwall_packages passwall2 helloworld kiddin9", a, " ")
+        for (i in a) legacy[a[i]] = 1
+        while ((getline n < statef) > 0) fixed[n] = 1
+        close(statef)
+      }
       /^[[:space:]]*src(\/gz)?[[:space:]]/ {
-        if ($2 ~ /passwall|ssr|helloworld|kiddin9/ || $2 ~ /^iw_/ || fixed[$2] || seen[$2]++) {
+        if (legacy[$2] || $2 ~ /^iw_/ || fixed[$2] || seen[$2]++) {
           print "# PO-installer disabled duplicate/obsolete feed: " $0; next
         }
       }
       { print }
-    ' "$file" > /tmp/opkg-feeds.po-clean 2>/dev/null && cat /tmp/opkg-feeds.po-clean > "$file"
-    awk '!/^[[:space:]]*#/ && /^[[:space:]]*src(\/gz)?[[:space:]]/ {print $2}' "$file" >> /tmp/opkg-fixed-feed-names
+    ' "$file" || warn "清理 $file 失败，已保留原文件"
+    awk '!/^[[:space:]]*#/ && /^[[:space:]]*src(\/gz)?[[:space:]]/ {print $2}' "$file" >> "$names" 2>/dev/null
   done
-  rm -f /tmp/opkg-fixed-feed-names /tmp/opkg-feeds.po-clean
+  rm -f "$names"
 }
 
 # APK 源文件路径兼容：部分 OpenWrt APK 系统没有 /etc/apk/repositories.d
@@ -464,45 +648,6 @@ NON_RELEASE_OPKG=0
 PASSWALL_PACKAGE_FALLBACK_OK=0
 ok "源版本: $PW_VER"
 
-# 架构 → 目标平台映射（完整 31 架构，数据来自官方 22.03.7 targets/Packages 索引）
-arch_to_targets() {
-  case "$1" in
-    aarch64_cortex-a53)   echo "armvirt/64 bcm27xx/bcm2710 bcm4908/generic mediatek/mt7622 mvebu/cortexa53 sunxi/cortexa53" ;;
-    aarch64_cortex-a72)   echo "bcm27xx/bcm2711 mvebu/cortexa72" ;;
-    aarch64_cortex-a76)   echo "bcm27xx/bcm2712" ;;
-    aarch64_generic)      echo "octeontx/generic rockchip/armv8" ;;
-    arc_archs)            echo "archs38/generic" ;;
-    arm_arm1176jzf-s_vfp) echo "bcm27xx/bcm2708" ;;
-    arm_arm926ej-s)       echo "at91/sam9x mxs/generic" ;;
-    arm_cortex-a15_neon-vfpv4) echo "armvirt/32 ipq806x/generic" ;;
-    arm_cortex-a5_vfpv4)  echo "at91/sama5" ;;
-    arm_cortex-a7)        echo "mediatek/mt7629" ;;
-    arm_cortex-a7_neon-vfpv4) echo "bcm27xx/bcm2709 imx/cortexa7 ipq40xx/generic ipq40xx/mikrotik layerscape/armv7 mediatek/mt7623 sunxi/cortexa7" ;;
-    arm_cortex-a7_vfpv4)  echo "at91/sama7" ;;
-    arm_cortex-a8_vfpv3)  echo "omap/generic sunxi/cortexa8" ;;
-    arm_cortex-a9)        echo "bcm53xx/generic" ;;
-    arm_cortex-a9_neon)   echo "imx/cortexa9 zynq/generic" ;;
-    arm_cortex-a9_vfpv3-d16) echo "mvebu/cortexa9 tegra/generic" ;;
-    arm_fa526)            echo "gemini/generic" ;;
-    arm_mpcore)           echo "oxnas/ox820" ;;
-    arm_xscale)           echo "kirkwood/generic" ;;
-    i386_pentium-mmx)     echo "x86/geode x86/legacy" ;;
-    i386_pentium4)        echo "x86/generic" ;;
-    mips64_octeonplus)    echo "octeon/generic" ;;
-    mips_24kc)            echo "ath79/generic ath79/mikrotik ath79/nand ath79/tiny lantiq/xrx200 lantiq/xway malta/be realtek/rtl839x realtek/rtl930x realtek/rtl931x" ;;
-    mips_4kec)            echo "realtek/rtl838x" ;;
-    mips_mips32)          echo "ath25/generic bcm63xx/generic bcm63xx/smp lantiq/ase" ;;
-    mipsel_24kc)          echo "ramips/mt7620 ramips/mt7621 ramips/mt76x8 ramips/rt288x ramips/rt305x" ;;
-    mipsel_24kc_24kf)     echo "pistachio/generic" ;;
-    mipsel_74kc)          echo "bcm47xx/mips74k ramips/rt3883" ;;
-    mipsel_mips32)        echo "bcm47xx/generic bcm47xx/legacy" ;;
-    powerpc_464fp)        echo "apm821xx/nand apm821xx/sata" ;;
-    powerpc_8540)         echo "mpc85xx/p1010 mpc85xx/p1020 mpc85xx/p2020" ;;
-    x86_64)               echo "x86/64" ;;
-    *)                    echo "" ;;
-  esac
-}
-
 # APK 报告的是运行时 CPU 架构(aarch64)，但 OpenWrt 25.12 源目录使用 arch_packages
 # (如 mediatek/filogic → aarch64_cortex-a53)。源 URL 必须用包架构，否则 packages.adb 404。
 apk_pkg_arch_from_target() {
@@ -576,11 +721,8 @@ fi
 #==============================================
 # 2. 源连通性检测（仅新装模式执行）
 #==============================================
-probe_system_source_candidates() {
-# SourceForge/ImmortalWrt 等代理插件源必须等用户选择后再探测；
-# 这里保留系统源/固件镜像的基础探测，避免 OpenClash/iStore 单独安装访问 SF。
-hdr "源连通性检测"
-SF_OK=0; OW_OK=0; OW_USE=""
+# 源探测工具函数：原先嵌在 probe_system_source_candidates 内部定义，
+# 只在该函数被调用后才存在；提到顶层后任何入口都可用，也便于单独测试。
 
 # 列出镜像上某系列的所有小版本（从新到旧）
 list_series_vers() {
@@ -624,6 +766,198 @@ probe_ow_ver() {
   # 未找到 userspace 索引时不再遍历 target/manifest；插件源不需要 SYS_TARGET。
   return 1
 }
+
+probe_proxy_sources() {
+# PassWall/PassWall2 用户态插件源只按固件包线和 SYS_ARCH 选择。
+# 普通插件流程不使用 SYS_TARGET。
+# 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
+SF_PW_VER="$PW_VER"
+[ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
+# SourceForge 包目录直接使用固件报告的 SYS_ARCH；不再把 aarch64_cortex-a53
+# 改写为 aarch64_generic，也不依赖 SYS_TARGET。插件主包按软件包架构直链下载。
+SF_ARCH="$SYS_ARCH"
+# Snapshot/厂商自定义版本不得自动套用正式版 userspace 源。
+[ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
+[ -z "$SF_PW_VER" ] && SF_PW_VER="unknown"
+# SourceForge 这里仅用于 PassWall 用户态主包，不是系统/内核 fallback。
+# 未知或 Snapshot 固件仍可尝试官方包目录；最终由实际 Packages.gz、包名、
+# Architecture 和 Depends 校验决定，绝不据此改写系统源。
+if [ "$PKG_MGR" = "opkg" ] && [ "$SF_PW_VER" = "unknown" ]; then
+  SF_PW_VER="24.10"
+fi
+# SourceForge 的 21/22 旧目录兼容 aarch64 generic，但不能覆盖明确的 24.10。
+# APK/OpenWrt 25.12 uses SourceForge's packages.adb under releases/packages-25.12.
+# opkg releases still use Packages.gz; do not map APK 25.12 to snapshots.
+if [ "$PKG_MGR" = "opkg" ]; then
+  case "$SF_PW_VER" in
+    25.12) SF_PATH="releases/packages-25.12/$SF_ARCH" ;;
+    21.02|22.03|23.05|24.10) SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH" ;;
+    *) SF_PATH=""; SF_OK=0 ;;
+  esac
+else
+  case "$SF_PW_VER" in
+    25.12) SF_PATH="releases/packages-25.12/$SYS_ARCH" ;;
+    *) SF_PATH="snapshots/packages/$SYS_ARCH" ;;
+  esac
+fi
+
+# SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
+SF_INDEX_FILE="Packages.gz"
+[ "$PKG_MGR" = "apk" ] && SF_INDEX_FILE="packages.adb"
+if [ "$PKG_MGR" = "opkg" ] && [ -z "$SF_PATH" ]; then
+  SF_OK=0
+  info "当前 OPKG 固件无匹配 PassWall release 源，跳过 SourceForge release fallback"
+fi
+
+
+SF_MIRROR_QUERY=""; SF_MIRROR_LABEL="default"
+SF_PROBE_URL=""
+if [ "$PKG_MGR" = "opkg" ]; then
+  SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
+  # SourceForge 历史目录并不统一：aarch64 可能使用 generic，也可能使用具体 cortex 目录。
+  # 首选 generic，探测不到时自动回退运行时架构，不能把架构目录写死。
+  if [ -z "$SF_PROBE_URL" ] && [ "$SF_ARCH" != "$SYS_ARCH" ]; then
+    SF_ARCH="$SYS_ARCH"
+    SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH"
+    SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
+  fi
+else
+  SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/packages.adb")
+fi
+if [ -n "$SF_PROBE_URL" ]; then
+  SF_PREFIX="${SF_PROBE_URL%%/$SF_PATH/*}"
+  SF_MIRROR_QUERY=""
+  case "$SF_PROBE_URL" in *\?*) SF_MIRROR_QUERY="?${SF_PROBE_URL#*\?}";; esac
+  SF_OK=1
+  ok "PassWall 源 ✓ (SourceForge 实际索引校验通过)"
+  if [ -n "$SF_MIRROR" ]; then
+    info "使用手动指定 SourceForge 节点: $SF_MIRROR"
+    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/$SF_INDEX_FILE")
+    SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
+    SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
+    SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
+    ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
+  elif [ -n "$http_proxy$https_proxy$HTTP_PROXY$HTTPS_PROXY" ]; then
+    info "检测到代理环境，跳过 SF 多节点测速，直接使用默认下载节点"
+    SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
+    SF_MIRROR_QUERY=""
+    SF_MIRROR_LABEL="downloads"
+    ok "PassWall 下载节点: downloads ($SF_PREFIX)"
+  else
+    info "SF 多节点测速，选最快下载节点..."
+    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/$SF_INDEX_FILE")
+    SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
+    SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
+    SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
+    [ -z "$SF_PREFIX" ] && SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
+    ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
+  fi
+else
+  SF_OK=0
+  err "PassWall 源不可用（SourceForge 国外直连失败）"
+fi
+SF_BASE="$SF_PREFIX/$SF_PATH"
+
+# 国内 PassWall 备用源：immortalwrt 官方源自带 passwall 全家桶（luci-app-passwall/xray-core/sing-box 等），
+# 且国内有完整镜像（上海交大/VSean）。
+# 注意: 始终探测(不只在 SF 失败时)——SF 某些版本/架构构建残缺(如 21.02 aarch64 缺 passwall2/geoview),
+#       immortalwrt 仅作为同系列补充源；没有明确同系列版本时拒绝兜底。
+IW_OK=0; IW_USE=""; IW_VER=""
+# SourceForge 官方 PassWall 源可用时，不再额外探测 ImmortalWrt，避免
+# 24.10.6 等补充源被误认为 PassWall 安装候选，也避免混入第三方依赖。
+if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$PKG_MGR" = "opkg" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; } && [ "$SF_OK" != "1" ]; then
+  info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
+  # 仅根据原始固件版本选择同系列源；未知/snapshot/自定义版本拒绝 fallback。
+  IW_SYSTEM_SERIES=$(printf '%s\n' "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9].*/\1/p')
+  case "$SF_PW_VER" in
+    21.02) IW_CAND="21.02.7" ;; 22.03) IW_CAND="22.03.7" ;;
+    23.05) IW_CAND="23.05.4" ;; 24.10) IW_CAND="24.10.6" ;;
+    *) IW_CAND=""; info "ImmortalWrt fallback 拒绝：无法精确匹配系统版本 $SYS_RELEASE" ;;
+  esac
+  if [ -n "$IW_CAND" ] && [ "$IW_SYSTEM_SERIES" = "$SF_PW_VER" ]; then
+    for iw in "https://mirror.sjtu.edu.cn/immortalwrt" "https://mirrors.vsean.net/immortalwrt" "https://downloads.immortalwrt.org"; do
+    [ "$(check_url $iw/releases/$IW_CAND/packages/$SYS_ARCH/luci/Packages.gz)" != "200" ] && continue
+    IW_USE=$iw; IW_VER="$IW_CAND"
+    # 确认 luci feed 有 passwall（.gz 解压后 grep 包名）
+    if curl -sL --max-time 8 "$iw/releases/$IW_VER/packages/$SYS_ARCH/luci/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | grep -q "luci-app-passwall"; then
+      IW_OK=1
+      ok "国内 PassWall 源 ✓ (immortalwrt $IW_VER 镜像: $IW_USE)"
+      break
+    fi
+    done
+  fi
+  [ "$IW_OK" = "0" ] && info "immortalwrt 镜像不可用（仅 SF 源）"
+fi
+
+
+}
+
+# 支持手动指定: SF_MIRROR=downloads/master/jaist/nchc/netix/netcologne/pilotfiber/phoenixnap/versaweb/ixpeering/astuteinternet
+# 说明: SourceForge 镜像参数必须放在完整文件路径后: .../file.ipk?use_mirror=jaist
+sf_pick_node() {
+  local spath="$1" best="" best_spd=0 prefix spd url mirror
+  if [ -n "$SF_MIRROR" ]; then
+    case "$SF_MIRROR" in
+      downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads"; return ;;
+      master)    echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master"; return ;;
+      netix|jaist|nchc|netcologne|pilotfiber|phoenixnap|versaweb|ixpeering|astuteinternet) echo "https://$SF_MIRROR.dl.sourceforge.net/project/openwrt-passwall-build||$SF_MIRROR"; return ;;
+      *)         echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$SF_MIRROR|$SF_MIRROR"; return ;;
+    esac
+  fi
+  for mirror in downloads master jaist nchc netix netcologne pilotfiber phoenixnap versaweb ixpeering astuteinternet; do
+    case "$mirror" in
+      downloads) prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
+      master)    prefix="https://master.dl.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
+      *)         prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath?use_mirror=$mirror" ;;
+    esac
+    spd=$(curl -sL --max-time 6 -r 0-262143 -o /dev/null -w "%{speed_download}" "$url" 2>/dev/null)
+    [ -z "$spd" ] && continue
+    if awk "BEGIN{exit !($spd > $best_spd)}" 2>/dev/null; then
+      best_spd=$spd; best="$mirror"
+    fi
+  done
+  case "$best" in
+    ""|downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads" ;;
+    master)       echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master" ;;
+    *)            echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$best|$best" ;;
+  esac
+}
+
+# 实际下载索引并校验格式；不以 check_url/HTTP 状态码决定 SF_OK。
+sf_probe_index() {
+  local path="$1" u q tmp
+  tmp="/tmp/po_sf_index.$$"
+  for u in \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=$SF_MIRROR" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path" \
+    "https://master.dl.sourceforge.net/project/openwrt-passwall-build/$path" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=jaist" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc" \
+    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=netix"; do
+    rm -f "$tmp"
+    # 显式代理参数：兼容仅设置 ALL_PROXY/all_proxy 的环境，以及 curl 未自动继承代理变量的固件。
+    if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${http_proxy:-}${HTTP_PROXY:-}" ] && [ -n "${all_proxy:-${ALL_PROXY:-}}" ]; then
+      export https_proxy="${all_proxy:-${ALL_PROXY:-}}" http_proxy="${all_proxy:-${ALL_PROXY:-}}"
+    fi
+    curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 --max-time 90 -o "$tmp" "$u" 2>/dev/null || true
+    if [ "$PKG_MGR" = "opkg" ]; then
+      gzip -t "$tmp" 2>/dev/null && { rm -f "$tmp"; echo "$u"; return 0; }
+    else
+      # APK 索引 packages.adb 是 ADB 格式，前 4 字节魔数 ADBd；404 HTML 错误页不能算成功。
+      [ "$(dd if="$tmp" bs=1 count=4 2>/dev/null)" = "ADBd" ] && { rm -f "$tmp"; echo "$u"; return 0; }
+    fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
+probe_system_source_candidates() {
+# SourceForge/ImmortalWrt 等代理插件源必须等用户选择后再探测；
+# 这里保留系统源/固件镜像的基础探测，避免 OpenClash/iStore 单独安装访问 SF。
+hdr "源连通性检测"
+SF_OK=0; OW_OK=0; OW_USE=""
+
+
 
 # 候选 OpenWrt 镜像：官方源作为版本/内容基准，国内镜像作为连通性兜底。
 # 官方源最权威，不保证中国大陆直连稳定；阿里云通常更快，但可能存在同步延迟。
@@ -712,187 +1046,6 @@ else
   fi
 fi
 
-probe_proxy_sources() {
-# PassWall/PassWall2 用户态插件源只按固件包线和 SYS_ARCH 选择。
-# 普通插件流程不使用 SYS_TARGET。
-# 注意: SourceForge 打包只到 24.10，25.12 用 snapshots(apk)；opkg 系统降级到最近可用系列
-SF_PW_VER="$PW_VER"
-[ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
-# SourceForge 包目录直接使用固件报告的 SYS_ARCH；不再把 aarch64_cortex-a53
-# 改写为 aarch64_generic，也不依赖 SYS_TARGET。插件主包按软件包架构直链下载。
-SF_ARCH="$SYS_ARCH"
-# Snapshot/厂商自定义版本不得自动套用正式版 userspace 源。
-[ -n "$OW_VER" ] && SF_PW_VER=$(echo "$OW_VER" | cut -d. -f1-2)
-[ -z "$SF_PW_VER" ] && SF_PW_VER="unknown"
-# SourceForge 这里仅用于 PassWall 用户态主包，不是系统/内核 fallback。
-# 未知或 Snapshot 固件仍可尝试官方包目录；最终由实际 Packages.gz、包名、
-# Architecture 和 Depends 校验决定，绝不据此改写系统源。
-if [ "$PKG_MGR" = "opkg" ] && [ "$SF_PW_VER" = "unknown" ]; then
-  SF_PW_VER="24.10"
-fi
-# SourceForge 的 21/22 旧目录兼容 aarch64 generic，但不能覆盖明确的 24.10。
-# APK/OpenWrt 25.12 uses SourceForge's packages.adb under releases/packages-25.12.
-# opkg releases still use Packages.gz; do not map APK 25.12 to snapshots.
-if [ "$PKG_MGR" = "opkg" ]; then
-  case "$SF_PW_VER" in
-    25.12) SF_PATH="releases/packages-25.12/$SF_ARCH" ;;
-    21.02|22.03|23.05|24.10) SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH" ;;
-    *) SF_PATH=""; SF_OK=0 ;;
-  esac
-else
-  case "$SF_PW_VER" in
-    25.12) SF_PATH="releases/packages-25.12/$SYS_ARCH" ;;
-    *) SF_PATH="snapshots/packages/$SYS_ARCH" ;;
-  esac
-fi
-
-# SF 多节点测速: 选最快下载节点 (哪里快从哪里下)
-SF_INDEX_FILE="Packages.gz"
-[ "$PKG_MGR" = "apk" ] && SF_INDEX_FILE="packages.adb"
-if [ "$PKG_MGR" = "opkg" ] && [ -z "$SF_PATH" ]; then
-  SF_OK=0
-  info "当前 OPKG 固件无匹配 PassWall release 源，跳过 SourceForge release fallback"
-fi
-# 支持手动指定: SF_MIRROR=downloads/master/jaist/nchc/netix/netcologne/pilotfiber/phoenixnap/versaweb/ixpeering/astuteinternet
-# 说明: SourceForge 镜像参数必须放在完整文件路径后: .../file.ipk?use_mirror=jaist
-sf_pick_node() {
-  local spath="$1" best="" best_spd=0 prefix spd url mirror
-  if [ -n "$SF_MIRROR" ]; then
-    case "$SF_MIRROR" in
-      downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads"; return ;;
-      master)    echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master"; return ;;
-      netix|jaist|nchc|netcologne|pilotfiber|phoenixnap|versaweb|ixpeering|astuteinternet) echo "https://$SF_MIRROR.dl.sourceforge.net/project/openwrt-passwall-build||$SF_MIRROR"; return ;;
-      *)         echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$SF_MIRROR|$SF_MIRROR"; return ;;
-    esac
-  fi
-  for mirror in downloads master jaist nchc netix netcologne pilotfiber phoenixnap versaweb ixpeering astuteinternet; do
-    case "$mirror" in
-      downloads) prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
-      master)    prefix="https://master.dl.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath" ;;
-      *)         prefix="https://downloads.sourceforge.net/project/openwrt-passwall-build"; url="$prefix/$spath?use_mirror=$mirror" ;;
-    esac
-    spd=$(curl -sL --max-time 6 -r 0-262143 -o /dev/null -w "%{speed_download}" "$url" 2>/dev/null)
-    [ -z "$spd" ] && continue
-    if awk "BEGIN{exit !($spd > $best_spd)}" 2>/dev/null; then
-      best_spd=$spd; best="$mirror"
-    fi
-  done
-  case "$best" in
-    ""|downloads) echo "https://downloads.sourceforge.net/project/openwrt-passwall-build||downloads" ;;
-    master)       echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build||master" ;;
-    *)            echo "https://downloads.sourceforge.net/project/openwrt-passwall-build|?use_mirror=$best|$best" ;;
-  esac
-}
-
-# 实际下载索引并校验格式；不以 check_url/HTTP 状态码决定 SF_OK。
-sf_probe_index() {
-  local path="$1" u q tmp
-  tmp="/tmp/po_sf_index.$$"
-  for u in \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=$SF_MIRROR" \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path" \
-    "https://master.dl.sourceforge.net/project/openwrt-passwall-build/$path" \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=jaist" \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=nchc" \
-    "https://downloads.sourceforge.net/project/openwrt-passwall-build/$path?use_mirror=netix"; do
-    rm -f "$tmp"
-    # 显式代理参数：兼容仅设置 ALL_PROXY/all_proxy 的环境，以及 curl 未自动继承代理变量的固件。
-    if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${http_proxy:-}${HTTP_PROXY:-}" ] && [ -n "${all_proxy:-${ALL_PROXY:-}}" ]; then
-      export https_proxy="${all_proxy:-${ALL_PROXY:-}}" http_proxy="${all_proxy:-${ALL_PROXY:-}}"
-    fi
-    curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 --max-time 90 -o "$tmp" "$u" 2>/dev/null || true
-    if [ "$PKG_MGR" = "opkg" ]; then
-      gzip -t "$tmp" 2>/dev/null && { rm -f "$tmp"; echo "$u"; return 0; }
-    else
-      # APK 索引 packages.adb 是 ADB 格式，前 4 字节魔数 ADBd；404 HTML 错误页不能算成功。
-      [ "$(dd if="$tmp" bs=1 count=4 2>/dev/null)" = "ADBd" ] && { rm -f "$tmp"; echo "$u"; return 0; }
-    fi
-  done
-  rm -f "$tmp"
-  return 1
-}
-
-SF_MIRROR_QUERY=""; SF_MIRROR_LABEL="default"
-SF_PROBE_URL=""
-if [ "$PKG_MGR" = "opkg" ]; then
-  SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
-  # SourceForge 历史目录并不统一：aarch64 可能使用 generic，也可能使用具体 cortex 目录。
-  # 首选 generic，探测不到时自动回退运行时架构，不能把架构目录写死。
-  if [ -z "$SF_PROBE_URL" ] && [ "$SF_ARCH" != "$SYS_ARCH" ]; then
-    SF_ARCH="$SYS_ARCH"
-    SF_PATH="releases/packages-$SF_PW_VER/$SF_ARCH"
-    SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/Packages.gz")
-  fi
-else
-  SF_PROBE_URL=$(sf_probe_index "$SF_PATH/passwall_luci/packages.adb")
-fi
-if [ -n "$SF_PROBE_URL" ]; then
-  SF_PREFIX="${SF_PROBE_URL%%/$SF_PATH/*}"
-  SF_MIRROR_QUERY=""
-  case "$SF_PROBE_URL" in *\?*) SF_MIRROR_QUERY="?${SF_PROBE_URL#*\?}";; esac
-  SF_OK=1
-  ok "PassWall 源 ✓ (SourceForge 实际索引校验通过)"
-  if [ -n "$SF_MIRROR" ]; then
-    info "使用手动指定 SourceForge 节点: $SF_MIRROR"
-    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/$SF_INDEX_FILE")
-    SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
-    SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
-    SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
-    ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
-  elif [ -n "$http_proxy$https_proxy$HTTP_PROXY$HTTPS_PROXY" ]; then
-    info "检测到代理环境，跳过 SF 多节点测速，直接使用默认下载节点"
-    SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
-    SF_MIRROR_QUERY=""
-    SF_MIRROR_LABEL="downloads"
-    ok "PassWall 下载节点: downloads ($SF_PREFIX)"
-  else
-    info "SF 多节点测速，选最快下载节点..."
-    SF_PICK=$(sf_pick_node "$SF_PATH/passwall_luci/$SF_INDEX_FILE")
-    SF_PREFIX=$(echo "$SF_PICK" | cut -d'|' -f1)
-    SF_MIRROR_QUERY=$(echo "$SF_PICK" | cut -d'|' -f2)
-    SF_MIRROR_LABEL=$(echo "$SF_PICK" | cut -d'|' -f3)
-    [ -z "$SF_PREFIX" ] && SF_PREFIX="https://downloads.sourceforge.net/project/openwrt-passwall-build"
-    ok "PassWall 下载节点: $SF_MIRROR_LABEL ($SF_PREFIX)"
-  fi
-else
-  SF_OK=0
-  err "PassWall 源不可用（SourceForge 国外直连失败）"
-fi
-SF_BASE="$SF_PREFIX/$SF_PATH"
-
-# 国内 PassWall 备用源：immortalwrt 官方源自带 passwall 全家桶（luci-app-passwall/xray-core/sing-box 等），
-# 且国内有完整镜像（上海交大/VSean）。
-# 注意: 始终探测(不只在 SF 失败时)——SF 某些版本/架构构建残缺(如 21.02 aarch64 缺 passwall2/geoview),
-#       immortalwrt 仅作为同系列补充源；没有明确同系列版本时拒绝兜底。
-IW_OK=0; IW_USE=""; IW_VER=""
-# SourceForge 官方 PassWall 源可用时，不再额外探测 ImmortalWrt，避免
-# 24.10.6 等补充源被误认为 PassWall 安装候选，也避免混入第三方依赖。
-if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$PKG_MGR" = "opkg" ] && { [ "$INSTALL_PW" = "1" ] || [ "$INSTALL_PW2" = "1" ]; } && [ "$SF_OK" != "1" ]; then
-  info "探测国内 immortalwrt 镜像（PassWall 补充源）..."
-  # 仅根据原始固件版本选择同系列源；未知/snapshot/自定义版本拒绝 fallback。
-  IW_SYSTEM_SERIES=$(printf '%s\n' "$SYS_RELEASE" | sed -n 's/^\(21\.02\|22\.03\|23\.05\|24\.10\)\.[0-9].*/\1/p')
-  case "$SF_PW_VER" in
-    21.02) IW_CAND="21.02.7" ;; 22.03) IW_CAND="22.03.7" ;;
-    23.05) IW_CAND="23.05.4" ;; 24.10) IW_CAND="24.10.6" ;;
-    *) IW_CAND=""; info "ImmortalWrt fallback 拒绝：无法精确匹配系统版本 $SYS_RELEASE" ;;
-  esac
-  if [ -n "$IW_CAND" ] && [ "$IW_SYSTEM_SERIES" = "$SF_PW_VER" ]; then
-    for iw in "https://mirror.sjtu.edu.cn/immortalwrt" "https://mirrors.vsean.net/immortalwrt" "https://downloads.immortalwrt.org"; do
-    [ "$(check_url $iw/releases/$IW_CAND/packages/$SYS_ARCH/luci/Packages.gz)" != "200" ] && continue
-    IW_USE=$iw; IW_VER="$IW_CAND"
-    # 确认 luci feed 有 passwall（.gz 解压后 grep 包名）
-    if curl -sL --max-time 8 "$iw/releases/$IW_VER/packages/$SYS_ARCH/luci/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null | grep -q "luci-app-passwall"; then
-      IW_OK=1
-      ok "国内 PassWall 源 ✓ (immortalwrt $IW_VER 镜像: $IW_USE)"
-      break
-    fi
-    done
-  fi
-  [ "$IW_OK" = "0" ] && info "immortalwrt 镜像不可用（仅 SF 源）"
-fi
-
-
-}
 
 # OpenWrt userspace 源验证：只验证 packages/$SYS_ARCH 下的普通包索引。
 OW_OK=0
@@ -943,7 +1096,7 @@ echo "  1) PassWall（全量核心：Xray + sing-box）"
 echo "  2) PassWall（仅 Xray 核心）"
 echo "  3) PassWall（仅 sing-box 核心）"
 echo "  4) PassWall2 (新版，可与 PassWall 共存）"
-echo "  5) DAED (独立代理内核/面板）"
+echo "  5) DAED (独立代理内核/面板) — 当前版本未实现"
 echo "  6) OpenClash (Clash 内核）"
 echo "  7) SSR Plus (ShadowSocksR Plus+）"
 echo "  8) AdGuardHome (DNS 广告过滤）"
@@ -959,9 +1112,13 @@ printf "请输入选项 (0/1/2/3/4/5/6/7/8/9/10/11/12/13): "
 while :; do
   if ! read -r MAIN_CHOICE; then
     echo ""
-    info "输入流已关闭，默认安装 PassWall"
-    MAIN_CHOICE="1"
-    break
+    if [ "$PO_ASSUME_YES" = "1" ]; then
+      info "--yes 模式：默认安装 PassWall"
+      MAIN_CHOICE="1"
+      break
+    fi
+    err "输入流已关闭且未指定 --yes，已退出（未做任何修改）"
+    exit 2
   fi
   # 某些 SSH/串口终端会把回车作为 CRLF，去掉 CR 和首尾空白，避免输入 1 被判无效。
   MAIN_CHOICE=$(printf '%s' "$MAIN_CHOICE" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
@@ -988,13 +1145,18 @@ case "$MAIN_CHOICE" in
     2) PASSWALL_CORE_MODE="xray"; PASSWALL_MINIMAL=0; INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall（仅 Xray 核心）" ;;
   3) PASSWALL_CORE_MODE="singbox"; PASSWALL_MINIMAL=1; INSTALL_PW=1; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall（仅 sing-box 核心）" ;;
   4) INSTALL_PW=0; INSTALL_PW2=1; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: PassWall2" ;;
-  5) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=1; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: DAED" ;;
+  5)
+    # DAED 至今没有实现：以前这里只是置位 INSTALL_DAED，然后整轮安装什么都不做却返回成功。
+    warn "DAED 安装尚未实现（当前版本不支持）"
+    err "本次未执行任何操作，已退出"
+    exit 2
+    ;;
   6) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=1; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: OpenClash" ;;
   7) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=1; INSTALL_AGH=0; INSTALL_ISTORE=0; ok "选择: SSR Plus" ;;
   8) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=1; INSTALL_ISTORE=0; ok "选择: AdGuardHome" ;;
   9) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=1; ok "选择: iStore 商店" ;;
   10) INSTALL_PW=0; INSTALL_PW2=0; INSTALL_OC=0; INSTALL_DAED=0; INSTALL_SSR=0; INSTALL_AGH=0; INSTALL_ISTORE=0; INSTALL_PARTEXP=1; ok "选择: 分区扩容 (luci-app-partexp)" ;;
-  11) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=1; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; INSTALL_PARTEXP=0; PASSWALL_CORE_MODE="full"; ok "选择: 全部安装（不含高风险分区扩容）" ;;
+  11) INSTALL_PW=1; INSTALL_PW2=1; INSTALL_OC=1; INSTALL_DAED=0; INSTALL_SSR=1; INSTALL_AGH=1; INSTALL_ISTORE=1; INSTALL_PARTEXP=0; PASSWALL_CORE_MODE="full"; ok "选择: 全部安装（DAED 未实现，自动跳过；不含高风险分区扩容）" ;;
   12)
     echo ""
     echo "请选择要卸载的软件："
@@ -1100,7 +1262,7 @@ report_install_space_error() {
     [ "$rc" = "139" ] || return 1
     free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
     [ -z "$free_kb" ] && free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
-    [ -n "$free_kb" ] && [ "$free_kb" -ge 45000 ] && return 1
+    [ -n "$free_kb" ] && [ "$free_kb" -ge "$PO_GEO_MIN_FREE_KB" ] && return 1
   fi
   free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
   [ -z "$free_kb" ] && free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
@@ -1127,11 +1289,13 @@ if [ "$UNINSTALL_ONLY" != "1" ]; then
   [ "$INSTALL_SSR" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 60))
   [ "$INSTALL_AGH" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 40))
   [ "$INSTALL_ISTORE" = "1" ] && REQUIRED_SPACE_MB=$((REQUIRED_SPACE_MB + 20))
-  OVERLAY_SPACE=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
-  [ -z "$OVERLAY_SPACE" ] && OVERLAY_SPACE=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
-  # 仅输出空间诊断，不按估算值拦截安装；实际 ENOSPC 由包管理器返回。
-  OVERLAY_SPACE=$((OVERLAY_SPACE / 1024))
-  ok "Overlay 可用: ${OVERLAY_SPACE}MB（仅诊断，不拦截安装）"
+  # df 失败时 get_overlay_free_mb 返回空串，必须判空后再算，否则 $(( )) 会算术报错中断脚本。
+  OVERLAY_SPACE=$(get_overlay_free_mb)
+  if [ -n "$OVERLAY_SPACE" ]; then
+    ok "Overlay 可用: ${OVERLAY_SPACE}MB（仅诊断，不拦截安装）"
+  else
+    warn "无法读取 Overlay 可用空间（df 无有效输出），跳过空间诊断"
+  fi
   info "插件完整安装预估: ${REQUIRED_SPACE_MB}MB（仅供参考）"
 fi
 
@@ -1245,39 +1409,27 @@ $(awk '!/^#/ && ($1=="src/gz" || $1=="src") {print $2, $3}' /etc/opkg/distfeeds.
 EOF
   return "$bad"
 }
-# 将本次更新明确失败的 OPKG 源注释掉，避免后续刷新持续访问坏源。
-disable_failed_opkg_feeds() {
-  local log="$1" file tmp line url changed
-  [ -s "$log" ] || return 0
-  # 系统源允许在明确 404/签名/索引损坏时逐行注释，但绝不删除或清空文件。
-  for file in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf /etc/opkg/compatfeeds.conf; do
-    [ -f "$file" ] || continue
-    tmp="/tmp/$(basename "$file").po-disabled"
-    changed=0
-    : > "$tmp"
-    while IFS= read -r line; do
-      case "$line" in
-        src/gz\ *|src\ *)
-          url=$(printf '%s\n' "$line" | awk '{print $3}')
-          if [ -n "$url" ] && grep -F "$url" "$log" 2>/dev/null | grep -qE 'Failed|failed|ERROR|404|wget returned|Collected errors|Signature check failed'; then
-            printf '# PO-installer disabled failed feed: %s\n' "$line" >> "$tmp"
-            changed=1
-            continue
-          fi
-          ;;
-      esac
-      printf '%s\n' "$line" >> "$tmp"
-    done < "$file"
-    if [ "$changed" = "1" ]; then
-      cat "$tmp" > "$file"
-      info "已逐行注释明确失效的 OPKG 源（保留原内容）: $file"
-    fi
-    rm -f "$tmp"
-  done
-}
 
 # 在 BusyBox/GNU 环境下为 OPKG 刷新提供统一超时；保留完整日志，避免
 # 某个慢源让交互流程无限等待。调用方仍需按日志判断具体失败源。
+# 递归终止进程及其全部子进程。以前超时只 kill 父进程，opkg/curl 的子进程会
+# 继续跑并继续往 log 写，且 wait 的返回码不可靠。
+po_kill_tree() {
+  local target="$1" sig="${2:-TERM}" p line
+  [ -n "$target" ] || return 0
+  for p in /proc/[0-9]*; do
+    [ -r "$p/stat" ] || continue
+    # 只读 /proc/<pid>/stat 并剥掉 "pid (comm) " 前缀（comm 可能含空格），
+    # 不 fork awk：真机上进程数上百时逐个 awk 会明显拖慢超时处理。
+    IFS= read -r line < "$p/stat" 2>/dev/null || continue
+    line=${line##*') '}
+    set -- $line
+    [ "$2" = "$target" ] && po_kill_tree "${p##*/}" "$sig"
+  done
+  kill "-$sig" "$target" 2>/dev/null || true
+  return 0
+}
+
 opkg_update_with_timeout() {
   local log="$1" seconds="${2:-180}" pid elapsed rc
   if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then
@@ -1290,9 +1442,10 @@ opkg_update_with_timeout() {
   pid=$!; elapsed=0
   while kill -0 "$pid" 2>/dev/null; do
     [ "$elapsed" -ge "$seconds" ] && {
-      kill "$pid" 2>/dev/null || true
+      po_kill_tree "$pid" TERM
       sleep 1
-      kill -9 "$pid" 2>/dev/null || true
+      po_kill_tree "$pid" KILL
+      wait "$pid" 2>/dev/null || true
       err "OPKG 源刷新超时 (${seconds}s)，详见: $log"
       return 124
     }
@@ -1431,6 +1584,16 @@ validate_unique_opkg_feed_names() {
   return 0
 }
 
+# 脚本自己写入的源（官方/镜像/代理）必须硬校验；用户自己加的源不通时
+# 不能让整次安装失败并改写系统源，只跳过并告警。PO_STRICT_SOURCES=1 可强制严格。
+is_managed_url() {
+  case "$1" in
+    *openwrt.org*|*mirrors.aliyun.com*|*sourceforge.net*|*githubusercontent.com*|*github.com*|\
+    *istoreos.com*|*openwrt.ai*|*ghfast.top*|*gh-proxy.com*|*ghproxy.net*|*gh-proxy.org*) return 0 ;;
+  esac
+  return 1
+}
+
 validate_opkg_system_source() {
   local log=/tmp/po_system_opkg_update.log feed_url feed_name feed_code
   echo "系统源逐 feed 检测："
@@ -1459,6 +1622,21 @@ EOF
   local rc=$?
   # 使用 OPKG 原生刷新全部已配置源；签名校验由 OPKG 负责。
   if [ "$rc" != "0" ]; then
+    # 区分失败源：脚本管理的源不通是真故障；用户自己加的源不通只跳过。
+    local bad_url bad_managed=0
+    bad_url=$(grep -oE 'https?://[^ ]+' "$log" 2>/dev/null | sed 's#/[^/]*$##' | sort -u)
+    for feed_url in $bad_url; do
+      if is_managed_url "$feed_url"; then
+        bad_managed=1
+        break
+      fi
+    done
+    if [ "$bad_managed" = "0" ] && [ "${PO_STRICT_SOURCES:-0}" != "1" ]; then
+      warn "仅用户自定义源不可达，已跳过（导出 PO_STRICT_SOURCES=1 可改为硬失败）"
+      for feed_url in $bad_url; do warn "  不可达: $feed_url"; done
+      rm -f "$log" /tmp/po_opkg_source_urls
+      return 0
+    fi
     err "OPKG 系统源更新失败或存在错误"
     grep -E 'Failed|ERROR|gzip|timeout|HTTP' "$log" 2>/dev/null || true
     SYS_SOURCE_NETWORK_FAIL=1
@@ -1552,10 +1730,12 @@ else
     # 新装且系统源异常：停用原系统源，分别从阿里云和官方目录动态匹配
     # 当前系列/架构的 userspace 源。版本、架构均来自前面的探测，不写死。
     if [ -f /etc/opkg/distfeeds.conf ]; then
-      awk '/^[[:space:]]*src(\/gz)?[[:space:]]/ {print "# PO-installer disabled broken system feed: " $0; next} {print}' \
-        /etc/opkg/distfeeds.conf > /tmp/distfeeds.po-disabled && cat /tmp/distfeeds.po-disabled > /etc/opkg/distfeeds.conf
-      rm -f /tmp/distfeeds.po-disabled
-      info "已注销异常系统源（原配置保留为注释）"
+      if [ -f /etc/opkg/distfeeds.conf ]; then
+        po_write_conf /etc/opkg/distfeeds.conf awk \
+          '/^[[:space:]]*src(\/gz)?[[:space:]]/ {print "# PO-installer disabled broken system feed: " $0; next} {print}' \
+          /etc/opkg/distfeeds.conf \
+          && info "已注销异常系统源（原配置保留为注释，备份 /etc/opkg/distfeeds.conf.po-bak）"
+      fi
     fi
     OW_SERIES="$PW_VER"
     [ -z "$OW_SERIES" -o "$OW_SERIES" = "unknown" ] && OW_SERIES=$(printf '%s\n' "$KERNEL_VER" | sed -n 's/^5\.4\..*/21.02/p; s/^5\.10\..*/22.03/p; s/^5\.15\..*/23.05/p; s/^6\..*/24.10/p')
@@ -1597,9 +1777,12 @@ else
         add_fallback_opkg_feed po_aliyun_telephony "$ALIYUN_BASE/telephony"
         ok "已匹配阿里云 OpenWrt userspace 源 ($ALIYUN_BASE)"
       fi
-      cat /tmp/systemfeeds.po-new > "$FEED_FILE"
+      if po_write_conf "$FEED_FILE" cat /tmp/systemfeeds.po-new; then
+        ok "已配置匹配的阿里云 OpenWrt userspace 源"
+      else
+        err "写入系统源失败，已保留原配置（$FEED_FILE）"
+      fi
       rm -f /tmp/systemfeeds.po-new
-      ok "已配置匹配的阿里云 OpenWrt userspace 源"
       elif [ "$ISTORE_FALLBACK_OK" = "1" ]; then
         ok "已使用 iStoreOS 专用源，不添加通用兜底源"
       else
@@ -1613,7 +1796,7 @@ else
         /^# PO-installer APK fallback BEGIN$/ { skip=1; next }
         /^# PO-installer APK fallback END$/ { skip=0; next }
         !skip { print }
-      ' "$APK_REPO_FILE" > /tmp/apk-repositories.po-new 2>/dev/null || : > /tmp/apk-repositories.po-new
+      ' "$APK_REPO_FILE" > "/tmp/apk-repositories.po-build.$$" 2>/dev/null || : > "/tmp/apk-repositories.po-build.$$"
       {
         echo "# PO-installer APK fallback BEGIN"
         echo "$OW_USE/packages/$SYS_ARCH/base/packages.adb"
@@ -1622,10 +1805,13 @@ else
         echo "$OW_USE/packages/$SYS_ARCH/routing/packages.adb"
         echo "$OW_USE/packages/$SYS_ARCH/telephony/packages.adb"
         echo "# PO-installer APK fallback END"
-      } >> /tmp/apk-repositories.po-new
-      cat /tmp/apk-repositories.po-new > "$APK_REPO_FILE"
-      rm -f /tmp/apk-repositories.po-new
-      ok "已配置 OpenWrt 镜像源 ($OW_USE)"
+      } >> "/tmp/apk-repositories.po-build.$$"
+      if po_write_conf "$APK_REPO_FILE" cat "/tmp/apk-repositories.po-build.$$"; then
+        ok "已配置 OpenWrt 镜像源 ($OW_USE)"
+      else
+        err "写入 APK 源失败，已保留原配置（$APK_REPO_FILE）"
+      fi
+      rm -f "/tmp/apk-repositories.po-build.$$"
     else
       err "无可用镜像源，系统源保持不动（未修改）"
     fi
@@ -1697,24 +1883,28 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
   if [ "$PKG_MGR" = "opkg" ]; then
     # 清旧声明（幂等）: 仅过滤代理插件源；保留已修复的 openwrt_ 系统依赖源 (避免 busybox sed -i 符号链接坑)
     if [ -f /etc/opkg/customfeeds.conf ]; then
-      grep -v -e "passwall" -e "ssr" -e "helloworld" -e "kiddin9" -e "^src/gz iw_" /etc/opkg/customfeeds.conf > /tmp/customfeeds.tmp 2>/dev/null || true
-      cat /tmp/customfeeds.tmp > /etc/opkg/customfeeds.conf 2>/dev/null
-      rm -f /tmp/customfeeds.tmp
+      # 精确名匹配，不用 /passwall|ssr/ 子串：否则用户自建的 myssr_mirror、
+      # passwall_backup 之类会被一起注释掉。
+      po_write_conf --allow-empty /etc/opkg/customfeeds.conf awk \
+        'BEGIN { split("passwall_luci passwall_packages passwall2 helloworld kiddin9", a, " "); for (i in a) legacy[a[i]] = 1 }
+         /^[[:space:]]*src(\/gz)?[[:space:]]/ && (legacy[$2] || $2 ~ /^iw_/) { print "# PO-installer disabled obsolete feed: " $0; next }
+         { print }' \
+        /etc/opkg/customfeeds.conf || warn "清理 customfeeds 失败，已保留原文件"
     fi
     add_opkg_feed_once() {
-      local name="$1" url="$2" tmp
+      local name="$1" url="$2"
       [ -n "$name" ] && [ -n "$url" ] || return 0
       # 同名 custom feed 可能是上一次运行留下的旧架构/旧版本地址；
       # 不能直接 return，否则脚本看似追加成功，实际仍使用错误源。
+      # 用 awk -v 精确比名，避免 $name 里的元字符被当成正则。
       if [ -f /etc/opkg/customfeeds.conf ]; then
-        tmp="/tmp/customfeeds.$$.tmp"
-        grep -vE "^src/gz[[:space:]]+$name[[:space:]]|^src[[:space:]]+$name[[:space:]]" /etc/opkg/customfeeds.conf > "$tmp" 2>/dev/null || true
-        cat "$tmp" > /etc/opkg/customfeeds.conf 2>/dev/null || true
-        rm -f "$tmp"
+        po_write_conf --allow-empty /etc/opkg/customfeeds.conf awk -v n="$name" \
+          '($1 == "src/gz" || $1 == "src") && $2 == n {next} {print}' \
+          /etc/opkg/customfeeds.conf || return 1
       fi
       # distfeeds 中的系统源不修改；若 URL 已存在于任一配置，不重复追加。
       awk '/^src\/gz |^src / {print $3}' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | grep -Fxq "$url" && return 0
-      echo "src/gz $name $url" >> /etc/opkg/customfeeds.conf
+      echo "src/gz $name $url" >> /etc/opkg/customfeeds.conf 2>/dev/null || warn "写入 $name 源失败（overlay 空间不足？）"
     }
     # 0) OpenWrt 官方/镜像 packages 源：系统源异常时追加完整依赖源。
     #    对第三方 SNAPSHOT：即使系统源能更新，也可能缺 PassWall 必需的 coreutils-timeout/lyaml；
@@ -1783,9 +1973,9 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     elif [ "$SYS_SOURCE_OK" = "1" ]; then
       # 系统源完整时清理旧版残留；不碰 distfeeds.conf 中的系统源。
       if [ -f /etc/opkg/customfeeds.conf ]; then
-        grep -v -e '^src/gz openwrt_' -e '^src/gz iw_' /etc/opkg/customfeeds.conf > /tmp/customfeeds.clean 2>/dev/null || true
-        cat /tmp/customfeeds.clean > /etc/opkg/customfeeds.conf 2>/dev/null || true
-        rm -f /tmp/customfeeds.clean
+        po_write_conf --allow-empty /etc/opkg/customfeeds.conf awk \
+          '!/^src\/gz (openwrt_|iw_)/' /etc/opkg/customfeeds.conf \
+          || warn "清理 customfeeds 失败，已保留原文件"
       fi
       info "系统源正常，不追加 OpenWrt 镜像依赖源（减少 opkg 刷新时间）"
     else
@@ -1797,22 +1987,41 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     # OpenClash 的专用源必须等官方下载安装确实失败后再追加；不能因系统源
     # 失败或预先探测成功而在官方路径前污染配置。
     if [ "$IW_OK" = "1" ] && [ "$INSTALL_OC" != "1" ] && [ "$SF_OK" != "1" ]; then
-      echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf
-      echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf
+      echo "src/gz iw_luci $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/luci" >> /etc/opkg/customfeeds.conf 2>/dev/null \
+        || warn "写入 iw_luci 源失败（overlay 空间不足？）"
+      echo "src/gz iw_packages $IW_USE/releases/$IW_VER/packages/$SYS_ARCH/packages" >> /etc/opkg/customfeeds.conf 2>/dev/null \
+        || warn "写入 iw_packages 源失败（overlay 空间不足？）"
     fi
     # 2) SF 源（仅 PassWall/PassWall2 需要；SSR Plus 走 fw876/helloworld Release，OpenClash 走 GitHub）
     if [ "$SF_OK" = "1" ] && [ "$LEGACY_OPKG" = "1" ]; then
       info "旧版 OPKG：仅使用 $SF_PW_VER/$SF_ARCH PassWall 源，避免跨版本依赖混装"
     fi
     if [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
-      # SourceForge key 也按当前最快节点下载；固定 master 在部分网络下会失败，导致 opkg update 签名失败。
-      curl -fsL --max-time 20 -o /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
-        wget -q --no-check-certificate -O /tmp/ipk.pub "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
-        curl -fsL --max-time 20 -o /tmp/ipk.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub 2>/dev/null || true
-      [ -s /tmp/ipk.pub ] && opkg-key add /tmp/ipk.pub 2>/dev/null || true
-      for feed in passwall_luci passwall_packages passwall2; do
-        echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf
-      done
+      # SourceForge key 按当前最快节点下载；固定 master 在部分网络下会失败，导致 opkg update 签名失败。
+      # 公钥是整条信任链的根：必须走可校验证书的 HTTPS，并尽可能比对已知指纹。
+      PO_PUB="/tmp/ipk.pub.$$"; PO_PUB_WANT="${PO_IPK_PUB_SHA256:-}"; PO_PUB_GOT=""
+      curl -fsL --max-time 20 -o "$PO_PUB" "$SF_PREFIX/ipk.pub$SF_MIRROR_QUERY" 2>/dev/null || \
+        curl -fsL --max-time 20 -o "$PO_PUB" "https://master.dl.sourceforge.net/project/openwrt-passwall-build/ipk.pub" 2>/dev/null || true
+      if [ ! -s "$PO_PUB" ]; then
+        err "无法下载 PassWall 签名公钥 ipk.pub，已放弃 PassWall 源（不接受无签名源）"
+        SF_OK=0
+      else
+        PO_PUB_GOT=$(sha256sum "$PO_PUB" 2>/dev/null | awk '{print $1}')
+        if [ -n "$PO_PUB_WANT" ] && [ "$PO_PUB_GOT" != "$PO_PUB_WANT" ]; then
+          err "ipk.pub 指纹不匹配：期望 $PO_PUB_WANT，实际 ${PO_PUB_GOT:-未知}；已放弃 PassWall 源"
+          SF_OK=0
+        else
+          [ -z "$PO_PUB_WANT" ] && warn "ipk.pub 未固定指纹（导出 PO_IPK_PUB_SHA256 可强制校验），本次 sha256=$PO_PUB_GOT"
+          opkg-key add "$PO_PUB" 2>/dev/null || warn "opkg-key add 失败，PassWall 源可能因签名失败不可用"
+        fi
+      fi
+      rm -f "$PO_PUB"
+      if [ "$SF_OK" = "1" ]; then
+        for feed in passwall_luci passwall_packages passwall2; do
+          echo "src/gz $feed $SF_BASE/$feed" >> /etc/opkg/customfeeds.conf 2>/dev/null \
+            || warn "写入 $feed 源失败（overlay 空间不足？）"
+        done
+      fi
     fi
     # 3) SSR Plus 源：使用 openwrt.ai/kiddin9 预编译源（R3S aarch64_generic/24.10 等有现成包）
     SSR_OK=0; SSR_BASE=""
@@ -1833,6 +2042,12 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
       local arch changed=0
       for arch in $(grep -hoE 'packages/[A-Za-z0-9_.-]+/(base|luci|packages|routing|telephony)' /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf 2>/dev/null | sed -n 's#packages/\([^/]*\)/.*#\1#p' | sort -u); do
         echo "$arch" | grep -qE '^(all|noarch|any)$' && continue
+        # 只注册与本机架构一致的：源里可能混有多个架构目录，跨 ABI 注册会让
+        # opkg 报 no valid architecture，或把异架构包当可用包安装。
+        if [ -n "$SYS_ARCH" ] && [ "$arch" != "$SYS_ARCH" ]; then
+          info "跳过非本机架构 $arch（$SYS_ARCH 系统，避免跨 ABI 混源）"
+          continue
+        fi
         if ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx "$arch"; then
           echo "arch $arch 5" >> /etc/opkg.conf
           changed=1
@@ -1933,11 +2148,15 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
     elif [ "$SF_OK" = "1" ] && [ "$INSTALL_PW$INSTALL_PW2" != "00" ]; then
       APK_REPO_BACKUP="/tmp/po-apk-repo.$$.bak"
       cp -f "$APK_REPO_FILE" "$APK_REPO_BACKUP" 2>/dev/null || true
-      sed -i '/passwall_luci/d; /passwall_packages/d; /passwall2/d' "$APK_REPO_FILE" 2>/dev/null || true
+      # 不用 sed -i：busybox sed -i 非原子，且会替换掉符号链接本身。
+      po_write_conf --allow-empty "$APK_REPO_FILE" awk \
+        '!/passwall_luci|passwall_packages|passwall2/' "$APK_REPO_FILE" \
+        || warn "清理 APK 代理源失败，已保留原文件"
       for feed in passwall_luci passwall_packages passwall2; do
         # SourceForge 的 packages.adb 必须带 ?download，否则 apk/wget 可能拿到
         # SourceForge HTML 下载页而不是二进制索引。
-        echo "$SF_BASE/$feed/packages.adb?download" >> "$APK_REPO_FILE"
+        echo "$SF_BASE/$feed/packages.adb?download" >> "$APK_REPO_FILE" 2>/dev/null \
+          || warn "写入 APK $feed 源失败（overlay 空间不足？）"
       done
       APK_UPDATE_RC=0
       if [ -n "$PROXY_URL" ]; then
@@ -1955,7 +2174,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
         APK_PW_INDEX_OK=0
         err "SourceForge APK 索引刷新失败 (rc=$APK_UPDATE_RC)，保留原软件源，禁止进入安装事务"
         if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
-          cat "$APK_REPO_BACKUP" > "$APK_REPO_FILE" 2>/dev/null || true
+          po_write_conf --allow-empty "$APK_REPO_FILE" cat "$APK_REPO_BACKUP" || warn "恢复 APK 源失败，备份仍在 $APK_REPO_BACKUP"
           info "已恢复原 APK 软件源：$APK_REPO_FILE"
         fi
       fi
@@ -1964,7 +2183,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
         APK_PW_INDEX_OK=0
         err "SourceForge APK 索引校验失败，保留原软件源，禁止进入安装事务"
         if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
-          cat "$APK_REPO_BACKUP" > "$APK_REPO_FILE" 2>/dev/null || true
+          po_write_conf --allow-empty "$APK_REPO_FILE" cat "$APK_REPO_BACKUP" || warn "恢复 APK 源失败，备份仍在 $APK_REPO_BACKUP"
         fi
       fi
       if [ "$INSTALL_PW" = "1" ] && ! apk list luci-app-passwall 2>/dev/null | grep -v WARNING | grep -q '^luci-app-passwall-'; then
@@ -1981,7 +2200,7 @@ if [ "$SOURCE_UPDATE_ONLY" != "1" ] && [ "$INSTALL_PW" = "1" -o "$INSTALL_PW2" =
         SF_OK=0
         SF_BASE=""
         if [ -n "$APK_REPO_BACKUP" ] && [ -f "$APK_REPO_BACKUP" ]; then
-          cat "$APK_REPO_BACKUP" > "$APK_REPO_FILE" 2>/dev/null || true
+          po_write_conf --allow-empty "$APK_REPO_FILE" cat "$APK_REPO_BACKUP" || warn "恢复 APK 源失败，备份仍在 $APK_REPO_BACKUP"
           info "已恢复原 APK 软件源：$APK_REPO_FILE"
         fi
         err "PassWall APK 源索引刷新失败或构建残缺，已禁用该源"
@@ -2359,7 +2578,10 @@ get_repo_version() {
 
 # 版本比较：仅当 $1 明确大于 $2 时返回 0。
 # 避免把本机 sing-box 1.14.0 误判成可“升级”到源里的 1.13.21-r1。
-version_newer() {
+# 旧实现（保留用于对比/回退）：会把 -rN 修订号剥掉再比较，导致 r3 与 r1
+# 双向都判成"可升级"，配合 --force-downgrade 会真的降级。设置
+# PO_LEGACY_VERCMP=1 可切回此实现。
+version_newer_legacy() {
   local a="$1" b="$2" an bn top
   [ -n "$a" ] && [ -n "$b" ] || return 1
   [ "$a" = "$b" ] && return 1
@@ -2382,6 +2604,49 @@ version_newer() {
   if printf '%s\n%s\n' "$an" "$bn" | sort -V >/dev/null 2>&1; then
     top=$(printf '%s\n%s\n' "$an" "$bn" | sort -V | tail -1)
     [ "$top" = "$an" ] && return 0 || return 1
+  fi
+  # sort -V 不可用时保守处理: 不判定为可升级
+  return 1
+}
+
+# a 比 b 新则返回 0（"可升级"），否则返回 1。保留 -rN 修订号与 epoch。
+version_newer() {
+  if [ "${PO_LEGACY_VERCMP:-0}" = "1" ]; then
+    version_newer_legacy "$1" "$2"
+    return $?
+  fi
+  local a="$1" b="$2" ae be an bn top
+  [ -n "$a" ] && [ -n "$b" ] || return 1
+  [ "$a" = "$b" ] && return 1
+  # epoch: "1:2.3.4" → ae=1 an=2.3.4
+  case "$a" in *:*) ae=${a%%:*}; an=${a#*:} ;; *) ae=0; an="$a" ;; esac
+  case "$b" in *:*) be=${b%%:*}; bn=${b#*:} ;; *) be=0; bn="$b" ;; esac
+  if [ "$ae" != "$be" ]; then
+    [ "$ae" -gt "$be" ] 2>/dev/null && return 0
+    return 1
+  fi
+  an=$(printf '%s' "$an" | sed 's/^v//')
+  bn=$(printf '%s' "$bn" | sed 's/^v//')
+  [ "$an" = "$bn" ] && return 1
+  # PassWall 旧包常用 git-YY.MMDD.build：先归一成 YY.MMDD，否则 sort -V 会把
+  # git-25... 错排在 26.9.9 后面。
+  case "$an" in
+    git-[0-9]*) an=$(printf '%s' "$an" | sed -n 's/^git-\([0-9][0-9]\.[0-9][0-9]*\).*/\1/p') ;;
+  esac
+  case "$bn" in
+    git-[0-9]*) bn=$(printf '%s' "$bn" | sed -n 's/^git-\([0-9][0-9]\.[0-9][0-9]*\).*/\1/p') ;;
+  esac
+  # 归一后可能相等（v1.2.3 vs 1.2.3、git-25.0912 vs 25.0912），再判一次
+  [ "$an" = "$bn" ] && return 1
+  # ChinaDNS-NG 旧版显示 v1.0-beta.25，新源是 2025.08.09-r1：日期版是新上游
+  case "$an|$bn" in
+    20[0-9][0-9].*'|'*beta*) return 0 ;;
+    *beta*'|'20[0-9][0-9].*) return 1 ;;
+  esac
+  if printf '%s\n%s\n' "$an" "$bn" | sort -V >/dev/null 2>&1; then
+    top=$(printf '%s\n%s\n' "$an" "$bn" | sort -V | tail -1)
+    [ "$top" = "$an" ] && return 0
+    return 1
   fi
   # sort -V 不可用时保守处理: 不判定为可升级
   return 1
@@ -2472,7 +2737,9 @@ curl_download_progress() {
   local url="$1" out="$2" final
   final=$(curl -fsSL --max-time 30 -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null)
   [ -n "$final" ] || final="$url"
-  curl -fL --progress-bar -o "$out" "$final"
+  curl -fL --progress-bar --connect-timeout "$PO_CURL_CONNECT_TIMEOUT" \
+    --max-time "$PO_CURL_MAX_TIME_BIG" --retry "$PO_CURL_RETRY" --retry-delay 2 \
+    -o "$out" "$final"
 }
 
 # 预下载的 .apk 可能因 SourceForge 跳转/镜像不同步变成 HTML/错误页。
@@ -2492,46 +2759,40 @@ apk_retry_without_hash_constraint() {
   grep -q "breaks: world\\[sing-box><" "$log" 2>/dev/null || return 1
   cp -f /etc/apk/world "$backup" 2>/dev/null || return 1
   # 只删除 sing-box 的内容哈希行；保留其它 world 约束和注释。
-  awk '!/^sing-box><[^[:space:]]+$/ {print}' /etc/apk/world > "/tmp/apk-world.$$" || {
-    cp -f "$backup" /etc/apk/world 2>/dev/null || true
-    rm -f "$backup" "/tmp/apk-world.$$"
-    return 1
-  }
-  cat "/tmp/apk-world.$$" > /etc/apk/world || {
-    cp -f "$backup" /etc/apk/world 2>/dev/null || true
-    rm -f "$backup" "/tmp/apk-world.$$"
+  # 走 po_write_conf：临时文件 + 原子 mv，避免写一半断电把 world 截断。
+  po_write_conf --allow-empty /etc/apk/world awk '!/^sing-box><[^[:space:]]+$/ {print}' "$backup" || {
+    rm -f "$backup"
     return 1
   }
   info "移除 sing-box 旧内容哈希约束后重试 $pkg（原 world 已备份）"
   apk add --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
   rc=$?
   if [ "$rc" = "0" ] && apk_installed_exact "$pkg" "$want_ver"; then
-    rm -f "$backup" "/tmp/apk-world.$$"
+    rm -f "$backup"
     return 0
   fi
   cp -f "$backup" /etc/apk/world 2>/dev/null || true
-  rm -f "$backup" "/tmp/apk-world.$$"
+  rm -f "$backup"
   return "$rc"
 }
 
 apk_repair_stale_hash_world() {
-  local log="$1" backup="/tmp/apk-world.$$.preflight.bak" tmp="/tmp/apk-world.$$.preflight" rc=1
+  local log="$1" backup="/tmp/apk-world.$$.preflight.bak" rc=1
   [ -f /etc/apk/world ] || return 1
   # 只处理 apk 明确报告的内容哈希约束，以及临时本地 APK 路径约束；
   # 普通包名=版本约束全部保留。
   grep -qE 'breaks: world\[[^]]+><[^]]+\]|required by: world\[/tmp/[^]]+\.apk\]' "$log" 2>/dev/null || return 1
   cp -f /etc/apk/world "$backup" 2>/dev/null || return 1
-  awk '!/^[^#[:space:]][^[:space:]]*><[^[:space:]]+$/ && !/^\/tmp\/[^[:space:]]+\.apk$/ {print}' /etc/apk/world > "$tmp" || { rm -f "$backup" "$tmp"; return 1; }
-  cat "$tmp" > /etc/apk/world || { cp -f "$backup" /etc/apk/world 2>/dev/null || true; rm -f "$backup" "$tmp"; return 1; }
+  po_write_conf --allow-empty /etc/apk/world awk '!/^[^#[:space:]][^[:space:]]*><[^[:space:]]+$/ && !/^\/tmp\/[^[:space:]]+\.apk$/ {print}' "$backup" || { rm -f "$backup"; return 1; }
   info "检测到 APK 临时包/内容哈希约束，已临时清理后重新预检"
   apk add --simulate --upgrade --latest --allow-untrusted "$2" > "$log" 2>&1
   rc=$?
   if [ "$rc" = "0" ] && ! grep -qE 'breaks: world\[[^]]+><|required by: world\[/tmp/' "$log" 2>/dev/null; then
-    rm -f "$backup" "$tmp"
+    rm -f "$backup"
     return 0
   fi
   cp -f "$backup" /etc/apk/world 2>/dev/null || true
-  rm -f "$backup" "$tmp"
+  rm -f "$backup"
   return 1
 }
 
@@ -2540,7 +2801,6 @@ apk_add_repo_exact() {
   if [ -n "$want_ver" ]; then
     apk add --no-cache --upgrade --allow-untrusted "$pkg=$want_ver" >> "$log" 2>&1
     rc=$?
-    apk_installed_exact "$pkg" "$want_ver" && return 0
     apk_installed_exact "$pkg" "$want_ver" && return 0
     # 不使用 --force-broken-world：它可能为解决 world 冲突清理无关插件。
     # 仅移除日志明确对应的 sing-box 内容哈希约束后重试。
@@ -2645,64 +2905,40 @@ apk_preflight_safe() {
 }
 
 # OpenWrt APK 的包缓存可能保留下载不完整或与 packages.adb 摘要不一致的
-# ADB 文件。仅在事务明确报告完整性错误时清理缓存并重取，避免正常安装时
-# 改变缓存状态；第二次仍失败则把原始事务错误交给上层处理。
+# ADB 文件。仅在事务明确报告完整性错误时清理缓存并重试一次；
+# 重试仍然走 apk 自身的 packages.adb 校验，绝不从镜像直取文件绕过摘要。
 apk_retry_integrity_transaction() {
   local log="$1"; shift
-  local retry_file retry_url retry_path token dep dep_ver dep_url retry_ok
-  local retry_files=""
   "$@" > "$log" 2>&1
   local rc=$?
   if [ "$rc" != "0" ] && grep -qiE 'ADB integrity error|integrity error|bad checksum|checksum mismatch' "$log" 2>/dev/null; then
-    warn "APK 检测到包完整性错误，清理损坏缓存后重取并重试"
+    warn "APK 检测到包完整性错误，清理损坏缓存后重试一次（仍走 packages.adb 校验）"
     apk cache clean >/dev/null 2>&1 || true
     rm -f /var/cache/apk/* 2>/dev/null || true
     apk update >/tmp/po-apk-refresh.log 2>&1 || true
-    # 同一 SourceForge 重定向可能反复返回与 packages.adb 摘要不一致的文件。
-    # 从 APK 的完整性错误行取出精确的包名/版本，改用最终镜像直链下载，
-    # 并把依赖 APK 与原主包放进同一次事务；绝不绕过 APK 完整性校验。
-    for token in $(grep -oE '[A-Za-z0-9_.+]+-[0-9][A-Za-z0-9._+-]*' "$log" 2>/dev/null | sort -u); do
-      dep=$(echo "$token" | sed -n 's/^[[:space:]]*\(.*\)-\([0-9][^ ]*\)$/\1/p')
-      dep_ver=$(echo "$token" | sed -n 's/^[[:space:]]*\(.*\)-\([0-9][^ ]*\)$/\2/p')
-      [ -n "$dep" ] && [ -n "$dep_ver" ] || continue
-      dep_url=$(find_apk_url "$dep" "$dep_ver")
-      # 轮换 SourceForge 节点，避免只重复同一个失真的镜像响应。
-      # 每个依赖使用独立文件；不能让 find_apk_url 覆盖后续候选 URL。
-      retry_path="/tmp/apk-retry-${dep}-$$.apk"
-      rm -f "$retry_path"
-      for retry_url in \
-        "$dep_url" \
-        "$SF_BASE/passwall_packages/$dep-$dep_ver.apk" \
-        "$SF_BASE/passwall_luci/$dep-$dep_ver.apk" \
-        "https://master.dl.sourceforge.net/project/openwrt-passwall-build/$SF_PATH/passwall_packages/$dep-$dep_ver.apk" \
-        "https://downloads.sourceforge.net/project/openwrt-passwall-build/$SF_PATH/passwall_packages/$dep-$dep_ver.apk?use_mirror=jaist" \
-        "https://downloads.sourceforge.net/project/openwrt-passwall-build/$SF_PATH/passwall_packages/$dep-$dep_ver.apk?use_mirror=nchc"; do
-        [ -n "$retry_url" ] || continue
-        retry_ok=0
-        if curl -fsSL --max-time 60 -o "$retry_path" "$retry_url" 2>/dev/null && apk_file_valid "$retry_path"; then
-          retry_ok=1
-          retry_files="$retry_files $retry_path"
-          break
-        fi
-        rm -f "$retry_path"
-      done
-      [ "$retry_ok" = "1" ] || rm -f "$retry_path"
-    done
-    if [ -n "$retry_files" ]; then
-      # shellcheck disable=SC2086
-      set -- "$@" $retry_files
-    fi
     "$@" > "$log" 2>&1
     rc=$?
-    for retry_file in $retry_files; do rm -f "$retry_file"; done
+    if [ "$rc" != "0" ]; then
+      err "清理缓存后完整性错误仍存在，已停止（不绕过 packages.adb 摘要）"
+      err "排查: /tmp/po-apk-refresh.log 与 $log"
+    fi
   fi
   return "$rc"
 }
 
 apk_install() {
-  local pkg="$1" rc=0
   if [ "$PKG_MGR" != "apk" ]; then
-    local url prog log="/tmp/opkg_install.log" repo_ver
+    _apk_install_opkg "$1"
+  else
+    _apk_install_apk "$1"
+  fi
+}
+
+# opkg 分支：解析依赖、逐个下载 IPK 后安装（原 apk_install 的第一段，行为未变）。
+_apk_install_opkg() {
+  local pkg="$1" rc=0
+    local url log repo_ver
+    log=$(po_tmp 2>/dev/null) || log="/tmp/opkg_install.log.$$"
     url=$(find_pkg_url "$pkg")
     repo_ver=$(get_repo_version "$pkg")
     # 已安装插件的升级只替换匹配当前架构的主 IPK；不再重新解析整棵依赖树。
@@ -2739,10 +2975,13 @@ apk_install() {
       printf "\r  [%s/%s] 安装 %s...  " "$cur" "$total" "$dep"
       dep_url=$(find_pkg_url "$dep")
       if [ -n "$dep_url" ]; then
-        if curl -fL -sS -o "/tmp/pkg_$dep.ipk" "$dep_url"; then
-          opkg install "/tmp/pkg_$dep.ipk" --force-downgrade --force-overwrite 2>&1
+        dep_file=$(po_tmp 2>/dev/null) || dep_file="/tmp/pkg_$dep.ipk"
+        if curl -fL -sS --connect-timeout "$PO_CURL_CONNECT_TIMEOUT" \
+             --max-time "$PO_CURL_MAX_TIME_MID" --retry "$PO_CURL_RETRY" --retry-delay 2 \
+             -o "$dep_file" "$dep_url"; then
+          opkg install "$dep_file" --force-downgrade --force-overwrite 2>&1
           dep_rc=$?
-          rm -f "/tmp/pkg_$dep.ipk"
+          rm -f "$dep_file"
         else
           dep_rc=1
           opkg install "$dep" --force-downgrade --force-overwrite 2>&1
@@ -2780,7 +3019,6 @@ apk_install() {
         report_install_space_error "$pkg" "$log" "$rc" || true
         rm -f "$log"
       else
-        prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
         if curl_download_progress "$url" "/tmp/pkg_$pkg.ipk"; then
           if [ "$installed_main" = "1" ]; then
@@ -2800,7 +3038,7 @@ apk_install() {
             if [ "$installed_main" = "1" ] && [ -n "$repo_ver" ] && [ "$(get_version "$pkg")" = "$repo_ver" ]; then
               rc=0
             fi
-            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && [ -z "$local_force_depends" ] && rc=2
+            grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
             grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
           fi
           report_install_space_error "$pkg" "$log" "$rc" || true
@@ -2822,10 +3060,15 @@ apk_install() {
     else
       # find_pkg_url 找不到 URL → 再试 opkg download 预下载 (输出到 TTY 可见；仅作为兜底)
       info "未在速度优先索引找到 $pkg，下载 $pkg (opkg download 兜底)..."
-      if (cd /tmp && opkg download "$pkg") 2>&1; then
+      # 下载到本次专用目录：以前在 /tmp 里 opkg download 后取 `ls -t /tmp/*.ipk`
+      # 的最新一个，可能拿到上一次运行残留的同名/异版本包（甚至别的插件）。
+      local dl_dir
+      dl_dir=$(po_tmpdir 2>/dev/null) || dl_dir="/tmp/po-dl-$$"
+      mkdir -p "$dl_dir" 2>/dev/null
+      if (cd "$dl_dir" && opkg download "$pkg") 2>&1; then
         # 找到下载的 ipk 并本地安装; 验证文件名版本 = 目标版本, 否则弃用直装
         local dl_ipk
-        dl_ipk=$(ls -t /tmp/*.ipk 2>/dev/null | head -1)
+        dl_ipk=$(ls -t "$dl_dir"/*.ipk 2>/dev/null | head -1)
         if [ -n "$dl_ipk" ] && { [ -z "$repo_ver" ] || echo "$dl_ipk" | grep -Fq "$repo_ver"; }; then
           if ! opkg_preflight_installable "$dl_ipk"; then rc=2; else
             opkg install "$dl_ipk" --force-downgrade --force-overwrite > "$log" 2>&1
@@ -2847,6 +3090,7 @@ apk_install() {
           rc=$?
         fi
       fi
+      rm -rf "$dl_dir" 2>/dev/null
       if [ -f "$log" ]; then
         grep -q "pkg_hash_check_unresolved" "$log" 2>/dev/null && rc=2
         grep -v -e "^Configuring" -e "^\.\.\.$" -e "^Collected errors:$" -e "^Removing obsolete file " -e "remove_obsolesced_files" -e "opkg\.lock" "$log" || true
@@ -2865,9 +3109,14 @@ apk_install() {
     esac
   fi
   return $rc
-  fi
+}
+
+# apk 分支：优先 SourceForge 直链，失败回退仓库精确版本（原 apk_install 的第二段，行为未变）。
+_apk_install_apk() {
+  local pkg="$1" rc=0
   apk_preflight_safe "$pkg" || return 2
-  local log=/tmp/apk_add.log url prog repo_ver
+  local log url prog repo_ver
+  log=$(po_tmp 2>/dev/null) || log="/tmp/apk_add.log.$$"
   : > "$log"
   # --upgrade 是关键：apk add 默认不会替换已安装旧版，即使仓库已有新版本。
   # 先尝试 SourceForge 直链带进度；若本地包无效/未达到目标版本，必须回退仓库精确版本。
@@ -2876,7 +3125,9 @@ apk_install() {
   if [ -n "$url" ]; then
     prog="-sS"; [ -t 1 ] && prog="--progress-bar"
     info "下载 $pkg (带进度)..."
-    if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url" && apk_file_valid "/tmp/pkg_$pkg.apk"; then
+    if curl -fL $prog --connect-timeout "$PO_CURL_CONNECT_TIMEOUT" \
+         --max-time "$PO_CURL_MAX_TIME_BIG" --retry "$PO_CURL_RETRY" --retry-delay 2 \
+         -o "/tmp/pkg_$pkg.apk" "$url" && apk_file_valid "/tmp/pkg_$pkg.apk"; then
       # SourceForge APK 必须实际替换二进制；apk 的 OK 只表示事务/索引同步，
       # 不代表目标包已经安装。安装输出保持实时显示，失败时保留旧版本。
       # 本地 APK 只跳过仓库归属校验；依赖仍必须从已验证的系统/SF 索引解析。
@@ -2922,12 +3173,14 @@ apk_install() {
   return $rc
 }
 
+
 # 已安装包升级：APK 必须指定精确版本；只写包名时部分 OpenWrt apk-tools 只输出 OK 但不替换旧版
 pkg_update() {
   local pkg="$1"
   local want_ver="$2"
   if [ "$PKG_MGR" = "apk" ]; then
-    local log=/tmp/apk_upgrade.log rc=0 url prog
+    local log rc=0 url prog
+    log=$(po_tmp 2>/dev/null) || log="/tmp/apk_upgrade.log.$$"
     if [ -n "$want_ver" ]; then
       # 先尝试直链包；安装失败时保留旧版本，不回退系统仓库。
       : > "$log"
@@ -2935,7 +3188,9 @@ pkg_update() {
       if [ -n "$url" ]; then
         prog="-sS"; [ -t 1 ] && prog="--progress-bar"
         info "下载 $pkg (带进度)..."
-        if curl -fL $prog -o "/tmp/pkg_$pkg.apk" "$url"; then
+        if curl -fL $prog --connect-timeout "$PO_CURL_CONNECT_TIMEOUT" \
+             --max-time "$PO_CURL_MAX_TIME_BIG" --retry "$PO_CURL_RETRY" --retry-delay 2 \
+             -o "/tmp/pkg_$pkg.apk" "$url"; then
           apk_retry_integrity_transaction "$log" apk add --latest --allow-untrusted "/tmp/pkg_$pkg.apk"
           rc=$?
           rm -f "/tmp/pkg_$pkg.apk"
@@ -3031,26 +3286,53 @@ remove_ssr_manual_files_keep_config() {
 }
 
 remove_adguardhome_keep_config() {
-  # 卸载 AdGuardHome 程序和服务；是否保留 /opt/AdGuardHome/AdGuardHome.yaml 与 data 由 UNINSTALL_KEEP_CONFIG 控制。
-  local tmp="/tmp/AdGuardHome.keep"
-  if [ -x /opt/AdGuardHome/AdGuardHome ]; then
-    /opt/AdGuardHome/AdGuardHome -s stop >/dev/null 2>&1 || true
-    /opt/AdGuardHome/AdGuardHome -s uninstall >/dev/null 2>&1 || true
+  # 卸载 AdGuardHome 程序和服务；保留配置分支不能走 /tmp：
+  # /tmp 是 tmpfs，重启即丢，而 data 里的 stats.db/querylog.json 常见几十 MB，可能超过可用内存。
+  # 这里先把整个目录 rename 成同分区兄弟目录（rename 不占额外空间、不涉及拷贝），
+  # 再删二进制/服务，最后把配置与 data 移回，避免任何"先删唯一副本"的窗口。
+  local src=/opt/AdGuardHome keep="" f
+  if [ -x "$src/AdGuardHome" ]; then
+    "$src/AdGuardHome" -s stop >/dev/null 2>&1 || true
+    "$src/AdGuardHome" -s uninstall >/dev/null 2>&1 || true
   fi
-  rm -rf "$tmp"
-  if [ "$UNINSTALL_KEEP_CONFIG" != "0" ]; then
-    mkdir -p "$tmp" 2>/dev/null || true
-    [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && cp /opt/AdGuardHome/AdGuardHome.yaml "$tmp/AdGuardHome.yaml" 2>/dev/null || true
-    [ -d /opt/AdGuardHome/data ] && cp -a /opt/AdGuardHome/data "$tmp/data" 2>/dev/null || true
+  # 上次运行若在回填阶段失败，$src.po-keep 里是用户唯一的一份配置：
+  #   $src 已不存在 → 直接恢复；
+  #   $src 仍在     → 改名保留，绝不删除。
+  if [ -d "$src.po-keep" ]; then
+    if [ -d "$src" ]; then
+      mv "$src.po-keep" "$src.po-keep.$(date +%s)" 2>/dev/null \
+        || warn "无法改名残留备份 $src.po-keep，将就地覆盖"
+    else
+      mv "$src.po-keep" "$src" 2>/dev/null && info "已从上次失败的回填备份恢复 $src"
+    fi
+  fi
+  if [ "$UNINSTALL_KEEP_CONFIG" != "0" ] && [ -d "$src" ]; then
+    if ! mv "$src" "$src.po-keep" 2>/dev/null; then
+      err "无法暂存 $src（/opt 只读或不可写），已中止卸载以保护配置"
+      return 1
+    fi
+    keep="$src.po-keep"
   fi
   rm -f /usr/bin/AdGuardHome /etc/init.d/AdGuardHome 2>/dev/null || true
-  rm -rf /opt/AdGuardHome 2>/dev/null || true
-  if [ "$UNINSTALL_KEEP_CONFIG" != "0" ]; then
-    mkdir -p /opt/AdGuardHome 2>/dev/null || true
-    [ -f "$tmp/AdGuardHome.yaml" ] && mv "$tmp/AdGuardHome.yaml" /opt/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true
-    [ -d "$tmp/data" ] && mv "$tmp/data" /opt/AdGuardHome/data 2>/dev/null || true
+  if [ -n "$keep" ]; then
+    # 只回填配置与 data，二进制不再保留（卸载语义）。
+    mkdir -p "$src" 2>/dev/null || true
+    rm -f "$keep/AdGuardHome" 2>/dev/null || true
+    for f in "$keep"/* "$keep"/.[!.]*; do
+      [ -e "$f" ] || continue
+      mv "$f" "$src/" 2>/dev/null || warn "配置回填失败：$f 仍在 $keep"
+    done
+  else
+    rm -rf "$src" 2>/dev/null || true
   fi
-  rm -rf "$tmp"
+  if [ -n "$keep" ]; then
+    if rmdir "$keep" 2>/dev/null; then
+      ok "AdGuardHome 已卸载，配置与统计已保留在 $src"
+    else
+      err "部分配置回填失败，备份仍保留在 $keep（请手工移回 $src）"
+    fi
+  fi
+  return 0
 }
 remove_istore_manual_files_keep_config() {
   # APK/手动解包安装的 iStore 不一定登记在包管理器中，仍需清理实际文件。
@@ -3114,9 +3396,9 @@ remove_passwall_core_selection() {
 config_action_text() {
   [ "$UNINSTALL_KEEP_CONFIG" = "0" ] && echo "删除配置" || echo "保留配置"
 }
-force_reinstall_selected() {
-  [ "$FORCE_REINSTALL" = "1" ] || return 0
-  hdr "卸载旧版主程序"
+# 按已选插件清理程序文件（保留配置）。force_reinstall（强制重装前的清理）
+# 与 uninstall_only（仅卸载）原本有两份逐字相同的实现，这里只保留一份。
+remove_selected_plugins() {
   clean_apk_broken_world
   if [ "$INSTALL_PW" = "1" ]; then
     remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
@@ -3159,6 +3441,13 @@ force_reinstall_selected() {
   fi
   clean_luci_cache
 }
+
+force_reinstall_selected() {
+  [ "$FORCE_REINSTALL" = "1" ] || return 0
+  hdr "卸载旧版主程序"
+  remove_selected_plugins
+}
+
 partexp_release_asset_url() {
   local asset="$1" api json
   api="https://api.github.com/repos/sirpdboy/luci-app-partexp/releases/tags/v2.0.5"
@@ -3178,15 +3467,6 @@ partexp_release_asset_url() {
       exit
     }
   '
-}
-
-validate_tar_paths() {
-  local archive="$1" member
-  tar -tzf "$archive" 2>/dev/null | while IFS= read -r member; do
-    case "$member" in
-      /*|../*|*/../*|*/..|.|./*|*'\n'*|*'\r'*) exit 1 ;;
-    esac
-  done
 }
 
 partexp_apk_preflight() {
@@ -3287,21 +3567,14 @@ install_partexp() {
     return 1
   }
   info "下载分区扩容插件 luci-app-partexp ($archive)..."
-  if ! command -v tar >/dev/null 2>&1 || ! curl -fL -sS -o "$work/$archive" "$url"; then
+  if ! command -v tar >/dev/null 2>&1 || ! curl -fL -sS \
+       --connect-timeout "$PO_CURL_CONNECT_TIMEOUT" --max-time "$PO_CURL_MAX_TIME_BIG" \
+       --retry "$PO_CURL_RETRY" --retry-delay 2 -o "$work/$archive" "$url"; then
     err "分区扩容插件下载失败（未执行安装）"
     rm -rf "$work"
     return 1
   fi
-  # 外部归档先拒绝绝对路径和 ../ 路径，避免路径遍历。
-  if ! tar -tzf "$work/$archive" 2>/dev/null | awk '
-    /^\// || /(^|\/)\.\.($|\/)/ {bad=1}
-    END {exit bad}
-  '; then
-    err "分区扩容插件归档路径校验失败（未执行安装）"
-    rm -rf "$work"
-    return 1
-  fi
-  if ! tar -tzf "$work/$archive" >/dev/null 2>&1 || ! validate_tar_paths "$work/$archive" || ! tar -xzf "$work/$archive" -C "$work"; then
+  if ! po_safe_extract "$work/$archive" "$work"; then
     err "分区扩容插件解包失败（未执行安装）"
     rm -rf "$work"
     return 1
@@ -3348,47 +3621,7 @@ install_partexp() {
 uninstall_selected_only() {
   [ "$UNINSTALL_ONLY" = "1" ] || return 0
   hdr "卸载已选插件"
-  clean_apk_broken_world
-  if [ "$INSTALL_PW" = "1" ]; then
-    remove_pkg_keep_config "luci-i18n-passwall-zh-cn" "PassWall 中文包" || true
-    remove_pkg_keep_config "luci-app-passwall" "PassWall" || true
-    remove_passwall_core_selection
-    remove_plugin_config "passwall"
-  fi
-  if [ "$INSTALL_PW2" = "1" ]; then
-    remove_pkg_keep_config "luci-i18n-passwall2-zh-cn" "PassWall2 中文包" || true
-    remove_pkg_keep_config "luci-app-passwall2" "PassWall2" || true
-    remove_plugin_config "passwall2"
-  fi
-  if [ "$INSTALL_OC" = "1" ]; then
-    remove_pkg_keep_config "luci-app-openclash" "OpenClash" || true
-    remove_plugin_config "openclash"
-  fi
-  if [ "$INSTALL_SSR" = "1" ]; then
-    remove_pkg_keep_config "luci-app-ssr-plus" "SSR Plus" || true
-    remove_ssr_manual_files_keep_config
-    remove_plugin_config "ssr"
-    ok "SSR Plus 程序文件已清理（$(config_action_text)）"
-  fi
-  if [ "$INSTALL_AGH" = "1" ]; then
-    remove_adguardhome_keep_config
-    ok "AdGuardHome 程序文件已清理（$(config_action_text)）"
-  fi
-  if [ "$INSTALL_PARTEXP" = "1" ]; then
-    remove_pkg_keep_config "luci-i18n-partexp-zh-cn" "分区扩容中文包" || true
-    remove_pkg_keep_config "luci-app-partexp" "分区扩容" || true
-    remove_plugin_config "partexp"
-  fi
-  if [ "$INSTALL_ISTORE" = "1" ]; then
-    remove_pkg_keep_config "luci-app-store" "iStore 商店" || true
-    remove_pkg_keep_config "luci-lib-taskd" "iStore taskd 库" || true
-    remove_pkg_keep_config "luci-lib-xterm" "iStore xterm 库" || true
-    remove_pkg_keep_config "taskd" "iStore taskd" || true
-    remove_istore_manual_files_keep_config
-    remove_plugin_config "istore"
-    ok "iStore 商店已清理（$(config_action_text)）"
-  fi
-  clean_luci_cache
+  remove_selected_plugins
   echo ""
   echo "============================================="
   echo " [✓] 卸载完成！"
@@ -3399,34 +3632,55 @@ uninstall_selected_only() {
 }
 
 verify_package_installed() {
-  local pkg="$1" path files
+  local pkg="$1" files
   check_installed "$pkg" || return 1
-  # OPKG 可能只更新了 status 数据库，但实际 IPK 解包失败；
-  # 中文语言包必须确认至少一个实际的普通文件已经落盘。
-  if [ "$PKG_MGR" = "opkg" ]; then
-    case "$pkg" in
-      luci-i18n-passwall-zh-cn|luci-i18n-passwall2-zh-cn)
-        # OPKG 的 `opkg files` 在部分 iStoreOS/Kwrt 版本中只返回状态文本，
-        # 或语言包文件由 LuCI 缓存/软链接管理，不能要求第一行必须是绝对路径。
-        # 先确认安装数据库状态；opkg install 返回成功且状态为 installed
-        # 时，语言包已被 OPKG 接收，避免误报“文件未落盘”。
-        if opkg status "$pkg" 2>/dev/null | grep -qiE 'Status:[[:space:]].*installed|install[[:space:]]+ok[[:space:]]+installed'; then
-          return 0
-        fi
-        # 兼容没有 status 子命令或状态格式不同的 opkg。
-        files=$(opkg files "$pkg" 2>/dev/null)
-        printf '%s\n' "$files" | grep -qE '(^|[[:space:]])/(usr|www|etc)/' && return 0
-        return 1
-        ;;
-    esac
-  fi
-  return 0
+  # 包管理器只写状态库、IPK/APK 实际解包失败时，check_installed 仍然为真。
+  # 因此再读一次文件清单，确认至少有一个真实文件落到 /usr /etc /www /opt。
+  case "$PKG_MGR" in
+    opkg)
+      case "$pkg" in
+        luci-i18n-passwall-zh-cn|luci-i18n-passwall2-zh-cn)
+          # 个别 iStoreOS/Kwrt 的 opkg files 只返回状态文本，语言包也可能由
+          # LuCI 缓存管理；状态库为 installed 就认为已被 OPKG 接收。
+          if opkg status "$pkg" 2>/dev/null | grep -qiE 'Status:[[:space:]].*installed|install[[:space:]]+ok[[:space:]]+installed'; then
+            return 0
+          fi
+          ;;
+      esac
+      files=$(opkg files "$pkg" 2>/dev/null) || return 0
+      ;;
+    apk)
+      # apk 没有 status 子命令；用 apk info -L 列出包内文件。
+      files=$(apk info -L "$pkg" 2>/dev/null) || return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  # 清单拿不到（固件差异/unzip 损坏）时不做判断，避免把成功安装误判为失败；
+  # 只要清单里有内容但没有任何系统路径，才判定为"装了但没落盘"。
+  [ -n "$files" ] || return 0
+  printf '%s\n' "$files" | grep -qE '(^|[[:space:]])/(usr|etc|www|opt)/' && return 0
+  return 1
 }
 
 # 简化版（不询问，直接安装）
 PKG_LAST_RESULT=0
-pkginstall() {
-  local pkg="$1" desc="$2"
+# 安装/升级统一实现。mode=install 只装不升级（保持原 pkginstall 行为），
+# mode=upgrade 追加 geo 数据包的空间守卫（v2ray-geoip 解包约 17MB，Overlay
+# 不足时 opkg 会在解包阶段段错误 139），其它流程两者逐字相同。
+pkg_install_or_upgrade() {
+  local pkg="$1" desc="$2" mode="$3"
+  if [ "$mode" = "upgrade" ] && [ "$PKG_MGR" = "opkg" ] && [ "$pkg" = "v2ray-geoip" ] && check_installed "$pkg"; then
+    local geo_free_kb geo_need_kb
+    geo_free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
+    [ -z "$geo_free_kb" ] && geo_free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
+    geo_need_kb="$PO_GEO_MIN_FREE_KB"
+    if [ -n "$geo_free_kb" ] && [ "$geo_free_kb" -lt "$geo_need_kb" ]; then
+      info "$desc 跳过升级：Overlay 剩余 ${geo_free_kb}KB，低于安全需求 ${geo_need_kb}KB（保留旧版，避免 opkg 段错误）"
+      return 0
+    fi
+  fi
   PKG_LAST_RESULT=0
   # Xray 官方/手动更新可能已经放置 /usr/bin/xray，但 opkg 数据库没有
   # xray-core 记录；仅这种“未登记包”才跳过包管理器安装。已登记的
@@ -3479,63 +3733,13 @@ pkginstall() {
   fi
 }
 
-# 升级函数
-# 先比较版本: 已是最新则跳过下载 (避免每次跑脚本都重新下载 geo 包)
+pkginstall() {
+  pkg_install_or_upgrade "$1" "$2" install
+}
+
+# 升级：已是最新则跳过下载 (避免每次跑脚本都重新下载 geo 包)
 pkgupgrade() {
-  local pkg="$1" desc="$2"
-  # Geo 数据包体积较大（v2ray-geoip 约 17MB 解包），Overlay 剩余空间不足时，
-  # opkg 可能在解包阶段段错误(139)，不能让升级事务触发。直接保留旧版。
-  if [ "$PKG_MGR" = "opkg" ] && [ "$pkg" = "v2ray-geoip" ] && check_installed "$pkg"; then
-    local geo_free_kb geo_need_kb
-    geo_free_kb=$(df -k /overlay 2>/dev/null | tail -1 | awk '{print $4}')
-    [ -z "$geo_free_kb" ] && geo_free_kb=$(df -k / 2>/dev/null | tail -1 | awk '{print $4}')
-    geo_need_kb=45000
-    if [ -n "$geo_free_kb" ] && [ "$geo_free_kb" -lt "$geo_need_kb" ]; then
-      info "$desc 跳过升级：Overlay 剩余 ${geo_free_kb}KB，低于安全需求 ${geo_need_kb}KB（保留旧版，避免 opkg 段错误）"
-      return 0
-    fi
-  fi
-  if check_installed "$pkg"; then
-    local ver=$(get_version "$pkg")
-    local repo_ver=$(get_repo_version "$pkg")
-    if version_newer "$repo_ver" "$ver"; then
-      info "$desc 已安装 ($ver)，源中有新版本 ($repo_ver)..."
-      pkg_update "$pkg" "$repo_ver"
-      local rc=$?
-      if [ "$rc" = "2" ]; then
-        err "$desc 升级失败: 新版缺少依赖, 保留旧版 $ver"
-        return 1
-      elif [ "$rc" != "0" ]; then
-        err "$desc 升级失败: opkg/apk 返回错误码 $rc，保留旧版 $ver"
-        return 1
-      fi
-      local nver=$(get_version "$pkg")
-      if [ "$nver" = "$repo_ver" ]; then
-        ok "$desc: $ver → $nver ✓"
-      elif [ "$nver" != "$ver" ] && [ -n "$nver" ]; then
-        ok "$desc: $ver → $nver ✓ (源版本 $repo_ver 未完全匹配)"
-      else
-        err "$desc 未升级: 当前仍为 $ver，源中版本 $repo_ver"
-        return 1
-      fi
-    else
-      ok "$desc ($ver) ✓"
-    fi
-  else
-    info "安装 $desc..."
-    apk_install "$pkg"
-    local install_rc=$?
-    if [ "$install_rc" != "0" ]; then
-      err "$desc 安装/事务失败（保留现有版本，不视为本次安装成功）"
-      return 1
-    fi
-    if verify_package_installed "$pkg"; then
-      ok "$desc $(get_version "$pkg") ✓"
-    else
-      err "$desc 安装失败（包已登记但文件未落盘）"
-      return 1
-    fi
-  fi
+  pkg_install_or_upgrade "$1" "$2" upgrade
 }
 
 uninstall_selected_only
@@ -3669,24 +3873,12 @@ get_passwall2_release_asset() {
   return 1
 }
 install_passwall2_release() {
-  local ext="$1" url u pkgfile rc=1 oldver newver magic
+  local ext="$1" url pkgfile rc=1 oldver newver
   pkgfile="/tmp/luci-app-passwall2.$ext"
   url=$(get_passwall2_release_asset "$ext") || { err "无法获取 PassWall2 官方 Release ($ext)"; return 1; }
   oldver=$(get_version "luci-app-passwall2")
   info "下载 PassWall2 官方 Release ($ext)..."
-  rm -f "$pkgfile"
-  for u in $(gh_candidates "$url"); do
-    curl -fL --connect-timeout 10 --max-time 120 -o "$pkgfile" "$u" 2>/dev/null || { rm -f "$pkgfile"; continue; }
-    [ -s "$pkgfile" ] || { rm -f "$pkgfile"; continue; }
-    if [ "$ext" = "apk" ]; then
-      magic=$(dd if="$pkgfile" bs=1 count=4 2>/dev/null); [ "$magic" = "ADBd" ] || { rm -f "$pkgfile"; continue; }
-    else
-      magic=$(dd if="$pkgfile" bs=1 count=4 2>/dev/null)
-      [ "$magic" = "!<ar" ] || { magic=$(dd if="$pkgfile" bs=1 count=2 2>/dev/null); [ "$magic" = "$(printf '\037\213')" ] || { rm -f "$pkgfile"; continue; }; }
-    fi
-    break
-  done
-  [ -s "$pkgfile" ] || { err "PassWall2 官方 Release 下载失败"; return 1; }
+  dl_verified "$url" "$pkgfile" "$ext" || { err "PassWall2 官方 Release 下载失败（候选源全部不可用或返回的不是 $ext 包）"; return 1; }
   if [ "$ext" = "apk" ]; then
     apk add --upgrade --allow-untrusted --force-non-repository "$pkgfile" 2>&1
     rc=$?
@@ -3824,23 +4016,12 @@ ssr_ver_from_url() {
   fi
 }
 download_ssr_release_pkg() {
-  local ext="$1" out="$2" url u magic
+  local ext="$1" out="$2" url
   url=$(get_ssr_asset_url "$ext") || return 1
   [ -n "$url" ] || return 1
   SSR_RELEASE_URL="$url"
   SSR_RELEASE_VER=$(ssr_ver_from_url "$url" "$ext")
-  for u in $(gh_candidates "$url"); do
-    curl -fL -# --max-time 90 -o "$out" "$u" 2>/dev/null
-    if [ -s "$out" ]; then
-      case "$ext" in
-        apk) magic=$(dd if="$out" bs=1 count=4 2>/dev/null); [ "$magic" = "ADBd" ] && return 0 ;;
-        ipk) magic=$(dd if="$out" bs=1 count=4 2>/dev/null); [ "$magic" = "!<ar" ] && return 0
-             magic=$(dd if="$out" bs=1 count=2 2>/dev/null); [ "$magic" = "$(printf '\037\213')" ] && return 0 ;;
-      esac
-    fi
-    rm -f "$out"
-  done
-  return 1
+  dl_verified "$url" "$out" "$ext"
 }
 ensure_lua_neturl_file() {
   # SSR Plus client.lua uses `require "url"`; lua-neturl installs exactly /usr/lib/lua/url.lua.
@@ -3958,7 +4139,10 @@ ssr_files_installed() {
 }
 
 install_ssr_manual_from_ipk() {
-  local ipk="/tmp/luci-app-ssr-plus.manual.ipk" work="/tmp/ssrplus-ipk" log="/tmp/ssr_manual_install.log" rc=0
+  local ipk work log rc=0
+  ipk=$(po_tmp 2>/dev/null) || ipk="/tmp/luci-app-ssr-plus.manual.$$.ipk"
+  work=$(po_tmpdir 2>/dev/null) || work="/tmp/ssrplus-ipk.$$"
+  log=$(po_tmp 2>/dev/null) || log="/tmp/ssr_manual_install.log.$$"
   info "包管理器未登记 SSR Plus，回退解包安装官方 IPK..."
   rm -rf "$work" "$ipk" "$log"
   mkdir -p "$work" || return 1
@@ -3967,7 +4151,7 @@ install_ssr_manual_from_ipk() {
     rm -rf "$work" "$ipk"
     return 1
   fi
-  if ! tar -xzf "$ipk" -C "$work" > "$log" 2>&1; then
+  if ! po_safe_extract "$ipk" "$work"; then
     err "SSR Plus IPK 解包失败"
     grep -E "ERROR|failed|invalid|not found|No such" "$log" || true
     rm -rf "$work" "$ipk" "$log"
@@ -3978,8 +4162,14 @@ install_ssr_manual_from_ipk() {
     rm -rf "$work" "$ipk" "$log"
     return 1
   fi
-  tar -xzf "$work/data.tar.gz" -C / >> "$log" 2>&1
-  rc=$?
+  # 不直接把归档解到 /：先解到临时根，再整体拷贝，避免半途失败留下散落文件。
+  if po_safe_extract "$work/data.tar.gz" "$work/root"; then
+    cp -a "$work/root"/. / >> "$log" 2>&1
+    rc=$?
+  else
+    err "SSR Plus 数据归档不安全或损坏，已放弃解包安装"
+    rc=1
+  fi
   chmod +x /etc/init.d/shadowsocksr /usr/bin/ssr-* 2>/dev/null || true
   [ -x /etc/uci-defaults/luci-ssr-plus ] && /etc/uci-defaults/luci-ssr-plus >> "$log" 2>&1 || true
   /etc/init.d/rpcd reload >/dev/null 2>&1 || true
@@ -4186,20 +4376,22 @@ install_openclash_dependencies() {
 
 opkg_prepare_local_package_arches() {
   [ "$PKG_MGR" = "opkg" ] || return 0
-  local changed=0
-  if ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx 'all'; then
-    echo "arch all 1" >> /etc/opkg.conf
-    changed=1
-  fi
-  if ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx 'noarch'; then
-    echo "arch noarch 1" >> /etc/opkg.conf
-    changed=1
-  fi
-  if [ -n "$SYS_ARCH" ] && ! opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}' | grep -qx "$SYS_ARCH"; then
-    echo "arch $SYS_ARCH 1" >> /etc/opkg.conf
-    changed=1
-  fi
-  [ "$changed" = "1" ] && info "已补齐本地 IPK 架构: all/noarch/$SYS_ARCH"
+  local changed=0 arch rc=0 cur
+  cur=$(opkg print-architecture 2>/dev/null | awk '$1=="arch" {print $2}')
+  for arch in all noarch "$SYS_ARCH"; do
+    [ -n "$arch" ] || continue
+    printf '%s\n' "$cur" | grep -qx "$arch" && continue
+    # 只读 /etc/opkg.conf 或 overlay 写满时这里会失败；以前不看返回码，
+    # 仍然打印"已补齐"，本地 IPK 装不上却看不出原因。
+    if echo "arch $arch 1" >> /etc/opkg.conf 2>/dev/null; then
+      changed=1
+    else
+      err "写入 /etc/opkg.conf 失败（arch $arch），本地 IPK 可能无法安装"
+      rc=1
+    fi
+  done
+  [ "$changed" = "1" ] && [ "$rc" = "0" ] && info "已补齐本地 IPK 架构: all/noarch/$SYS_ARCH"
+  return "$rc"
 }
 openclash_ipk_architecture() {
   local ipk="$1" asset_name="$2" arch=""
@@ -4237,29 +4429,51 @@ fi
 # (代理可能返回 404/错误页但 HTTP 200, 仅 -s 非空检查不够)
 # 注意: OpenWrt 无 od/xxd; 用 dd 提取头部字节比较 (busybox 核心命令必有)
 #       gz magic 2字节(\x1f\x8b) 用 count=2 避免 NUL 截断; ar/adb magic 4字节纯 ASCII 无 NUL
-dl_with_mirror() {
-  local url="$1" out="$2" u magic tmp
-  rm -f "$out"
+# 统一下载 + 魔数校验 + 候选重试。以前"下载 + magic 校验 + 换源重试"在
+# PassWall2 Release / SSR Release / 主包 / AdGuardHome / 内核 5 处各写一遍，
+# 且各处的超时与校验强度都不一致（有的只看文件非空）。
+# type: ipk | apk | gz | auto（auto 按输出文件后缀判定）
+dl_verified() {
+  local url="$1" out="$2" type="${3:-auto}" u magic tmp ok_magic
+  [ -n "$url" ] || return 1
+  case "$type" in
+    ipk|apk|gz) : ;;
+    *) case "$out" in
+         *.apk) type=apk ;;
+         *.gz|*.tgz) type=gz ;;
+         *) type=ipk ;;
+       esac ;;
+  esac
   for u in $(gh_candidates "$url"); do
-    tmp="${out}.tmp"
+    tmp="${out}.po-dl"
     rm -f "$tmp" "$out"
-    curl -fL -# --max-time 60 -o "$tmp" "$u" 2>/dev/null
-    if [ -s "$tmp" ]; then
-      case "$out" in
-        *.gz)   magic=$(dd if="$tmp" bs=1 count=2 2>/dev/null)
-                [ "$magic" = "$(printf '\037\213')" ] && { mv "$tmp" "$out"; return 0; } ;;
-        *.apk)  magic=$(dd if="$tmp" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "ADBd" ] && { mv "$tmp" "$out"; return 0; } ;;
-        *)      magic=$(dd if="$tmp" bs=1 count=4 2>/dev/null)
-                [ "$magic" = "!<ar" ] && { mv "$tmp" "$out"; return 0; }
-                magic=$(dd if="$tmp" bs=1 count=2 2>/dev/null)
-                [ "$magic" = "$(printf '\037\213')" ] && { mv "$tmp" "$out"; return 0; } ;;
-      esac
+    curl -fL -# --connect-timeout "$PO_CURL_CONNECT_TIMEOUT" \
+      --max-time "$PO_CURL_MAX_TIME_MID" -o "$tmp" "$u" 2>/dev/null || { rm -f "$tmp"; continue; }
+    [ -s "$tmp" ] || { rm -f "$tmp"; continue; }
+    ok_magic=0
+    case "$type" in
+      apk) magic=$(dd if="$tmp" bs=1 count=4 2>/dev/null)
+           [ "$magic" = "ADBd" ] && ok_magic=1 ;;
+      gz)  magic=$(dd if="$tmp" bs=1 count=2 2>/dev/null)
+           [ "$magic" = "$(printf '\037\213')" ] && ok_magic=1 ;;
+      ipk) magic=$(dd if="$tmp" bs=1 count=4 2>/dev/null)
+           [ "$magic" = "!<ar" ] && ok_magic=1
+           if [ "$ok_magic" = "0" ]; then
+             magic=$(dd if="$tmp" bs=1 count=2 2>/dev/null)
+             [ "$magic" = "$(printf '\037\213')" ] && ok_magic=1
+           fi ;;
+    esac
+    if [ "$ok_magic" = "1" ]; then
+      mv -f "$tmp" "$out" && return 0
     fi
-    rm -f "$tmp" "$out"
+    rm -f "$tmp"
   done
+  rm -f "$out"
   return 1
 }
+
+# 保留旧名，原有调用点不变（按输出文件后缀自动判定类型）
+dl_with_mirror() { dl_verified "$1" "$2"; }
 
 
 # AdGuardHome: 使用 AdGuardTeam/AdGuardHome 官方 Release 二进制安装。
@@ -4310,7 +4524,10 @@ get_agh_installed_ver() {
 }
 install_agh_service_fallback() {
   [ -x /etc/init.d/AdGuardHome ] && return 0
-  cat > /etc/init.d/AdGuardHome << 'AGH_INIT_EOF'
+  # 先写临时文件再 mv：中断不会在 /etc/init.d 留下半截启动脚本。
+  local initf="/etc/init.d/AdGuardHome" tmpf
+  tmpf=$(mktemp "$initf.po-new.XXXXXX" 2>/dev/null) || { err "无法在 /etc/init.d 创建临时文件（overlay 空间不足？）"; return 1; }
+  cat > "$tmpf" << 'AGH_INIT_EOF'
 #!/bin/sh /etc/rc.common
 START=95
 STOP=10
@@ -4325,7 +4542,13 @@ start_service() {
   procd_close_instance
 }
 AGH_INIT_EOF
-  chmod +x /etc/init.d/AdGuardHome 2>/dev/null || true
+  sh -n "$tmpf" 2>/dev/null || { err "生成的 AdGuardHome 启动脚本语法错误，已放弃写入"; rm -f "$tmpf"; return 1; }
+  chmod 755 "$tmpf"
+  if ! mv -f "$tmpf" "$initf"; then
+    err "写入 $initf 失败，已保留原文件不变"
+    rm -f "$tmpf"
+    return 1
+  fi
   /etc/init.d/AdGuardHome enable >/dev/null 2>&1 || true
 }
 install_adguardhome() {
@@ -4350,8 +4573,8 @@ install_adguardhome() {
     return 1
   fi
   info "下载 AdGuardHome ${latest:-latest} ($arch)..."
-  work="/tmp/AdGuardHome-install"
-  tarball="/tmp/AdGuardHome_linux_${arch}.tar.gz"
+  work=$(po_tmpdir 2>/dev/null) || work="/tmp/AdGuardHome-install.$$"
+  tarball=$(po_tmp 2>/dev/null) || tarball="/tmp/AdGuardHome_linux_${arch}.$$.tar.gz"
   rm -rf "$work" "$tarball"
   mkdir -p "$work" || return 1
   if ! dl_with_mirror "$url" "$tarball"; then
@@ -4359,7 +4582,7 @@ install_adguardhome() {
     err "AdGuardHome 下载失败（GitHub 通道不可达或资产无效）"
     return 1
   fi
-  if ! tar -xzf "$tarball" -C "$work" >/tmp/agh_extract.log 2>&1; then
+  if ! po_safe_extract "$tarball" "$work"; then
     err "AdGuardHome 解压失败"
     grep -E "ERROR|failed|invalid|not found|No such" /tmp/agh_extract.log || true
     rm -rf "$work" "$tarball" /tmp/agh_extract.log
@@ -4374,35 +4597,82 @@ install_adguardhome() {
   if [ -x "$bin" ]; then
     "$bin" -s stop >/dev/null 2>&1 || true
   fi
+  # 回滚约定：
+  #   /opt/AdGuardHome.old  上一次已成功运行的旧版目录（只在确认新版可用后才删）
+  #   /opt/AdGuardHome.new  本次解包出的新版，落位前不碰 /opt/AdGuardHome
+  # 若上次运行在落位阶段中断，/opt/AdGuardHome 缺失但 .old 可能是唯一可用副本，先恢复。
+  if [ ! -d /opt/AdGuardHome ] && [ -d /opt/AdGuardHome.old ]; then
+    if mv /opt/AdGuardHome.old /opt/AdGuardHome 2>/dev/null; then
+      warn "检测到上次升级中断，已先把 /opt/AdGuardHome.old 恢复为在用版本"
+    fi
+  fi
+  agh_rollback() {
+    # 仅在 .old 仍完整时回滚；回滚后重启旧版服务。
+    rm -rf /opt/AdGuardHome.new
+    if [ -d /opt/AdGuardHome.old ]; then
+      rm -rf /opt/AdGuardHome
+      if mv /opt/AdGuardHome.old /opt/AdGuardHome 2>/dev/null; then
+        chmod +x /opt/AdGuardHome/AdGuardHome 2>/dev/null || true
+        /etc/init.d/AdGuardHome restart >/dev/null 2>&1 \
+          || /opt/AdGuardHome/AdGuardHome -s restart >/dev/null 2>&1 || true
+        err "已回滚到旧版 AdGuardHome（$oldver）"
+      else
+        err "回滚失败：$oldver 的副本仍完整保留在 /opt/AdGuardHome.old"
+      fi
+    fi
+    rm -rf "$work" "$tarball" /tmp/agh_extract.log
+    return 1
+  }
   rm -rf /opt/AdGuardHome.new
-  mv "$work/AdGuardHome" /opt/AdGuardHome.new || { err "AdGuardHome 文件写入失败"; rm -rf "$work" "$tarball"; return 1; }
+  if ! mv "$work/AdGuardHome" /opt/AdGuardHome.new 2>/dev/null; then
+    err "AdGuardHome 文件写入失败（/opt 空间不足或只读）"
+    rm -rf "$work" "$tarball" /tmp/agh_extract.log
+    return 1
+  fi
   if [ -d /opt/AdGuardHome ]; then
     [ -f /opt/AdGuardHome/AdGuardHome.yaml ] && cp /opt/AdGuardHome/AdGuardHome.yaml /opt/AdGuardHome.new/AdGuardHome.yaml 2>/dev/null || true
     [ -d /opt/AdGuardHome/data ] && cp -a /opt/AdGuardHome/data /opt/AdGuardHome.new/ 2>/dev/null || true
-    rm -rf /opt/AdGuardHome.old
-    mv /opt/AdGuardHome /opt/AdGuardHome.old 2>/dev/null || rm -rf /opt/AdGuardHome
+    # 旧 .old 只有在 /opt/AdGuardHome 存在时才是冗余副本；此时删掉腾出空间。
+    rm -rf /opt/AdGuardHome.old 2>/dev/null || true
+    if ! mv /opt/AdGuardHome /opt/AdGuardHome.old 2>/dev/null; then
+      err "旧版 AdGuardHome 无法移走（/opt 只读或空间不足），已中止升级，旧版未改动"
+      agh_rollback
+      return 1
+    fi
   fi
-  mv /opt/AdGuardHome.new /opt/AdGuardHome
+  if ! mv /opt/AdGuardHome.new /opt/AdGuardHome 2>/dev/null; then
+    err "新版本落位失败"
+    agh_rollback
+    return 1
+  fi
   chmod +x "$bin" 2>/dev/null || true
   ln -sf "$bin" /usr/bin/AdGuardHome 2>/dev/null || true
   newver=$(get_agh_installed_ver)
-  if [ -n "$latest" ] && [ -n "$newver" ] && [ "$newver" != "$latest" ]; then
+  if [ -z "$newver" ]; then
+    err "AdGuardHome 安装后无法读取版本，判定失败"
+    agh_rollback
+    return 1
+  fi
+  if [ -n "$latest" ] && [ "$newver" != "$latest" ]; then
     err "AdGuardHome 版本校验异常: 已安装 $newver，期望 $latest"
-    rm -rf "$work" "$tarball" /tmp/agh_extract.log
+    agh_rollback
     return 1
   fi
   "$bin" -s install >/tmp/agh_service.log 2>&1 || install_agh_service_fallback
   /etc/init.d/AdGuardHome enable >/dev/null 2>&1 || true
   /etc/init.d/AdGuardHome start >/dev/null 2>&1 || "$bin" -s start >/dev/null 2>&1 || true
-  if [ -x "$bin" ]; then
+  # 成功判定必须看进程真的在跑，只看文件存在会把"二进制在但起不来"当成成功。
+  if [ -x "$bin" ] && { "$bin" -s status >/dev/null 2>&1 || /etc/init.d/AdGuardHome status >/dev/null 2>&1; }; then
     [ -n "$oldver" ] && [ "$oldver" != "$newver" ] && ok "AdGuardHome: $oldver → ${newver:-$latest} ✓" || ok "AdGuardHome ${newver:-$latest} ✓"
     info "默认管理地址: http://路由器IP:3000 （首次初始化；DNS 53 端口如被 dnsmasq/AdGuard 其它服务占用需手动调整）"
+    rm -rf /opt/AdGuardHome.old 2>/dev/null || true
   else
-    err "AdGuardHome 安装失败"
-    rm -rf "$work" "$tarball" /tmp/agh_extract.log /tmp/agh_service.log
+    err "AdGuardHome 服务未能启动"
+    grep -E "ERROR|failed|invalid|not found|permission|address already in use" /tmp/agh_service.log 2>/dev/null | head -5 || true
+    agh_rollback
     return 1
   fi
-  rm -rf "$work" "$tarball" /tmp/agh_extract.log /tmp/agh_service.log /opt/AdGuardHome.old
+  rm -rf "$work" "$tarball" /tmp/agh_extract.log /tmp/agh_service.log
   return 0
 }
 
@@ -4437,12 +4707,12 @@ openclash_core_version() {
   "$1" -v 2>&1 | sed -n 's/.*\(alpha-[A-Za-z0-9._-]*\).*/\1/p' | head -1
 }
 install_openclash_core() {
-  local dest="$1" model="$2" url u tarball work nver
+  local dest="$1" model="$2" url u tarball work nver had_old=0
   [ -n "$model" ] || { err "当前架构 $SYS_ARCH 没有匹配的 OpenClash 内核"; return 1; }
   url="https://raw.githubusercontent.com/vernesong/OpenClash/core/$openclash_core_branch/meta/clash-$model.tar.gz"
   info "下载 OpenClash 官方内核 $OPENCLASH_CORE_LATEST ($model)..."
-  tarball=/tmp/openclash-core.tar.gz
-  work=/tmp/openclash-core.$$
+  tarball=$(po_tmp 2>/dev/null) || tarball="/tmp/openclash-core.$$.tar.gz"
+  work=$(po_tmpdir 2>/dev/null) || work="/tmp/openclash-core.$$"
   rm -rf "$tarball" "$work"
   mkdir -p "$work" || return 1
   for u in $(gh_candidates "$url"); do
@@ -4450,7 +4720,7 @@ install_openclash_core() {
     tar -tzf "$tarball" >/dev/null 2>&1 || { rm -f "$tarball"; continue; }
     break
   done
-  if [ ! -s "$tarball" ] || ! tar -xzf "$tarball" -C "$work" >/dev/null 2>&1; then
+  if [ ! -s "$tarball" ] || ! po_safe_extract "$tarball" "$work"; then
     err "OpenClash 官方内核下载或解压失败"
     rm -rf "$tarball" "$work"
     return 1
@@ -4463,103 +4733,37 @@ install_openclash_core() {
     rm -rf "$tarball" "$work"
     return 1
   }
-  mkdir -p "$(dirname "$dest")"
-  mv "$work/clash" "$dest" || { err "OpenClash 内核写入失败"; rm -rf "$tarball" "$work"; return 1; }
-  chmod 755 "$dest"
+  mkdir -p "$(dirname "$dest")" || { err "内核目标目录创建失败: $(dirname "$dest")"; rm -rf "$tarball" "$work"; return 1; }
+  # 内核二进制替换必须可回滚：先备份正在运行的内核，落位失败就换回来。
+  if [ -f "$dest" ]; then
+    had_old=1
+    if ! cp -p "$dest" "$dest.po-bak" 2>/dev/null; then
+      err "旧内核备份失败（$(dirname "$dest") 空间不足或只读），已中止，未改动现有内核"
+      rm -rf "$tarball" "$work"
+      return 1
+    fi
+  fi
+  if ! mv "$work/clash" "$dest" 2>/dev/null; then
+    rm -f "$dest.po-bak"
+    err "OpenClash 内核写入失败（现有内核未改动）"
+    rm -rf "$tarball" "$work"
+    return 1
+  fi
+  chmod 755 "$dest" 2>/dev/null || true
+  if [ "$had_old" = "1" ] && ! "$dest" -v >/dev/null 2>&1; then
+    err "新内核无法执行，正在回滚"
+    if [ -f "$dest.po-bak" ]; then
+      mv -f "$dest.po-bak" "$dest" 2>/dev/null && chmod 755 "$dest" 2>/dev/null
+    else
+      rm -f "$dest"
+    fi
+    rm -rf "$tarball" "$work"
+    return 1
+  fi
+  rm -f "$dest.po-bak" 2>/dev/null || true
   ok "OpenClash 官方内核已安装 ($nver)"
   rm -rf "$tarball" "$work"
   return 0
-}
-
-# 保留旧函数名仅供其它代码兼容，但实际改为 OpenClash 官方内核流程。
-mihomo_version_matches() { [ "$1" = "$2" ] || [ "$(openclash_core_version "$1")" = "$2" ]; }
-
-mihomo_arch_pattern() {
-  case "$SYS_ARCH" in
-    x86_64|amd64) echo 'mihomo-linux-amd64(-v[123])?(-go[0-9]+)?-v[0-9.]+\.gz' ;;
-    aarch64*|arm64) echo 'mihomo-linux-arm64-v[0-9.]+\.gz' ;;
-    arm_cortex-a7*|armv7*) echo 'mihomo-linux-armv7-v[0-9.]+\.gz' ;;
-    arm_cortex-a5*|arm_cortex-a8*|arm_cortex-a9*|arm*) echo 'mihomo-linux-armv7-v[0-9.]+\.gz' ;;
-    i386*|386) echo 'mihomo-linux-386(-softfloat)?(-go[0-9]+)?-v[0-9.]+\.gz' ;;
-    mipsel*) echo 'mihomo-linux-mipsle-softfloat-v[0-9.]+\.gz' ;;
-    mips*) echo 'mihomo-linux-mips-softfloat-v[0-9.]+\.gz' ;;
-    riscv64*) echo 'mihomo-linux-riscv64-v[0-9.]+\.gz' ;;
-    *) echo '' ;;
-  esac
-}
-mihomo_arch_prefer_pattern() {
-  case "$SYS_ARCH" in
-    x86_64|amd64) echo 'mihomo-linux-amd64-v[0-9.]+\.gz' ;;
-    i386*|386) echo 'mihomo-linux-386-v[0-9.]+\.gz' ;;
-    *) mihomo_arch_pattern ;;
-  esac
-}
-mihomo_ver_num() {
-  echo "$1" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | sed 's/^v//'
-}
-mihomo_ver_tag() {
-  local v
-  v=$(mihomo_ver_num "$1")
-  [ -n "$v" ] && echo "v$v"
-}
-mihomo_version_matches() {
-  [ "$(mihomo_ver_num "$1")" = "$(mihomo_ver_num "$2")" ]
-}
-get_mihomo_latest_json() {
-  local api="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" u json
-  for u in $(gh_candidates "$api"); do
-    json=$(curl -sL --max-time 20 "$u" 2>/dev/null) || continue
-    echo "$json" | grep -q '"tag_name"' || continue
-    echo "$json"
-    return 0
-  done
-  return 1
-}
-get_mihomo_latest_ver() {
-  get_mihomo_latest_json | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1
-}
-get_mihomo_asset_url() {
-  local pat prefer json url
-  pat=$(mihomo_arch_pattern)
-  prefer=$(mihomo_arch_prefer_pattern)
-  [ -n "$pat" ] || return 1
-  json=$(get_mihomo_latest_json) || return 1
-  MIHOMO_VER=$(printf '%s\n' "$json" | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4 | head -1)
-  url=$(printf '%s\n' "$json" | grep -oE 'https://[^" ]+' | grep -E "$prefer" | head -1)
-  [ -n "$url" ] || url=$(printf '%s\n' "$json" | grep -oE 'https://[^" ]+' | grep -E "$pat" | head -1)
-  printf '%s\n' "$url"
-}
-install_mihomo_core() {
-  local dest="$1" url
-  url=$(get_mihomo_asset_url)
-  # get_mihomo_asset_url 通过命令替换调用，函数内变量赋值在子 shell 中不会保留；从下载 URL 反解析版本。
-  [ -z "$MIHOMO_VER" ] && MIHOMO_VER=$(echo "$url" | sed -n 's#.*/download/\([^/]*\)/.*#\1#p')
-  if [ -z "$MIHOMO_VER" ] || [ -z "$url" ]; then
-    err "无法获取 Clash Meta 内核下载地址 (GitHub 不可达或架构 $SYS_ARCH 无匹配资产)"
-    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
-    return 1
-  fi
-  info "下载 Clash Meta 内核 $MIHOMO_VER ($SYS_ARCH)..."
-  if dl_with_mirror "$url" /tmp/mihomo-core.gz; then
-    mkdir -p /etc/openclash/core
-    gzip -dc /tmp/mihomo-core.gz > "$dest" 2>/dev/null
-    rm -f /tmp/mihomo-core.gz
-    chmod +x "$dest" 2>/dev/null || { err "Clash 内核安装失败"; return 1; }
-    ncore=$("$dest" -v 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    [ -z "$ncore" ] && ncore=$("$dest" --version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    if [ -n "$ncore" ] && mihomo_version_matches "$ncore" "$MIHOMO_VER"; then
-      ok "Clash Meta 内核已安装最新版 ($(mihomo_ver_tag "$ncore"))"
-    elif [ -n "$ncore" ]; then
-      err "Clash 内核版本校验异常: 已安装 $ncore，期望 $MIHOMO_VER"
-      return 1
-    else
-      ok "Clash Meta 内核已安装 ($MIHOMO_VER，版本输出不可解析)"
-    fi
-  else
-    err "Clash Meta 内核下载失败（GitHub 通道不可达或资产无效）"
-    info "提示: 该架构 $SYS_ARCH 上游可能无预编译包，请改用 xray-core 纯内核方案/换固件"
-    return 1
-  fi
 }
 
 # 获取 OpenClash 最新版本 (GitHub API → 代理重试)
@@ -4578,7 +4782,8 @@ install_openclash_immortal_fallback() {
   [ "$PKG_MGR" = "opkg" ] && [ "$IW_OK" = "1" ] || return 1
   rollback_openclash_feeds() {
     if [ "$feed_existed" = "1" ] && [ -f "$feed_bak" ]; then
-      cat "$feed_bak" > /etc/opkg/customfeeds.conf
+      po_write_conf --allow-empty /etc/opkg/customfeeds.conf cat "$feed_bak" \
+        || warn "恢复 customfeeds 失败，备份仍在 $feed_bak"
     else
       rm -f /etc/opkg/customfeeds.conf
     fi
@@ -4658,7 +4863,9 @@ ensure_istore_runtime_deps() {
   : > "$log"
   if [ "$PKG_MGR" = "apk" ]; then
     clean_apk_broken_installed
-    apk add --upgrade --latest --allow-untrusted $need > "$log" 2>&1
+    # world 里残留的坏约束会让 apk 报 unable to select packages；
+    # 只在这一次调用内临时放宽，结束后立即按快照恢复，不向 /bin/is-opkg 注入任何东西。
+    with_apk_world_relaxed apk add --upgrade --latest --allow-untrusted $need > "$log" 2>&1
     rc=$?
   else
     opkg install $need --force-downgrade --force-overwrite > "$log" 2>&1
@@ -4676,29 +4883,62 @@ ensure_istore_runtime_deps() {
   return $rc
 }
 patch_istore_is_opkg_world_cleanup() {
-  # iStore 的 /bin/is-opkg 在安装商店插件时会直接调用 apk；如果 /etc/apk/world 残留 naiveprox4/naiveproxy 等坏约束，
-  # 商店内安装会报 unable to select packages。给 is-opkg 注入一次轻量 world 清理，避免用户手动编辑 world。
+  # 历史实现会永久改写 /bin/is-opkg，注入 awk 从 /etc/apk/world 删除 sing-box 等约束。
+  # 这等于给系统埋雷：装完 PassWall 再用 iStore 装插件时，PassWall 的内核会被当孤儿移除。
+  # 现在只做两件事：撤销历史注入 + 记录安装前的 world 快照（供 restore_apk_world_guard 比对）。
   [ "$PKG_MGR" = "apk" ] || return 0
-  [ -s /bin/is-opkg ] || return 0
-  if grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null; then
-    grep -q "naiveprox" /bin/is-opkg 2>/dev/null && grep -q "libatomic" /bin/is-opkg 2>/dev/null && return 0
-    cp /tmp/is-opkg.po-bak /bin/is-opkg 2>/dev/null || true
+  if [ -s /bin/is-opkg ] && grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null; then
+    if [ -s /tmp/is-opkg.po-bak ]; then
+      cp /tmp/is-opkg.po-bak /bin/is-opkg 2>/dev/null && chmod 755 /bin/is-opkg 2>/dev/null \
+        && info "已撤销历史版本对 /bin/is-opkg 的注入（从 /tmp 备份恢复）"
+      rm -f /tmp/is-opkg.po-bak 2>/dev/null || true
+    else
+      warn "检测到 /bin/is-opkg 被历史版本注入，但 /tmp 备份已丢失；请重装 iStore 以恢复原始脚本"
+    fi
   fi
-  cp /bin/is-opkg /tmp/is-opkg.po-bak 2>/dev/null || true
-  awk '
-    NR==2 {
-      print "PO_CLEAN_APK_WORLD=1"
-      print "if [ -f /etc/apk/world ]; then"
-      print "  awk '\''$0 ~ /^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/ {next} $0 ~ /^naiveprox/ {next} $0 ~ /^libatomic/ {next} {print}'\'' /etc/apk/world > /tmp/apk.world.istore-clean 2>/dev/null && cat /tmp/apk.world.istore-clean > /etc/apk/world"
-      print "  rm -f /tmp/apk.world.istore-clean 2>/dev/null || true"
-      print "fi"
-    }
-    {print}
-  ' /bin/is-opkg > /tmp/is-opkg.po-new 2>/dev/null && cat /tmp/is-opkg.po-new > /bin/is-opkg
-  rm -f /tmp/is-opkg.po-new 2>/dev/null || true
-  chmod +x /bin/is-opkg 2>/dev/null || true
-  grep -q "PO_CLEAN_APK_WORLD" /bin/is-opkg 2>/dev/null && ok "iStore is-opkg 已注入 APK world 清理" || info "iStore is-opkg world 清理注入失败，继续"
+  [ -f /etc/apk/world.po-guard ] || cp -p /etc/apk/world /etc/apk/world.po-guard 2>/dev/null || true
+  return 0
 }
+
+# 临时放宽 world 约束执行命令，退出时按快照恢复被删行（不在系统里留任何注入）。
+with_apk_world_relaxed() {
+  local backup="/etc/apk/world.po-tmp.$$" rc=0
+  cp -p /etc/apk/world "$backup" 2>/dev/null || {
+    warn "无法备份 /etc/apk/world，跳过临时放宽，直接执行"
+    "$@"
+    return $?
+  }
+  if ! po_write_conf --allow-empty /etc/apk/world awk '!/^(dns2tcp|lua-neturl|luci-app-ssr-plus|mosdns|naiveprox4|naiveproxy|libatomic1|nping|sing-box)([<>=~].*)?$/' "$backup"; then
+    rm -f "$backup"
+    return 1
+  fi
+  "$@" || rc=$?
+  cp -p "$backup" /etc/apk/world 2>/dev/null || err "world 恢复失败，备份在 $backup"
+  [ "$rc" = "0" ] && rm -f "$backup"
+  return "$rc"
+}
+
+# 安装后校验：PassWall 相关包不得从 world 消失。
+restore_apk_world_guard() {
+  local snap=/etc/apk/world.po-guard line missing=""
+  [ -s "$snap" ] || return 0
+  # 以快照为准逐行比对，不要硬编码包名：luci-app-passwall2/ssr-plus 可能本来就没装，
+  # 硬编码会让守卫每次都误报"丢失"。
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    grep -qxF "$line" /etc/apk/world 2>/dev/null || missing="$missing $line"
+  done < "$snap"
+  # shellcheck disable=SC2086
+  [ -z "$missing" ] && return 0
+  warn "检测到 APK world 丢失:$missing，正在按安装前快照补回"
+  cp -p /etc/apk/world /etc/apk/world.po-lost 2>/dev/null || true
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    grep -qxF "$line" /etc/apk/world 2>/dev/null || echo "$line" >> /etc/apk/world
+  done < "$snap"
+  return 0
+}
+
 fetch_istore_ipk() {
   local pkg="$1" out="$2" base idx fn u
   for base in "https://istore.istoreos.com/repo/all/store" "https://repo.istoreos.com/repo/all/store"; do
@@ -4710,36 +4950,21 @@ fetch_istore_ipk() {
     ')
     [ -n "$fn" ] || continue
     u="$base/$fn"
-    curl -fL --progress-bar --max-time 90 -o "$out" "$u" 2>/dev/null || curl -fsL --max-time 90 -o "$out" "$u" 2>/dev/null || { rm -f "$out"; continue; }
-    [ -s "$out" ] || continue
-    # iStore repo 的 .ipk 实际是 gzip tar，含 data.tar.gz/control.tar.gz。
-    tar -tzf "$out" 2>/dev/null | grep -q '^\./data\.tar\.gz$' && return 0
+    # 统一走 dl_verified：超时/候选重试/魔数校验与其他下载点一致
+    if dl_verified "$u" "$out" ipk; then
+      # iStore repo 的 .ipk 实际是 gzip tar，含 data.tar.gz/control.tar.gz。
+      tar -tzf "$out" 2>/dev/null | grep -q '^\./data\.tar\.gz$' && return 0
+    fi
     rm -f "$out"
   done
   return 1
-}
-validate_tar_paths() {
-  # 归档只能包含相对路径；拒绝绝对路径和任意父目录跳转。
-  local archive="$1" member members
-  members=$(tar -tzf "$archive" 2>/dev/null) || return 1
-  while IFS= read -r member; do
-    case "$member" in
-      /*|..|../*|*/../*|*/..)
-        err "拒绝不安全归档路径: $member"
-        return 1
-        ;;
-    esac
-  done <<EOF
-$members
-EOF
-  return 0
 }
 install_istore_ipk_manual() {
   # 官方 istore-reinstall.run 在 APK 固件上可能被 world 约束卡住，报 unable to select packages。
   # 兜底直接解包 iStore 官方 all/store IPK：这些包都是 all 架构，适合 x86_64/arm64。
   local pkg ipk work rc=0
   info "官方脚本失败，回退直接解包 iStore 官方 IPK..."
-  work="/tmp/istore-ipk"
+  work=$(po_tmpdir 2>/dev/null) || work="/tmp/istore-ipk.$$"
   rm -rf "$work"
   mkdir -p "$work" || return 1
   for pkg in taskd luci-lib-xterm luci-lib-taskd luci-app-store; do
@@ -4751,21 +4976,18 @@ install_istore_ipk_manual() {
       return 1
     fi
     mkdir -p "$work/$pkg"
-    tar -xzf "$ipk" -C "$work/$pkg" >/tmp/istore_extract.log 2>&1 || rc=1
+    po_safe_extract "$ipk" "$work/$pkg" >/tmp/istore_extract.log 2>&1 || rc=1
     if [ "$rc" != "0" ] || [ ! -s "$work/$pkg/data.tar.gz" ]; then
       err "iStore 组件解包失败: $pkg"
       grep -E "ERROR|failed|invalid|not found|No such" /tmp/istore_extract.log 2>/dev/null || true
       rm -rf "$work" /tmp/istore_extract.log
       return 1
     fi
-    if ! validate_tar_paths "$work/$pkg/data.tar.gz"; then
-      err "iStore 组件归档路径校验失败: $pkg"
-      rm -rf "$work" /tmp/istore_extract.log
-      return 1
-    fi
     rm -rf "$work/$pkg/data"
     mkdir -p "$work/$pkg/data" || return 1
-    tar -xzf "$work/$pkg/data.tar.gz" -C "$work/$pkg/data" >>/tmp/istore_extract.log 2>&1 || rc=1
+    if ! po_safe_extract "$work/$pkg/data.tar.gz" "$work/$pkg/data"; then
+      rc=1
+    fi
     if [ "$rc" != "0" ]; then
       err "iStore 组件解包失败: $pkg"
       grep -E "ERROR|failed|invalid|not found|No such|Permission" /tmp/istore_extract.log 2>/dev/null || true
@@ -4789,6 +5011,7 @@ install_istore_ipk_manual() {
   /etc/init.d/istore enable >/dev/null 2>&1 || true
   /etc/init.d/istore start >/dev/null 2>&1 || true
   clean_luci_cache
+  restore_apk_world_guard
   if istore_files_installed; then
     ok "iStore 商店安装完成 ✓ (IPK 解包兜底)"
     rm -rf "$work" /tmp/istore_extract.log /tmp/istore_uci.log
@@ -4822,29 +5045,49 @@ install_istore() {
   if [ "$PKG_MGR" = "apk" ]; then
     info "检测到 APK 固件，跳过官方 repo-apk 安装路径，直接使用官方 IPK 解包兜底"
     install_istore_ipk_manual
-    return $?
+    local apk_rc=$?
+    restore_apk_world_guard
+    return $apk_rc
   fi
-  local run="/tmp/istore-reinstall.run" url u
+  local run url u
+  run=$(po_tmp 2>/dev/null) || run="/tmp/istore-reinstall.run.$$"
   url="https://github.com/linkease/openwrt-app-actions/raw/main/applications/luci-app-systools/root/usr/share/systools/istore-reinstall.run"
   info "下载 iStore 官方安装脚本..."
   rm -f "$run"
   for u in $(gh_candidates "$url"); do
-    curl -fsL --max-time 60 -o "$run" "$u" 2>/dev/null || { rm -f "$run"; continue; }
+    curl -fsSL --max-time 60 -o "$run" "$u" 2>/dev/null || { rm -f "$run"; continue; }
+    # 执行前必须满足：是 https 下载、有 shebang、语法可解析、含关键行，避免"3 个 grep 就 root 执行"。
+    case "$u" in https://*) ;; *) warn "iStore 脚本候选不是 https，已丢弃: $u"; rm -f "$run"; continue ;; esac
+    head -1 "$run" 2>/dev/null | grep -qE '^#!' || { warn "iStore 脚本缺少 shebang，已丢弃: $u"; rm -f "$run"; continue; }
+    sh -n "$run" 2>/dev/null || { warn "iStore 脚本语法检查未通过，已丢弃: $u"; rm -f "$run"; continue; }
     grep -q "ISTORE_REPO=https://istore.istoreos.com/repo/all/store" "$run" 2>/dev/null && \
       grep -q "luci-app-store" "$run" 2>/dev/null && \
       grep -q "/tmp/is-opkg install" "$run" 2>/dev/null && break
     rm -f "$run"
   done
   if [ -s "$run" ]; then
+    local run_sha=""
+    run_sha=$(sha256sum "$run" 2>/dev/null | awk '{print $1}')
+    if [ -n "$PO_ISTORE_RUN_SHA256" ] && [ "$run_sha" != "$PO_ISTORE_RUN_SHA256" ]; then
+      err "iStore 官方脚本 sha256 与 PO_ISTORE_RUN_SHA256 不符（实际 ${run_sha:-无法计算}），已拒绝执行"
+      rm -f "$run"
+    fi
+  fi
+  if [ -s "$run" ]; then
+    info "iStore 官方脚本 sha256: ${run_sha:-无法计算}（可用 PO_ISTORE_RUN_SHA256 固定）"
     chmod 755 "$run"
     info "执行 iStore 官方安装脚本..."
     "$run" > /tmp/istore_install.log 2>&1
     local rc=$?
+    restore_apk_world_guard
     if [ "$rc" = "0" ] && { check_installed "luci-app-store" || istore_files_installed; }; then
       grep -E "ERROR|Failed|failed|not found|No such|unable|cannot" /tmp/istore_install.log 2>/dev/null || true
       ok "iStore 商店安装完成 ✓"
       rm -f "$run" /tmp/istore_install.log
       return 0
+    fi
+    if [ "$rc" = "0" ]; then
+      err "iStore 官方安装脚本返回 0，但未检测到 luci-app-store（状态库与实际文件不一致）"
     fi
     grep -E "ERROR|Failed|failed|not found|No such|unable|cannot|curl|wget|opkg|apk" /tmp/istore_install.log 2>/dev/null || true
   else
@@ -5270,7 +5513,7 @@ if command -v luci-reload >/dev/null 2>&1; then
 fi
 
 #==============================================
-# 9. 结果汇总
+# 10. 结果汇总
 #==============================================
 echo ""
 echo "============================================="
