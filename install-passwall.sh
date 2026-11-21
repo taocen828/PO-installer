@@ -2,17 +2,12 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 运行时生成（见下方 VERSION_SEQ / VERSION_DATE），本行不需要手工维护
+# VERSION: 20261121.2
 #==============================================
-# 版本号规则：YYYYMMDD.N；N 是“当天”的发布序号，每天从 1 重新开始，不能跨天累计。
-# 每次修改脚本并发布时，递增 VERSION_SEQ（同一天多次发布）即可，上面注释不再写死日期。
-VERSION_SEQ="2"
-VERSION_DATE=$(date +%Y%m%d 2>/dev/null)
-case "$VERSION_DATE" in
-  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-  *) printf '[✗] 无法获取系统日期（date 命令异常），已中止\n' >&2; exit 1 ;;
-esac
-VERSION=$(printf '%s.%s' "$VERSION_DATE" "$VERSION_SEQ")
+# 版本号规则：YYYYMMDD.N —— N 是“当天”的发布序号：当天第一次发布为 1，之后每次发布 +1。
+# 跨天必须回到 1，不能累计。因此日期取发布当天并写死在这里，不随运行日期漂移：
+# 否则一个旧脚本隔天再跑会显示成次日的 .2，与“当日更新数”不符。
+VERSION="20261121.2"
 # 不用 echo -e / \e：busybox ash 与 dash 的 echo 不解析 \e，颜色会原样打印出来。
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
 BLUE=$(printf '\033[34m'); NC=$(printf '\033[0m')
