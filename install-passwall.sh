@@ -2,12 +2,12 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261122.2
+# VERSION: 20261122.3
 #==============================================
 # 版本号规则：YYYYMMDD.N —— N 是“当天”的发布序号：当天第一次发布为 1，之后每次发布 +1。
 # 跨天必须回到 1，不能累计。因此日期取发布当天并写死在这里，不随运行日期漂移：
 # 否则一个旧脚本隔天再跑会显示成次日的 .2，与“当日更新数”不符。
-VERSION="20261122.2"
+VERSION="20261122.3"
 # 不用 echo -e / \e：busybox ash 与 dash 的 echo 不解析 \e，颜色会原样打印出来。
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
 BLUE=$(printf '\033[34m'); NC=$(printf '\033[0m')
@@ -5444,16 +5444,40 @@ po_ensure_singbox_kmod() {
   fi
   url="$base/$dir/"
   info "sing-box 需要 kmod-netlink-diag，临时借用官方内核模块源: $url"
+  # 2a) 先直接取 kmod 包文件再本地安装：不依赖该仓库的索引是否被 apk 接受，
+  #     与 SourceForge 插件包走同一条「下载 → apk add --allow-untrusted」路径。
+  local apkname apkfile errmsg
+  apkname=$(curl -fsSL --connect-timeout 10 --max-time 30 "$base/$dir/" 2>/dev/null \
+        | tr '<>' '\n\n' | sed -n "s#^a href=\"\(kmod-netlink-diag-$kver-[^\"]*\.apk\)\".*#\1#p" | head -1)
+  if [ -n "$apkname" ]; then
+    # 保留原始文件名（apk 对非 .apk 后缀的本地包可能拒绝）
+    apkfile="${PO_WORKDIR:-/tmp}/$apkname"
+    [ -d "${PO_WORKDIR:-}" ] || apkfile="/tmp/po-$apkname"
+    if curl -fsSL --connect-timeout 10 --max-time 120 -o "$apkfile" "$base/$dir/$apkname" 2>/dev/null && [ -s "$apkfile" ]; then
+      errmsg=$(apk add --allow-untrusted "$apkfile" 2>&1) || true
+      if apk info -e kmod-netlink-diag >/dev/null 2>&1; then
+        ok "已安装 kmod-netlink-diag（直接下载 $apkname）"
+        rm -f "$apkfile"
+        return 0
+      fi
+      warn "直接安装 $apkname 失败: $(printf '%s' "$errmsg" | tr '\n' ' ' | cut -c1-140)"
+    else
+      warn "下载 $base/$dir/$apkname 失败"
+    fi
+    rm -f "$apkfile"
+  fi
+  # 2b) 再把该仓库临时喂给 apk 索引（部分固件只认索引安装）
+  info "尝试把官方内核模块仓库临时加入 apk 索引: $url"
   apk update --repository "$url" >/dev/null 2>&1 || true
   if ! apk add --repository "$url" kmod-netlink-diag >/dev/null 2>&1; then
-    # 少数固件没有 ca-bundle 或索引未签名，退一步用 --allow-untrusted 再试一次。
-    apk add --allow-untrusted --repository "$url" kmod-netlink-diag >/dev/null 2>&1 || true
+    errmsg=$(apk add --allow-untrusted --repository "$url" kmod-netlink-diag 2>&1) || true
   fi
   if apk info -e kmod-netlink-diag >/dev/null 2>&1; then
     ok "已从官方内核模块源安装 kmod-netlink-diag"
     return 0
   fi
   warn "安装 kmod-netlink-diag 失败（源不可达、缺 ca-bundle，或与当前内核 $kver 不匹配）"
+  [ -n "${errmsg:-}" ] && info "  └ apk 报错: $(printf '%s' "$errmsg" | tr '\n' ' ' | cut -c1-140)"
   return 1
 }
 opt_pkginstall() {
