@@ -2,12 +2,12 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261122.1
+# VERSION: 20261122.2
 #==============================================
 # 版本号规则：YYYYMMDD.N —— N 是“当天”的发布序号：当天第一次发布为 1，之后每次发布 +1。
 # 跨天必须回到 1，不能累计。因此日期取发布当天并写死在这里，不随运行日期漂移：
 # 否则一个旧脚本隔天再跑会显示成次日的 .2，与“当日更新数”不符。
-VERSION="20261122.1"
+VERSION="20261122.2"
 # 不用 echo -e / \e：busybox ash 与 dash 的 echo 不解析 \e，颜色会原样打印出来。
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
 BLUE=$(printf '\033[34m'); NC=$(printf '\033[0m')
@@ -5420,26 +5420,40 @@ po_ensure_singbox_kmod() {
   rel="$OW_VER"
   target="$DISTRIB_TARGET"
   kver=$(uname -r 2>/dev/null)
+  # 更新模式下 OW_VER/MIR_USE 是空的（没做镜像探测），必须直接从系统信息兜底，
+  # 否则这一步永远进不去，sing-box 永远装不上。
+  if [ -r /etc/openwrt_release ]; then
+    [ -n "$rel" ] || rel=$(sed -n "s/^DISTRIB_RELEASE=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}.*/\1/p" /etc/openwrt_release | head -1)
+    [ -n "$target" ] || target=$(sed -n "s/^DISTRIB_TARGET=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}.*/\1/p" /etc/openwrt_release | head -1)
+    [ -n "$kver" ] || kver=$(sed -n "s/^DISTRIB_KERNEL=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}.*/\1/p" /etc/openwrt_release | head -1)
+  fi
   mir="${MIR_USE:-https://downloads.openwrt.org}"
   if [ -z "$rel" ] || [ -z "$target" ] || [ -z "$kver" ]; then
-    warn "无法确定系统版本/目标/内核版本，跳过内核模块源探测"
+    warn "无法确定系统版本/目标/内核版本（rel=${rel:-空} target=${target:-空} kver=${kver:-空}），跳过内核模块源探测"
     return 1
   fi
-  base="$mir/releases/$rel/targets/$target/kmods"
-  dir=$(curl -fsSL --connect-timeout 10 --max-time 30 "$base/" 2>/dev/null \
-        | tr '<>' '\n\n' | sed -n "s#^a href=\"\($kver-[^\"/]*\)/\".*#\1#p" | head -1)
+  dir=""
+  for base in "$mir/releases/$rel/targets/$target/kmods" "$mir/snapshots/targets/$target/kmods"; do
+    dir=$(curl -fsSL --connect-timeout 10 --max-time 30 "$base/" 2>/dev/null \
+          | tr '<>' '\n\n' | sed -n "s#^a href=\"\($kver-[^\"/]*\)/\".*#\1#p" | head -1)
+    [ -n "$dir" ] && break
+  done
   if [ -z "$dir" ]; then
-    warn "未在 $base 找到匹配内核 $kver 的模块目录"
+    warn "未在 $mir 找到匹配内核 $kver 的模块目录（target=$target）"
     return 1
   fi
   url="$base/$dir/"
   info "sing-box 需要 kmod-netlink-diag，临时借用官方内核模块源: $url"
   apk update --repository "$url" >/dev/null 2>&1 || true
-  if apk add --repository "$url" kmod-netlink-diag >/dev/null 2>&1 && apk info -e kmod-netlink-diag >/dev/null 2>&1; then
+  if ! apk add --repository "$url" kmod-netlink-diag >/dev/null 2>&1; then
+    # 少数固件没有 ca-bundle 或索引未签名，退一步用 --allow-untrusted 再试一次。
+    apk add --allow-untrusted --repository "$url" kmod-netlink-diag >/dev/null 2>&1 || true
+  fi
+  if apk info -e kmod-netlink-diag >/dev/null 2>&1; then
     ok "已从官方内核模块源安装 kmod-netlink-diag"
     return 0
   fi
-  warn "安装 kmod-netlink-diag 失败（源不可达或与当前内核不匹配）"
+  warn "安装 kmod-netlink-diag 失败（源不可达、缺 ca-bundle，或与当前内核 $kver 不匹配）"
   return 1
 }
 opt_pkginstall() {
