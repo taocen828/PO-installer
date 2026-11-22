@@ -1,0 +1,5 @@
+# AgentTeams 运行时状态（含成员会话、任务账本），不入库
+.agent-teams/
+
+# 审查用的原始脚本副本（对应提交 23e27e2，git 历史里已有，不重复存）
+.review/baseline/
