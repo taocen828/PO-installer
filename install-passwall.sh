@@ -2,12 +2,12 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261121.2
+# VERSION: 20261122.1
 #==============================================
 # 版本号规则：YYYYMMDD.N —— N 是“当天”的发布序号：当天第一次发布为 1，之后每次发布 +1。
 # 跨天必须回到 1，不能累计。因此日期取发布当天并写死在这里，不随运行日期漂移：
 # 否则一个旧脚本隔天再跑会显示成次日的 .2，与“当日更新数”不符。
-VERSION="20261121.2"
+VERSION="20261122.1"
 # 不用 echo -e / \e：busybox ash 与 dash 的 echo 不解析 \e，颜色会原样打印出来。
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
 BLUE=$(printf '\033[34m'); NC=$(printf '\033[0m')
@@ -105,7 +105,24 @@ check_url() {
 # GitHub 下载候选：仅使用官方地址；下载工具会自动继承环境代理变量。
 gh_candidates() {
   local url="$1"
-  printf '%s\n' "$url"
+  # raw.githubusercontent / github.com 在国内常被重置(TLS RST)，直连必然失败。
+  # 这里按「直连 → 国内镜像」顺序给出候选，调用方逐个尝试，第一个成功的胜出。
+  # 可用 PO_GH_PREFIX 指定自己的镜像前缀（例：PO_GH_PREFIX=https://my.proxy/）。
+  if [ -n "${PO_GH_PREFIX:-}" ]; then
+    printf '%s\n' "${PO_GH_PREFIX%/}/$url"
+  fi
+  case "$url" in
+    https://raw.githubusercontent.com/*|https://github.com/*)
+      # 镜像优先：直连在这些域名上大概率被 RST，放最后只作兜底，避免每次都等超时。
+      printf '%s\n' "https://ghfast.top/$url"
+      printf '%s\n' "https://gh-proxy.com/$url"
+      printf '%s\n' "https://ghproxy.net/$url"
+      printf '%s\n' "$url"
+      ;;
+    *)
+      printf '%s\n' "$url"
+      ;;
+  esac
 }
 
 # 修复“电脑可上网，但 SSH 到路由器后路由器自身 ping 不通”的常见问题。
@@ -5258,8 +5275,14 @@ if [ "$INSTALL_OC" = "1" ]; then
     info "OpenClash 官方内核更新: ${INSTALLED_OPENCLASH_CORE:-未安装} → $OPENCLASH_CORE_LATEST"
     install_openclash_core "$CORE_FILE" "$OPENCLASH_CORE_MODEL" || OPENCLASH_CORE_OK=0
   else
-    err "无法获取 OpenClash 官方内核版本，保留当前内核"
-    OPENCLASH_CORE_OK=0
+    # 拿不到官方版本号时：本地已有可用内核就算通过（主程序照常可用），
+    # 只有连内核文件都没有才算失败。
+    if [ -n "$INSTALLED_OPENCLASH_CORE" ]; then
+      warn "无法获取 OpenClash 官方内核版本（GitHub 不可达），保留现有内核 $INSTALLED_OPENCLASH_CORE"
+    else
+      err "无法获取 OpenClash 官方内核版本，且本地没有内核文件（$CORE_FILE）"
+      OPENCLASH_CORE_OK=0
+    fi
   fi
 fi
 
@@ -5380,6 +5403,45 @@ opt_version() {
     *) "$path" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?' | head -1 ;;
   esac
 }
+# sing-box 1.14.4+ 起依赖 kmod-netlink-diag，而插件源（SourceForge/第三方）只发
+# 用户态包、不含内核模块；官方 target kmods 仓库才有对应内核版本的模块。
+# 这里只在缺依赖时临时借用官方 kmods 仓库安装该模块，用 apk --repository 传入，
+# 不改写 /etc/apk/repositories，也不混装其它 kmod。
+po_ensure_singbox_kmod() {
+  [ "$PKG_MGR" = "apk" ] || return 0
+  apk info -e kmod-netlink-diag >/dev/null 2>&1 && return 0
+  # 1) 已配置的源里就有（系统源正常时走这条）
+  if apk add kmod-netlink-diag >/dev/null 2>&1 && apk info -e kmod-netlink-diag >/dev/null 2>&1; then
+    ok "已安装 kmod-netlink-diag（现有软件源）"
+    return 0
+  fi
+  # 2) 借用官方 target kmods 仓库；目录名形如 6.12.87-1-<hash>，只能从索引页取。
+  local rel target kver mir base dir url
+  rel="$OW_VER"
+  target="$DISTRIB_TARGET"
+  kver=$(uname -r 2>/dev/null)
+  mir="${MIR_USE:-https://downloads.openwrt.org}"
+  if [ -z "$rel" ] || [ -z "$target" ] || [ -z "$kver" ]; then
+    warn "无法确定系统版本/目标/内核版本，跳过内核模块源探测"
+    return 1
+  fi
+  base="$mir/releases/$rel/targets/$target/kmods"
+  dir=$(curl -fsSL --connect-timeout 10 --max-time 30 "$base/" 2>/dev/null \
+        | tr '<>' '\n\n' | sed -n "s#^a href=\"\($kver-[^\"/]*\)/\".*#\1#p" | head -1)
+  if [ -z "$dir" ]; then
+    warn "未在 $base 找到匹配内核 $kver 的模块目录"
+    return 1
+  fi
+  url="$base/$dir/"
+  info "sing-box 需要 kmod-netlink-diag，临时借用官方内核模块源: $url"
+  apk update --repository "$url" >/dev/null 2>&1 || true
+  if apk add --repository "$url" kmod-netlink-diag >/dev/null 2>&1 && apk info -e kmod-netlink-diag >/dev/null 2>&1; then
+    ok "已从官方内核模块源安装 kmod-netlink-diag"
+    return 0
+  fi
+  warn "安装 kmod-netlink-diag 失败（源不可达或与当前内核不匹配）"
+  return 1
+}
 opt_pkginstall() {
   local pkg="$1" desc="$2"
   if opt_installed "$pkg" && ! check_installed "$pkg"; then
@@ -5398,6 +5460,13 @@ opt_pkginstall() {
         return 0
       fi
       if [ "$pkg" = "sing-box" ] && [ "$PKG_MGR" = "apk" ]; then
+        if po_ensure_singbox_kmod; then
+          pkginstall "$pkg" "$desc"
+          rc=$?
+          if [ "$rc" = "0" ] || apk_optional_binary_matches "$pkg" "$repo_ver"; then
+            return 0
+          fi
+        fi
         err "$desc 安装失败：当前固件/软件源不提供匹配的 kmod-netlink-diag 依赖，已跳过，不回退混装其它 kmod"
       fi
       return "$rc"
@@ -5409,7 +5478,11 @@ opt_pkginstall() {
   pkginstall "$pkg" "$desc"
   local rc=$?
   if [ "$rc" != "0" ] && [ "$pkg" = "sing-box" ] && [ "$PKG_MGR" = "apk" ]; then
-    err "$desc 安装失败：当前固件/软件源不提供匹配的 kmod-netlink-diag 依赖，已跳过，不回退混装其它 kmod"
+    if po_ensure_singbox_kmod; then
+      pkginstall "$pkg" "$desc"
+      rc=$?
+    fi
+    [ "$rc" = "0" ] || err "$desc 安装失败：当前固件/软件源不提供匹配的 kmod-netlink-diag 依赖，已跳过，不回退混装其它 kmod"
   fi
   return "$rc"
 }
@@ -5542,7 +5615,13 @@ if [ "$INSTALL_OC" = "1" ]; then
   if [ "$OPENCLASH_INSTALL_OK" = "1" ] && [ "$OPENCLASH_CORE_OK" = "1" ] && [ "${OPENCLASH_DEPS_OK:-1}" = "1" ]; then
     ok "OpenClash 主程序与内核验证通过"
   else
-    err "OpenClash 未完成：依赖状态=${OPENCLASH_DEPS_OK:-未知}，主程序状态=$OPENCLASH_INSTALL_OK，内核状态=$OPENCLASH_CORE_OK"
+    # 0/1 直接打印会让人误读成“都失败了”，这里换成可读状态。
+    OC_MARK_DEPS="✗"; OC_MARK_MAIN="✗"; OC_MARK_CORE="✗"
+    [ "${OPENCLASH_DEPS_OK:-1}" = "1" ] && OC_MARK_DEPS="✓"
+    [ "$OPENCLASH_INSTALL_OK" = "1" ] && OC_MARK_MAIN="✓"
+    [ "$OPENCLASH_CORE_OK" = "1" ] && OC_MARK_CORE="✓"
+    err "OpenClash 未全部完成：依赖 $OC_MARK_DEPS / 主程序 $OC_MARK_MAIN / 内核 $OC_MARK_CORE"
+    [ "$OC_MARK_CORE" = "✗" ] && info "  └ 主程序已装好，仅内核未更新；可重跑本脚本，或在 OpenClash「全局设置 → 版本更新」手动更新内核"
     RESULT_RC=1
   fi
 fi
@@ -5573,11 +5652,12 @@ elif [ "$INSTALL_PW2" = "1" ]; then
   ok "PassWall2 主程序验证通过（SourceForge 优先/官方 Release 兜底）"
 fi
 
-# 安装完成后删除临时脚本并退出，不返回主菜单。
+# 安装完成后不删除脚本本体：升级/换插件时常需重复运行，
+# 删掉会让下一次 `sh /tmp/install-passwall.sh` 直接报 can't open。
 THIS_SCRIPT=$(readlink -f "$0" 2>/dev/null || echo "$0")
 case "$THIS_SCRIPT" in
   /tmp/install-passwall.sh|/tmp/install.sh|/tmp/*.sh)
-    rm -f "$THIS_SCRIPT" 2>/dev/null || true
+    info "脚本保留在 $THIS_SCRIPT（可重复运行；清理：rm -f $THIS_SCRIPT）"
     ;;
 esac
 exit "$RESULT_RC"
