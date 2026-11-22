@@ -2,12 +2,12 @@
 #==============================================
 # OpenWrt 工具箱
 # 支持 OPKG (OpenWrt ≤24.10) 和 APK (OpenWrt ≥25.12)
-# VERSION: 20261122.3
+# VERSION: 20261122.4
 #==============================================
 # 版本号规则：YYYYMMDD.N —— N 是“当天”的发布序号：当天第一次发布为 1，之后每次发布 +1。
 # 跨天必须回到 1，不能累计。因此日期取发布当天并写死在这里，不随运行日期漂移：
 # 否则一个旧脚本隔天再跑会显示成次日的 .2，与“当日更新数”不符。
-VERSION="20261122.3"
+VERSION="20261122.4"
 # 不用 echo -e / \e：busybox ash 与 dash 的 echo 不解析 \e，颜色会原样打印出来。
 RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m')
 BLUE=$(printf '\033[34m'); NC=$(printf '\033[0m')
@@ -3671,8 +3671,10 @@ verify_package_installed() {
   esac
   # 清单拿不到（固件差异/unzip 损坏）时不做判断，避免把成功安装误判为失败；
   # 只要清单里有内容但没有任何系统路径，才判定为"装了但没落盘"。
+  # 注意路径形态：opkg files 输出 /usr/bin/x（带前导斜杠），
+  # apk info -L 输出 usr/bin/x（不带），两种都要认，否则 apk 系统会全判失败。
   [ -n "$files" ] || return 0
-  printf '%s\n' "$files" | grep -qE '(^|[[:space:]])/(usr|etc|www|opt)/' && return 0
+  printf '%s\n' "$files" | grep -qE '(^|[[:space:]])/?(usr|etc|www|opt)/' && return 0
   return 1
 }
 
